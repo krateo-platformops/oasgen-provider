@@ -4,7 +4,7 @@ title: oasgen-provider — configuration
 description: The whole config surface — both charts' values, the provider's env/flags, the hand-maintained RDC image pin, and the env contract of every generated RDC instance.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, helm, values, env]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-08-10T00:00:00Z
 ---
 
 # Configuration
@@ -63,7 +63,7 @@ parameterize every instance:
 | Key | Default | Effect |
 |---|---|---|
 | `rdc.image.registry` / `rdc.image.repository` | `ghcr.io` / `krateo-platformops/rest-dynamic-controller` | The RDC image. |
-| `rdc.image.tag` | `0.19.0` | **Hand-maintained joint-contract pin** — the release workflow's `APP_VERSION` substitution touches `Chart.yaml` only, never values, so this does NOT auto-track RDC releases. Must be ≥ `0.12.0` (SA-identity env contract); `0.19.0` pairs with oasgen 0.19.0's apiKey-in-header support. The values.yaml comment block records each pin's rationale. |
+| `rdc.image.tag` | `""` → the chart `appVersion` | **Derived, not pinned.** Empty means the RDC template resolves the tag from `.Chart.AppVersion` (`assets/rdc/deployment.yaml`), so RDC tracks the chart's own version line automatically. This replaced a hand-maintained pin that had to be bumped by hand every release and silently shipped a chart referencing a never-published image ([#62](https://github.com/krateo-platformops/oasgen-provider/issues/62)). It is load-bearing that oasgen-provider and rest-dynamic-controller release in **lockstep at identical versions** — they ship from one tag, so the derived tag always exists. Set an explicit value only to pin an RDC out of lockstep (it must be ≥ `0.12.0`, when the SA-identity env contract landed). |
 | `rdc.env.*` | `{}` | Extra env rendered into **every** generated RDC ConfigMap (any `REST_CONTROLLER_*` / `OTEL_*` var below). |
 | `rdc.replicaCount`, `rdc.serviceAccount.*`, `rdc.podSecurityContext`, `rdc.securityContext`, `rdc.service.port`, `rdc.resources`, `rdc.autoscaling.*`, … | chart scaffolding | Applied to every generated RDC Deployment. |
 
@@ -89,11 +89,18 @@ container args by the rendered Deployment; the rest can be set via `rdc.env.*`:
 | `REST_CONTROLLER_MIN_ERROR_RETRY_INTERVAL` (`--min-error-retry-interval`) | `1s` | Min backoff. |
 | `REST_CONTROLLER_MAX_ERROR_RETRIES` (`--max-error-retries`) | `5` | Retries before a resource is dropped. |
 | `REST_CONTROLLER_METRICS_SERVER_PORT` (`--metrics-server-port`) | unset (disabled) | Metrics server port. |
-| `REST_CONTROLLER_SERVICEACCOUNT_NAME` / `_NAMESPACE` | injected by the rendered ConfigMap | RDC's own SA identity (delegated-verb auth). |
+| `REST_CONTROLLER_SERVICEACCOUNT_NAME` / `_NAMESPACE` | injected by the rendered ConfigMap | **Required** — RDC's own SA identity, used as the RoleBinding subject for self-provisioned `secretRef` RBAC and for delegated-verb auth. Startup fails loud without it. |
 | `REST_CONTROLLER_SERVICEACCOUNT_TOKEN_PATH` (`--serviceaccount-token-path`) | in-pod default | Where the SA token is read from. |
 | `URL_SNOWPLOW` (`--snowplow-url`) / `URL_AUTHN` (`--authn-url`) | `""` | Snowplow /call and authn endpoints, needed only when `observeApiRef`/`createApiRef`/`updateApiRef`/`deleteApiRef` are used. |
-| `OTEL_ENABLED` / `OTEL_TRACING_ENABLED` (`--otel-enabled`/`--otel-tracing-enabled`) | `false` | OTLP metrics / trace export. |
+| `OTEL_ENABLED` / `OTEL_TRACING_ENABLED` (`--otel-enabled`/`--otel-tracing-enabled`) | `false` | OTLP metrics / trace export. The W3C propagator is installed **even when tracing is off**, so an inbound `traceparent` is still honored. |
+| `OTEL_SERVICE_NAME` (`--otel-service-name`) | `rest-dynamic-controller` | `service.name` on exported telemetry. |
+| `OTEL_EXPORT_INTERVAL` (`--otel-export-interval`) | `30s` | Metrics export interval. |
+| `DEPLOYMENT_NAME` (`--deployment-name`) | `""` | Stable resource identification in metrics. |
+| `SERVICE_VERSION` | `""` | Image version stamped as `service.version`. |
 | `KUBECONFIG` (`--kubeconfig`) | `""` (in-cluster) | Out-of-cluster development only. |
+
+The managed GVR is appended to `OTEL_RESOURCE_ATTRIBUTES` as `krateo.io/rest-gvr`, so
+telemetry is attributable per dynamic CR type.
 
 ## Per-resource configuration: the `*Configuration` CRD
 

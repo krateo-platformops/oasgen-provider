@@ -4,7 +4,7 @@ title: oasgen-provider — usage
 description: How to install oasgen-provider — the installer pin or direct OCI helm install — and how to consume it by authoring RestDefinitions.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, install, helm]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-08-10T00:00:00Z
 ---
 
 # Usage
@@ -38,16 +38,22 @@ Both charts are published to GHCR as OCI artifacts on every release tag:
 ```sh
 # 1. The RestDefinition CRD:
 helm install oasgen-provider-crds \
-  oci://ghcr.io/krateo-platformops/charts/oasgen-provider-crds --version 0.20.0
+  oci://ghcr.io/krateo-platformops/charts/oasgen-provider-crds --version 0.21.0
 
 # 2. The provider:
 helm install oasgen-provider \
   oci://ghcr.io/krateo-platformops/charts/oasgen-provider \
-  --version 0.20.0 --namespace krateo-system --create-namespace
+  --version 0.21.0 --namespace krateo-system --create-namespace
 ```
 
 For mirrored / air-gapped registries set `global.imageRegistry` (rewrites both the
 provider and RDC image registries — see [configuration.md](./configuration.md)).
+
+Installing the provider is the *only* install step. **rest-dynamic-controller has no chart
+of its own and is never installed by hand**: for each `RestDefinition` the provider renders
+a Deployment + per-instance ConfigMap + RBAC from `helm/oasgen-provider/assets/rdc/` and
+starts one RDC instance with `-group`/`-version`/`-resource` pinned to the generated GVR.
+Extra environment for every spawned instance goes through the chart's `rdc.env` map.
 
 ## Consuming it: author a RestDefinition
 
@@ -84,6 +90,11 @@ helm template test /tmp/oasgen-chart
 ```
 
 (`sed -i ''` is the BSD/macOS form; on GNU sed use `sed -i`.)
+
+Note the RDC image tag derives from `appVersion`, so the substitution above also renders
+`rest-dynamic-controller:0.0.0-dev` — fine for inspecting the manifests, but if you
+actually install this throwaway copy, set `rdc.image.tag` to a published version or the
+generated controllers will `ImagePullBackOff`.
 
 ## Local development loop (kind)
 

@@ -4,7 +4,7 @@ title: oasgen-provider — index
 description: The map of the oasgen-provider doc bundle — the Krateo Operator Generator that turns OAS 3.0/3.1 documents into CRDs and dynamic REST controllers via the RestDefinition CRD.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, restdefinition, openapi, generator]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-08-10T00:00:00Z
 ---
 
 # oasgen-provider
@@ -26,9 +26,10 @@ line.
 - [configuration](./configuration.md) — the whole config surface: both charts' values,
   provider env/flags, the RDC env contract.
 - [api](./api.md) — the `RestDefinition` CRD contract: the five actions, the full field
-  surface, immutability, generated resources, supported auth.
+  surface, immutability, generated resources, supported auth — plus the RDC runtime
+  contract (status, conditions, events, self-provisioned RBAC, metrics).
 - [examples](./examples.md) — the runnable examples under `examples/`.
-- [release](./release.md) — how a release ships (tag → image + charts on GHCR).
+- [release](./release.md) — how a release ships (one tag → both images + charts on GHCR).
 - [log](./log.md) — curated history.
 - [llms.txt](./llms.txt) — the version-pinned agent index of this bundle.
 

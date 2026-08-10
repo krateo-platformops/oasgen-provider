@@ -4,7 +4,7 @@ title: oasgen-provider — overview
 description: What KOG does and how it works — the generate → deploy → reconcile pipeline, the actions/verbs model, the mount-and-render RDC mechanism, and when a plugin is needed.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, architecture, restdefinition]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-08-10T00:00:00Z
 ---
 
 # Overview
@@ -101,8 +101,9 @@ the provider pod at `/tmp/assets/rdc-deployment`, `/tmp/assets/rdc-configmap` an
 whichever copy is installed **is** the controller's behaviour. This is the same
 mechanism krateo core-provider uses to spawn its CDCs. Consequences:
 
-- The RDC image every generated controller runs is pinned by `rdc.image.tag` in the
-  chart values — a hand-maintained joint-contract pin (see
+- The RDC image every generated controller runs comes from `rdc.image.tag`, which is
+  **empty by default and resolves to the chart's `appVersion`** — the two components ship
+  in lockstep from one tag, so the derived tag always exists (see
   [configuration.md](./configuration.md)).
 - RDC behaviour changes ship as chart releases, without touching this repo's Go code.
 
@@ -110,6 +111,53 @@ The provider also manages per-namespace RBAC dynamically: it tracks which Secret
 `*Configuration` CR instances reference (`status.authSecretDigest`) and maintains
 namespace-scoped Role/RoleBindings granting the RDC ServiceAccount read access to exactly
 those Secrets (`status.authSecretRBACNamespaces`).
+
+## Inside the generated controller (rest-dynamic-controller)
+
+RDC is **dynamic**: the binary compiles in no resource types. At startup it receives a
+single Group/Version/Resource (`-group`/`-version`/`-resource`) and builds a generic
+controller (`unstructured-runtime`) over that GVR, so "the controller for `Repo`" and
+"the controller for `Workflow`" are the same image with different flags.
+
+Every reconcile begins by resolving the CR's `RestDefinition`
+(`go/rest-dynamic-controller/internal/tools/definitiongetter`): definitions are listed
+cluster-wide and matched by kind + group, yielding the OAS location, the verbs, and the
+resource contract (identifiers, additionalStatusFields, compareScope). The CR's
+`spec.configurationRef` supplies per-instance configuration and credentials, which are
+read from Secrets and whitespace-trimmed.
+
+- **Observe** — `get` when the identifier is known, else `findby` (list + identifier
+  match under `identifiersMatchPolicy`, optional `continuationToken` pagination).
+  `notFoundCodes` remap status codes to absence; a `notFoundBody` jq predicate detects
+  body-signalled absence (tombstones, empty wrapper lists). The response is normalized
+  through the verb's response `fieldMapping`/`responseTransform`, projected into status,
+  then compared for drift under `compareScope`: `fullSpec` (default),
+  `identifiersAndStatus`, or `updatable` — the last compares only fields the update
+  verb's request body can actually express, since anything else would loop unfixably.
+- **Create / Update** — the request is assembled from the CR via `fieldMapping`, then a
+  whole-document `requestTransform` runs, then the call is made. Responses repopulate
+  status from scratch, stale identifiers cleared first.
+- **Delete** — same pipeline; the finalizer is **held** on transient definition-lookup
+  failures but **released** when the RestDefinition is genuinely gone or the resource was
+  never addressable (unresolved path placeholders), so a failed create cannot wedge a
+  namespace.
+
+**Async (long-running) operations** are declared per verb: Model A (`blocking`, the
+default) polls the operation inline to completion; Model B (`requeue`) records the
+operation handle on the CR, sets the `Pending` condition, and lets each Observe poll once
+until terminal.
+
+**RESTAction delegation** — `observeApiRef`/`createApiRef`/`updateApiRef`/`deleteApiRef`
+replace a verb with a snowplow-resolved `RESTAction`, invoked under the controller's own
+identity: the projected ServiceAccount token is exchanged at authn for a JWT. Delegated
+deletes are verified gone before the finalizer is released.
+
+**secretRef RBAC self-provisioning** — when a CR's `fieldMapping` resolves values from
+Secrets, RDC grants **itself** a per-CR-instance, least-privilege Role (get/list/watch on
+exactly those Secret names) bound to its own ServiceAccount, and tears it down on delete.
+This is why the SA-identity env vars are hard-required at startup. Note this is distinct
+from the *provider*-managed auth-Secret RBAC described above: that one covers credentials
+on the `*Configuration` CR, this one covers `secretRef` values in field mappings.
 
 ## When a plugin (wrapper web service) is needed
 
@@ -129,7 +177,9 @@ representational:
   plugin exposes a REST façade with its own OAS.
 
 The plugin is wired per-operation by adding a `servers` override on that operation in the
-OAS document; all other operations keep calling the real API. The step-by-step TeamRepo
+OAS document; all other operations keep calling the real API. RDC re-targets that single
+operation at the override URL (`internal/tools/client/restclient.go`, `op.Servers[0]`) —
+**only the first entry is read; multiple servers per operation are not supported.** The step-by-step TeamRepo
 walkthrough in the [USAGE_GUIDE](./USAGE_GUIDE.md) builds one.
 
 ## Place in the platform

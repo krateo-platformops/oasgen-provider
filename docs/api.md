@@ -4,7 +4,7 @@ title: oasgen-provider — api
 description: The RestDefinition CRD contract — actions, the full spec surface (mappings, transforms, async, delegated verbs), immutability, generated resources and supported authentication.
 resource: restdefinitions.ogen.krateo.io
 tags: [kog, crd, restdefinition]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-08-10T00:00:00Z
 ---
 
 # API
@@ -168,6 +168,44 @@ spec:
 `oasHash` (content hash of the resolved OAS — an OAS edit is drift even when `oasPath` is
 unchanged), `hasSecuritySchemes`, and the auth-RBAC bookkeeping fields
 (`authSecretDigest`, `authSecretRBACNamespaces`).
+
+## Runtime contract: what the RDC writes on managed CRs
+
+The sections above describe what oasgen-provider *generates*. This one describes what the
+generated controller *does* with those resources at runtime — RDC owns no CRDs of its own
+and serves no HTTP API beyond an optional metrics endpoint, so this is its whole
+outward-facing contract.
+
+- **status** — the declared `identifiers` and `additionalStatusFields`, projected from the
+  normalized API response. Cleared before repopulation on create/update, so a stale
+  identifier can never deadlock reconciliation.
+- **annotations** — an in-flight Model B (`requeue`) async operation is persisted on the
+  CR as `krateo.io/async-operation-id`, `-action` and `-params`: the handle, the
+  triggering verb, and the trigger's resolved path/query params, re-used verbatim at poll
+  time. Authentication is deliberately re-applied fresh rather than replayed. The
+  annotations are removed when the operation terminates.
+- **conditions** — a single `Ready` condition with reasons `Available`, `Creating` (also
+  used after updates), `Deleting`, `Unavailable` and the RDC-specific `Pending` (async
+  operation in flight). On drift the `Unavailable` reason is rewritten to a
+  `Resource is not up-to-date due to …` string naming the differing field and both values.
+- **events** — `ResourceCreated`, `ResourceUpdated`, `ResourceDeleted` (Normal on success,
+  Warning on failure), plus `AsyncOperationFailed` (Warning) when a Model B operation
+  reaches a terminal failure status.
+
+### Cluster side effects
+
+For each CR instance that uses `secretRef` resolvers, RDC self-provisions a
+namespace-scoped Role + RoleBinding named `<plural>-<version>-<fnv32a(ns/name)>-secrets`,
+granting itself `get/list/watch` on exactly the referenced Secret names, and deletes the
+pair when the CR is deleted.
+
+### Metrics
+
+With `REST_CONTROLLER_METRICS_SERVER_PORT` set, a Prometheus endpoint serves the
+`unstructured-runtime` reconcile metrics. With `OTEL_ENABLED`, the same telemetry is
+exported over OTLP (`provider_runtime.reconcile.*` / `controller_reconcile_*`),
+resource-tagged with `krateo.io/rest-gvr=<group>/<version>/<resource>` so it is
+attributable per dynamic CR type.
 
 ## Unsupported OAS features
 
