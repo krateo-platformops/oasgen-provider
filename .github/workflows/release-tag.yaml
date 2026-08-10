@@ -34,4 +34,4 @@ jobs:
       contents: read
       packages: write
     with:
-      modules: '[{"mod":"oasgen-provider","context":"go/oasgen-provider"}]'
+      modules: '[{"mod":"oasgen-provider","context":"go/oasgen-provider"},{"mod":"rest-dynamic-controller","context":"go/rest-dynamic-controller"}]'
