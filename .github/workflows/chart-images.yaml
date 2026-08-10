@@ -1,0 +1,59 @@
+# Assert every image the charts reference actually exists in the registry, at the versions a release
+# would publish. Kept SEPARATE from release-oci.yaml — which is byte-identical to core-provider's and
+# must stay that way — following the same precedent as core-provider-chart's cdc-template.yaml, whose
+# header says it is split out "so that shared workflow stays identical across krateo-* chart repos".
+#
+# Motivation: chart 0.20.0 shipped rdc.image.tag: 0.19.0, never published in this org, so every
+# generated controller ImagePullBackOff'd (#62). #63 removed the "forgot to bump" half by deriving the
+# tag from .Chart.AppVersion; this closes the half alignment cannot — the matching image simply not
+# existing yet.
+#
+# On a tag this runs alongside the publish rather than gating it, because gating would mean editing the
+# canonical release-oci. It still fails loudly and immediately, and a bad tag is re-cut anyway. Adding
+# the check to the shared release-oci would be strictly better and would protect every chart repo,
+# including core-provider, whose companions are on independent version lines and so cannot use
+# derivation at all — worth proposing to whoever owns the org workflow.
+name: chart-images
+
+on:
+  pull_request:
+    paths:
+      - "helm/**"
+      - hack/verify-chart-images.sh
+      - .github/workflows/chart-images.yaml
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  chart-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the script resolves APP_VERSION from tags when not given one
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      # Public GHCR images need no auth, but a private one would; logging in keeps the check honest
+      # for either.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify chart-referenced images exist
+        env:
+          # On a tag, check exactly what that release publishes. On a PR the script falls back to the
+          # latest existing tag, so it validates the pins against the current release line.
+          APP_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: ./hack/verify-chart-images.sh
