@@ -1,13 +1,14 @@
-# oasgen-provider — LLM doc index (pinned: 0.20.0)
+# oasgen-provider — LLM doc index (pinned: 0.21.0)
+# Covers BOTH components of this monorepo: oasgen-provider and rest-dynamic-controller.
 # One line per file; regenerate the pin on release.
 docs/index.md: the map of this bundle (core nine + guides + archives)
-docs/overview.md: what KOG does and how it works (pipeline, actions/verbs, mount-and-render, plugins)
+docs/overview.md: what KOG does and how it works (pipeline, actions/verbs, mount-and-render, plugins, the RDC reconcile loop)
 docs/usage.md: installer pin or direct OCI helm install; authoring RestDefinitions; local render
-docs/configuration.md: both charts' values, provider env/flags, the RDC pin and env contract
-docs/api.md: the RestDefinition CRD contract (actions, field surface, immutability, auth, generated CRDs)
+docs/configuration.md: both charts' values, provider env/flags, the RDC env contract (tag derived from appVersion)
+docs/api.md: the RestDefinition CRD contract (actions, field surface, immutability, auth, generated CRDs) + the RDC runtime contract (status, conditions, events, self-provisioned RBAC, metrics)
 docs/examples.md: examples index
-docs/release.md: how a release ships (tag -> image + both OCI charts)
-docs/log.md: curated history
+docs/release.md: how a release ships (one tag -> both images + both OCI charts, image-existence and tag-on-main gates)
+docs/log.md: curated history for both components
 docs/USAGE_GUIDE.md: step-by-step walkthroughs (GitHub Repo; TeamRepo with a plugin)
 docs/REAL_EXAMPLES.md: real-world edge-case RestDefinition manifests
 docs/restdefinition-crd-reference.md: generated field-by-field CRD reference (crdoc)
@@ -16,3 +17,4 @@ docs/development/testing.md: running the suite the way CI does
 docs/USAGE_GUIDE_PRE_0.6.0.md: ARCHIVE - usage guide for oasgen-provider <= 0.6.0, historical only
 go/rest-dynamic-controller/README.md: the RDC's own summary and env contract
 examples/github-repo/README.md: runnable example - GitHub Repo RestDefinition end-to-end
+examples/rdc-sample-resource/README.md: runnable example - full RestDefinition -> RDC -> CR chain against a local mock API, no external credentials

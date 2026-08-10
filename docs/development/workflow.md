@@ -4,7 +4,7 @@ title: oasgen-provider — local development workflow
 description: The kind dev loop, the in-repo chart and RDC templates (mount-and-render), and CRD regeneration.
 resource: github.com/krateo-platformops/oasgen-provider
 tags: [kog, development, kind]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-08-10T00:00:00Z
 ---
 
 # Local development workflow
@@ -72,6 +72,36 @@ cd go/oasgen-provider && CHART=/tmp/oasgen-chart ./scripts/reload.sh
 ```
 
 (`sed -i ''` is the BSD/macOS form; on GNU sed use `sed -i`.)
+
+## Running rest-dynamic-controller directly
+
+The other module in this monorepo is normally deployed *by* the provider, one instance per
+`RestDefinition`, and is never installed by hand. For debugging it also runs fine outside
+the cluster against a kubeconfig. From `go/rest-dynamic-controller/`:
+
+```bash
+export REST_CONTROLLER_GROUP=sample.krateo.io \
+       REST_CONTROLLER_VERSION=v1alpha1 \
+       REST_CONTROLLER_RESOURCE=samples \
+       REST_CONTROLLER_SERVICEACCOUNT_NAME=default \
+       REST_CONTROLLER_SERVICEACCOUNT_NAMESPACE=default
+go run . -kubeconfig "$HOME/.kube/config" -debug
+```
+
+The ServiceAccount name/namespace pair is **hard-required** — `main.go` exits without it,
+because that identity is the RoleBinding subject for the `secretRef` RBAC the controller
+provisions for itself.
+
+A mock CRUD API implementing `testdata/restdefinitions/cm/oas.yaml` is bundled for this
+loop, and is the same server the integration suite and
+[`examples/rdc-sample-resource`](../../examples/rdc-sample-resource/README.md) use:
+
+```bash
+go run ./internal/controllers/mockserver   # listens on :30007
+```
+
+Per-CR HTTP debugging is enabled with the `krateo.io/connector-verbose: "true"` annotation
+on a managed CR, independently of `-debug`.
 
 ## Regenerating CRDs
 

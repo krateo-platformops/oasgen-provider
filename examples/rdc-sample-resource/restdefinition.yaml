@@ -1,0 +1,33 @@
+# One RestDefinition = oasgen-provider generates the Sample + SampleConfiguration CRDs
+# and deploys one rest-dynamic-controller instance pinned to samples.sample.krateo.io.
+# Mirrors testdata/restdefinitions/sample.yaml (the integration-test definition).
+apiVersion: ogen.krateo.io/v1alpha1
+kind: RestDefinition
+metadata:
+  name: sample
+  namespace: demo-system
+spec:
+  oasPath: configmap://demo-system/sample/openapi.yaml
+  resourceGroup: sample.krateo.io
+  resource:
+    kind: Sample
+    identifiers:
+      - name
+    additionalStatusFields:
+      - id
+    verbsDescription:
+      - action: create
+        method: POST
+        path: /resource
+      - action: delete
+        method: DELETE
+        path: /resource/{id}
+      - action: get
+        method: GET
+        path: /resource/{id}
+      - action: findby
+        method: GET
+        path: /resource
+      - action: update
+        method: PUT
+        path: /resource/{id}

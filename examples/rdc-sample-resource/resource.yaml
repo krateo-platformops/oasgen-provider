@@ -1,0 +1,37 @@
+# The managed resource + its authentication, applied AFTER the RestDefinition is Ready
+# (the Sample/SampleConfiguration CRDs must exist first). Mirrors testdata/rest/.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sample-auth-sec
+  namespace: demo-system
+type: Opaque
+stringData:
+  token: test
+---
+apiVersion: sample.krateo.io/v1alpha1
+kind: SampleConfiguration
+metadata:
+  name: sample-config
+  namespace: demo-system
+spec:
+  authentication:
+    bearer:
+      tokenRef:
+        name: sample-auth-sec
+        namespace: demo-system
+        key: token
+---
+apiVersion: sample.krateo.io/v1alpha1
+kind: Sample
+metadata:
+  name: sample-1
+  namespace: demo-system
+  annotations:
+    krateo.io/connector-verbose: "true"
+spec:
+  name: sample-1
+  description: Sample resource managed by rest-dynamic-controller
+  configurationRef:
+    name: sample-config
+    namespace: demo-system

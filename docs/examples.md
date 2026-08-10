@@ -4,7 +4,7 @@ title: oasgen-provider — examples
 description: Index of the runnable examples under examples/ and where the deeper sample material lives.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, examples]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-08-10T00:00:00Z
 ---
 
 # Examples
@@ -13,6 +13,10 @@ timestamp: 2026-08-07T00:00:00Z
   repositories from an in-repo OAS document (ConfigMap-served), plus the
   `RepoConfiguration` and a `Repo` CR. Preconditions: oasgen-provider installed, a GitHub
   token.
+- [rdc-sample-resource](../examples/rdc-sample-resource/README.md) — the whole
+  `RestDefinition` → RDC → CR chain against a **mock API you can run locally**, mirroring
+  the rest-dynamic-controller integration testdata. Needs no external credentials, which
+  makes it the fastest way to watch a generated controller converge end to end.
 
 Deeper material:
 
