@@ -29,7 +29,7 @@ spec:
         {{- toYaml .Values.rdc.podSecurityContext | nindent 8 }}
       containers:
         - name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
-          image: {{ include "krateo.image" (dict "img" .Values.rdc.image "global" .Values.global "defaultTag" "0.1.2") | quote }}
+          image: {{ include "krateo.image" (dict "img" .Values.rdc.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.rdc.image.pullPolicy }}
           envFrom:
             - configMapRef:

@@ -111,45 +111,22 @@ rdc:
     registry: ghcr.io
     repository: krateo-platformops/rest-dynamic-controller
     pullPolicy: IfNotPresent
-    # NOTE: hand-maintained. The release workflow's APP_VERSION substitution applies to
-    # Chart.yaml only, never to values.yaml, so this tag does NOT auto-track RDC releases —
-    # bump it here whenever a new rest-dynamic-controller version should ship with the chart.
-    # Must be >= 0.12.0, which is when RDC began requiring the SA-identity env vars that
-    # assets/rdc/configmap.yaml supplies (REST_CONTROLLER_SERVICEACCOUNT_NAME/_NAMESPACE).
+    # The RDC tag FOLLOWS THE CHART'S appVersion (see assets/rdc/deployment.yaml, which passes
+    # .Chart.AppVersion as the default). Leave it empty unless you deliberately want a different
+    # rest-dynamic-controller than the oasgen-provider release ships with.
     #
-    # 0.19.0 is pinned because this chart ships oasgen 0.19.0, whose apiKey-in-header support
-    # (#49) is a JOINT contract: oasgen generates an `authentication.apiKey` block in the
-    # Configuration CRD, RDC reads the header name and optional valuePrefix out of it and
-    # sends the credential. This pairing differs from the ones below in ONE respect worth
-    # knowing: an older RDC fails LOUDLY here — auth.ToType returns "unknown auth type:
-    # apiKey" and the reconcile errors — rather than silently doing the wrong thing. The pin
-    # still moves, so the feature works out of the box instead of erroring on first use.
+    # This used to be a hand-maintained pin, and the manual step was missed exactly once: chart
+    # 0.20.0 shipped tag 0.19.0, a version never published in this org, so every generated
+    # controller ImagePullBackOff'd and the visible symptom was an unrelated job hanging several
+    # layers away (#62). The two components are released in lockstep at identical versions, so
+    # deriving the tag rather than restating it removes the step that can be forgotten.
     #
-    # 0.18.0 was pinned because this chart shipped oasgen 0.18.0, and two of that release's
-    # features are a JOINT contract: oasgen accepts and validates them, RDC executes them.
-    # An older RDC does not reject such a RestDefinition — it ignores the field and does
-    # the wrong thing silently, which is the failure mode this pin exists to prevent.
+    # Overriding is still supported and is the documented workaround for a version skew: set this
+    # to any published rest-dynamic-controller tag.
     #
-    #   * async.poll.handleParam (oasgen #46): names the path parameter the extracted
-    #     operation handle binds to, so a poll endpoint the vendor declares as
-    #     .../monitor/{id} works without patching the OAS document. RDC < 0.18.0 ignores
-    #     handleParam and binds to "operationId", so the poll path never resolves and the
-    #     resource never leaves Pending — after the create has already fired.
-    #   * spec forwarding on every *ApiRef direction (RDC #41): a delegated delete now
-    #     receives the CR spec, like create/update. On an older RDC it receives none, so a
-    #     teardown RESTAction reading .spec.* sees nulls, skips every step, reports success,
-    #     and the finalizer is never released — the CR hangs in Deleting forever.
-    #
-    # 0.17.0 additionally gives requestTransform a call site (it is applied to the outgoing
-    # body); before that oasgen rejected the field at admission precisely because nothing
-    # ran it. Carried forward from the previous pin: [?key=value] array predicates in
-    # fieldMapping paths (0.16.0), which address an array element by content instead of by
-    # position, and the fix for a CR whose create failed being undeletable (0.16.1).
-    #
-    # No chart-side change accompanies this bump: 0.16.1 -> 0.19.0 touches controller
-    # internals and CI only — no new flags, env vars or RBAC (verified against main.go and
-    # the tag-to-tag diff).
-    tag: 0.19.0
+    # NOTE: a release still requires the matching RDC tag to EXIST. Alignment removes the
+    # "forgot to bump" failure, not the "RDC was not released at this version" one.
+    tag: ""
   replicaCount: 1
   imagePullSecrets: []
   nameOverride: ""
