@@ -6,9 +6,8 @@
 # component-image-build is shared. Kept separate from release-oci.yaml, which is byte-identical to
 # core-provider's and stays that way — the same split core-provider-chart made for cdc-template.yaml.
 #
-# On a tag this runs alongside the publish rather than gating it. Moving the check INTO the shared
-# release-oci would gate it for every chart repo in the org and is the better end state; that is a
-# change to the shared workflow, proposed separately.
+# PR-time only: the tag-time run now lives INSIDE the shared release-oci, where it gates the publish
+# rather than racing it. Same reusable in both places, so the two cannot drift.
 name: chart-images
 
 on:
@@ -16,8 +15,6 @@ on:
     paths:
       - "helm/**"
       - .github/workflows/chart-images.yaml
-  push:
-    tags: ["[0-9]+.[0-9]+.[0-9]+"]
 
 jobs:
   chart-images:
