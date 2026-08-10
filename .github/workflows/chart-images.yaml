@@ -1,0 +1,24 @@
+# Assert every image this repo's charts reference actually exists in the registry, at the versions a
+# release would publish — the guard for oasgen-provider#62, where chart 0.20.0 shipped a
+# rest-dynamic-controller tag that was never published and every generated controller ImagePullBackOff'd.
+#
+# The logic lives in the shared reusable so adopting it cannot drift per repo, the same reason
+# component-image-build is shared. Kept separate from release-oci.yaml, which is byte-identical to
+# core-provider's and stays that way — the same split core-provider-chart made for cdc-template.yaml.
+#
+# PR-time only: the tag-time run now lives INSIDE the shared release-oci, where it gates the publish
+# rather than racing it. Same reusable in both places, so the two cannot drift.
+name: chart-images
+
+on:
+  pull_request:
+    paths:
+      - "helm/**"
+      - .github/workflows/chart-images.yaml
+
+jobs:
+  chart-images:
+    uses: krateo-platformops/.github/.github/workflows/chart-images.yaml@main
+    permissions:
+      contents: read
+      packages: read
