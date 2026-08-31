@@ -240,7 +240,7 @@ type JQProgram struct {
 	// Ref references a self-contained .jq module asset, using the SAME URI scheme as spec.oasPath:
 	//   configmap://<namespace>/<name>/<key>   |   http(s)://<url>
 	// +optional
-	// +kubebuilder:validation:Pattern=`^(configmap:\/\/([a-z0-9-]+)\/([a-z0-9-]+)\/([a-zA-Z0-9.-_]+)|https?:\/\/\S+)$`
+	// +kubebuilder:validation:Pattern=`^(configmap:\/\/([a-z0-9-]+)\/([a-z0-9-]+)\/([a-zA-Z0-9._-]+)|https?:\/\/\S+)$`
 	Ref string `json:"ref,omitempty"`
 	// Entrypoint is the jq function defined in the referenced module to invoke, e.g. "normalize".
 	// If empty, the whole module body is executed as the program. Only meaningful together with ref.
@@ -584,7 +584,7 @@ type RestDefinitionSpec struct {
 	// - configmap://<namespace>/<name>/<key>
 	// - http(s)://<url>
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Pattern=`^(configmap:\/\/([a-z0-9-]+)\/([a-z0-9-]+)\/([a-zA-Z0-9.-_]+)|https?:\/\/\S+)$`
+	// +kubebuilder:validation:Pattern=`^(configmap:\/\/([a-z0-9-]+)\/([a-z0-9-]+)\/([a-zA-Z0-9._-]+)|https?:\/\/\S+)$`
 	OASPath string `json:"oasPath"`
 	// Group: the group of the resource to manage
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="ResourceGroup is immutable, you cannot change that once the CRD has been generated"

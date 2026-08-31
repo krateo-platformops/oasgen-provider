@@ -67,7 +67,7 @@ spec:
                   Path to the OpenAPI specification. This value can change over time, for example if the OAS file is updated but be sure to not change the requestbody of the `create` verb.
                   - configmap://<namespace>/<name>/<key>
                   - http(s)://<url>
-                pattern: ^(configmap:\/\/([a-z0-9-]+)\/([a-z0-9-]+)\/([a-zA-Z0-9.-_]+)|https?:\/\/\S+)$
+                pattern: ^(configmap:\/\/([a-z0-9-]+)\/([a-z0-9-]+)\/([a-zA-Z0-9._-]+)|https?:\/\/\S+)$
                 type: string
               resource:
                 description: The resource to manage
