@@ -256,25 +256,30 @@ func TestCompareExisting(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "slice with different lengths",
+			name: "slice shorter in CR than remote is drift",
 			mg: map[string]interface{}{
 				"slice": []interface{}{"a", "b"},
 			},
 			rm: map[string]interface{}{
 				"slice": []interface{}{"a", "b", "c"},
 			},
-			expected:    true, // this is considered true because the first map has all keys present in the second map
+			// Was expected: true, on the reasoning that the CR's elements are all present in the
+			// remote. That subset rule is right for map KEYS (a key absent from the CR is an
+			// opinion not expressed) but wrong for a slice, whose length is part of its value: it
+			// made a CR slice unable to remove an element, and an EMPTY CR slice equal to any
+			// remote slice at all (#76).
+			expected:    false,
 			expectError: false,
 		},
 		{
-			name: "slice with different lengths",
+			name: "slice shorter in CR and differing in content is drift",
 			mg: map[string]interface{}{
 				"slice": []interface{}{"a", "b", "d"},
 			},
 			rm: map[string]interface{}{
 				"slice": []interface{}{"a", "b", "c", "e"},
 			},
-			expected:    false, // this is considered false because the first map does not have all keys present in the second map
+			expected:    false,
 			expectError: false,
 		},
 		{
@@ -722,6 +727,82 @@ func TestDeepEqual(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := DeepEqual(tt.a, tt.b); got != tt.want {
 				t.Errorf("DeepEqual() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCompareExisting_EmptySliceIsAnOpinion covers #76: a slice PRESENT in the CR but empty used to
+// compare equal to any remote slice, because the length guard only rejected a CR slice longer than the
+// remote one and the range body never executed for an empty one. The controller reported Ready=True and
+// logged "External resource is up to date" while the resource was demonstrably diverged, so emptying a
+// list could never be enforced. Reproduced live against Aruba Cloud with Vpc metadata.tags.
+func TestCompareExisting_EmptySliceIsAnOpinion(t *testing.T) {
+	tests := []struct {
+		name     string
+		mg       map[string]interface{}
+		rm       map[string]interface{}
+		expected bool
+	}{
+		{
+			name:     "empty CR slice vs populated remote is drift (the #76 case)",
+			mg:       map[string]interface{}{"tags": []interface{}{}},
+			rm:       map[string]interface{}{"tags": []interface{}{"drifted-by-hand"}},
+			expected: false,
+		},
+		{
+			name:     "empty CR slice vs empty remote is equal",
+			mg:       map[string]interface{}{"tags": []interface{}{}},
+			rm:       map[string]interface{}{"tags": []interface{}{}},
+			expected: true,
+		},
+		{
+			name:     "populated CR slice vs empty remote is drift",
+			mg:       map[string]interface{}{"tags": []interface{}{"ga-expected"}},
+			rm:       map[string]interface{}{"tags": []interface{}{}},
+			expected: false,
+		},
+		{
+			name:     "equal length and content is equal",
+			mg:       map[string]interface{}{"tags": []interface{}{"a", "b"}},
+			rm:       map[string]interface{}{"tags": []interface{}{"a", "b"}},
+			expected: true,
+		},
+		{
+			name:     "same length, reordered content is drift (comparison is positional)",
+			mg:       map[string]interface{}{"tags": []interface{}{"a", "b"}},
+			rm:       map[string]interface{}{"tags": []interface{}{"b", "a"}},
+			expected: false,
+		},
+		{
+			name: "empty nested slice vs populated nested remote is drift",
+			mg: map[string]interface{}{
+				"metadata": map[string]interface{}{"tags": []interface{}{}},
+			},
+			rm: map[string]interface{}{
+				"metadata": map[string]interface{}{"tags": []interface{}{"x"}},
+			},
+			expected: false,
+		},
+		{
+			name: "a map key absent from the CR is still NOT drift (the subset rule survives)",
+			mg:   map[string]interface{}{"tags": []interface{}{"a"}},
+			rm: map[string]interface{}{
+				"tags":             []interface{}{"a"},
+				"configurationRef": "cluster-only-field",
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := CompareExisting(tt.mg, tt.rm)
+			if err != nil {
+				t.Fatalf("CompareExisting() unexpected error: %v", err)
+			}
+			if got.IsEqual != tt.expected {
+				t.Errorf("CompareExisting() IsEqual = %v, want %v (reason: %v)", got.IsEqual, tt.expected, got.String())
 			}
 		})
 	}
