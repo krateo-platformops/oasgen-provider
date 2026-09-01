@@ -32,6 +32,10 @@ type MockServer struct {
 	responseDelay   time.Duration
 	authFailures    bool
 	asyncOperations bool
+	// lingerOnDelete makes DELETE answer 204 while KEEPING the resource, reproducing an API that
+	// deletes asynchronously and declares no pollable operation: the 2xx means "deletion requested",
+	// not "deletion completed", and a subsequent GET still returns the resource.
+	lingerOnDelete bool
 }
 
 func NewMockServer(port int) *MockServer {
@@ -357,6 +361,13 @@ func (ms *MockServer) deleteResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// lingerOnDelete: report success WITHOUT removing the resource, so a following GET still finds it.
+	// This is what an asynchronously-deleting API does when its OAS declares no pollable operation.
+	if ms.lingerOnDelete {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	delete(ms.resources, id)
 
 	// Supporta operazioni asincrone
@@ -393,6 +404,7 @@ func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 		AuthFailures         *bool `json:"authFailures,omitempty"`
 		AsyncOperations      *bool `json:"asyncOperations,omitempty"`
 		CompletePendingAsync *bool `json:"completePendingAsync,omitempty"`
+		LingerOnDelete       *bool `json:"lingerOnDelete,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
@@ -415,6 +427,9 @@ func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 		}
 		ms.pending = make(map[string]*Resource)
 		ms.mutex.Unlock()
+	}
+	if config.LingerOnDelete != nil {
+		ms.lingerOnDelete = *config.LingerOnDelete
 	}
 	if config.SimulateErrors != nil {
 		ms.simulateErrors = *config.SimulateErrors
