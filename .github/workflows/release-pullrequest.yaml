@@ -43,9 +43,21 @@ jobs:
           go-version-file: go/oasgen-provider/go.mod
       - name: Regenerate CRDs
         run: go generate ./apis/...
-      - name: Fail if committed CRDs are out of date
+      # Diff the WHOLE tree, not just crds/. The generated CRDs are copied to every place they must
+      # exist -- the chart that ships them and the rest-dynamic-controller envtest fixture -- so a
+      # guard scoped to crds/ would pass while the copy users install stayed stale. That is not
+      # hypothetical: it happened while fixing #51, where `make generate` updated crds/ alone and the
+      # shipped chart kept the old enum, with CI green (#84).
+      #
+      # Scoping to the whole tree rather than listing the destinations means this cannot fall behind
+      # when a destination is added -- the diff covers whatever codegen writes, by construction.
+      #
+      # go.mod/go.sum are excluded because they are not codegen output: `go generate` can touch them
+      # incidentally, and failing on that would be noise rather than drift.
+      - name: Fail if any generated artifact is out of date
+        working-directory: ${{ github.workspace }}
         run: |
-          if ! git diff --exit-code crds/; then
-            echo "::error::crds/ is out of date. Run 'go generate ./apis/...' and commit the result." >&2
+          if ! git diff --exit-code -- . ':(exclude)**/go.mod' ':(exclude)**/go.sum'; then
+            echo "::error::Generated artifacts are out of date. Run 'make generate' in go/oasgen-provider and commit the result (this also syncs the CRD chart and the RDC testdata copy)." >&2
             exit 1
           fi
