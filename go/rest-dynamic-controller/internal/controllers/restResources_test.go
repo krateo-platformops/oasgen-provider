@@ -578,6 +578,72 @@ func TestController(t *testing.T) {
 
 			return ctx
 		}).
+		// A native DELETE that returns 2xx means the deletion was REQUESTED, not that it completed. An API
+		// deleting asynchronously with no pollable operation in its OAS answers 204 immediately and keeps
+		// the resource around. Releasing the finalizer on that response makes the CR vanish while the
+		// resource still exists, and if the deletion then fails there is nothing left to retry -- the
+		// resource is orphaned silently, and for billable kinds indefinitely (#77).
+		//
+		// Delete must therefore hold the finalizer (return an error) while the resource is still
+		// observable, exactly as the RESTAction delete branch already does.
+		Assess("DeleteHoldsFinalizerWhileResourceLingers", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			// Recreate the resource directly on the API, then make DELETE report success without
+			// actually removing it.
+			body := `{"name":"linger-1","id":"linger-1","description":"still deleting"}`
+			creq, _ := http.NewRequest("POST", "http://localhost:30007/resource", strings.NewReader(body))
+			creq.Header.Set("Authorization", "Bearer test")
+			creq.Header.Set("Content-Type", "application/json")
+			cresp, cerr := http.DefaultClient.Do(creq)
+			if cerr != nil {
+				t.Error("Error seeding lingering resource", "error", cerr)
+				return ctx
+			}
+			cresp.Body.Close()
+
+			if _, err := http.Post("http://localhost:30007/admin/config", "application/json",
+				strings.NewReader(`{"lingerOnDelete": true}`)); err != nil {
+				t.Error("Error configuring mock server for lingering delete", "error", err)
+				return ctx
+			}
+			defer func() {
+				http.Post("http://localhost:30007/admin/config", "application/json",
+					strings.NewReader(`{"lingerOnDelete": false}`))
+			}()
+
+			u := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "sample.krateo.io/v1alpha1",
+				"kind":       "Sample",
+				"metadata": map[string]interface{}{
+					"name":      "linger-1",
+					"namespace": namespace,
+				},
+				"spec": map[string]interface{}{
+					"name": "linger-1",
+					"configurationRef": map[string]interface{}{
+						"name":      "my-sample-config",
+						"namespace": namespace,
+					},
+				},
+				"status": map[string]interface{}{
+					"id": "linger-1",
+				},
+			}}
+
+			err := handler.Delete(ctx, u)
+			if err == nil {
+				t.Error("Delete must NOT report success while the external resource is still present: " +
+					"releasing the finalizer here orphans the resource with nothing left to retry (#77)")
+			} else if !strings.Contains(err.Error(), "still present") {
+				// Assert the SPECIFIC failure. A bare err != nil is satisfied by any unrelated error
+				// (a missing configurationRef, say), which would make this test pass while never
+				// reaching the delete path at all.
+				t.Errorf("Delete failed for the wrong reason, so this test did not exercise #77: %v", err)
+			} else {
+				t.Log("Delete correctly held the finalizer while the resource lingered:", err)
+			}
+
+			return ctx
+		}).
 		// A CR whose create never succeeded has no identifier in status, so the delete path /resource/{id}
 		// cannot be built at all. Delete must still release the finalizer: returning the "missing path
 		// parameter" error instead strands the CR in Deleting forever, and its namespace with it.

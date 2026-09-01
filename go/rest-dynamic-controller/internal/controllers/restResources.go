@@ -921,6 +921,30 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		}
 	}
 
+	// VERIFY the resource is actually gone before releasing the finalizer, exactly as the RESTAction branch
+	// above does. A 2xx on DELETE means the deletion was REQUESTED, not that it completed: an API that
+	// deletes asynchronously and declares no pollable operation in its OAS answers 200 (or 204) immediately
+	// and keeps the resource in a "Deleting" state afterwards. Releasing on that response makes the CR
+	// disappear while the resource still exists, and if the deletion then fails there is nothing left to
+	// retry — the resource is orphaned silently and, for billable kinds, indefinitely.
+	//
+	// Holding the finalizer (returning the error) means the delete is retried until the resource is
+	// verifiably absent. Where an async operation IS declared, driveAsync above has already polled it to
+	// completion and this check simply confirms it. Where the API has no get verb to probe with,
+	// externalResourceStillExists reports (false, nil) and we trust the delete result, as before.
+	stillExists, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
+	if verr != nil {
+		log.Error(verr, "Verifying deletion")
+		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", verr))
+		return verr
+	}
+	if stillExists {
+		err := fmt.Errorf("delete of %s returned success but the external resource is still present; retrying", mg.GetName())
+		log.Debug("External resource still present after delete; holding finalizer", "kind", mg.GetKind())
+		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
+		return err
+	}
+
 	log.Debug("Setting condition", "kind", mg.GetKind())
 
 	err = unstructuredtools.SetConditions(mg, condition.Deleting())
