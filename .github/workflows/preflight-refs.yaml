@@ -1,17 +1,18 @@
-# Resolve every chart and image reference in this repository against its registry.
+# Resolve every chart and image reference in this repository against its registry, anonymously.
 #
-# WHY THIS EXISTS. Four separate outages in this platform were the same defect: a pinned
-# chart or image that resolved to nothing. Each surfaced 30-45 minutes into a live cluster
-# rebuild — as an opaque ImagePullBackOff, or worse, as a Composition reporting Ready=True
-# while deploying nothing at all. Each would have taken seconds to catch here.
+# The checker itself now lives in the org-shared reusable. It was a per-repo workflow wrapping a
+# 292-line hack/preflight-refs.py, byte-identical in this repo and core-provider -- two copies of the
+# same logic, which is where drift starts (#94).
 #
-# It is deliberately a LIVE check against the registry, not a lint. The failure mode being
-# guarded is "this version was never published", which no amount of local validation sees.
+# This file keeps only the triggers, because a reusable workflow cannot declare `schedule`, and the
+# schedule is not incidental: a package can be deleted or made private long after the last commit, so
+# a reference that was valid at merge time can rot with nobody touching the repo.
 #
-# Anonymous by design: the child's kubelet and core-provider pull WITHOUT credentials, so
-# resolving anonymously tests what they will actually experience. A chart that resolves for
-# a logged-in maintainer but 404s anonymously is still broken in production.
-
+# NOT redundant with chart-images.yaml, which this repo also calls. chart-images LOGS IN to GHCR, so a
+# private image is not reported missing when the real problem is permissions; preflight-refs resolves
+# ANONYMOUSLY on purpose, because the child cluster's kubelet and core-provider pull without
+# credentials -- a chart that resolves for a logged-in maintainer but 404s anonymously is still broken
+# in production. Neither subsumes the other; do not delete one as the duplicate.
 name: preflight-refs
 
 on:
@@ -29,11 +30,4 @@ permissions:
 
 jobs:
   preflight:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Resolve every chart and image reference
-        run: python3 hack/preflight-refs.py .
+    uses: krateo-platformops/.github/.github/workflows/preflight-refs.yaml@main
