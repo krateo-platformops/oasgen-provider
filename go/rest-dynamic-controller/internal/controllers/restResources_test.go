@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -71,41 +72,102 @@ const (
 	wsUrl         = "http://localhost:30007"
 )
 
-func killProcessOnPort(port int) {
-	// Get processes using the port
-	cmd := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))
-	output, err := cmd.Output()
+// psField reads one ps field for a pid ("command=" or "ppid=").
+func psField(pid, field string) string {
+	out, err := exec.Command("ps", "-p", pid, "-o", field).Output()
 	if err != nil {
-		return
+		return ""
 	}
+	return strings.TrimSpace(string(out))
+}
 
-	pids := strings.Fields(strings.TrimSpace(string(output)))
-	for _, pid := range pids {
-		// Check what process this actually is
-		checkCmd := exec.Command("ps", "-p", pid, "-o", "comm=,command=")
-		psOutput, err := checkCmd.Output()
-		if err != nil {
-			continue
-		}
-
-		cmdLine := string(psOutput)
-
-		// Only kill if it's our mock server (not Docker or other services)
-		if strings.Contains(cmdLine, "main") {
-			exec.Command("kill", "-9", pid).Run()
+// portHolders returns the PIDs listening on port together with their command lines.
+func portHolders(port int) map[string]string {
+	out := map[string]string{}
+	output, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port)).Output()
+	if err != nil {
+		return out // lsof exits non-zero when nothing holds the port
+	}
+	for _, pid := range strings.Fields(strings.TrimSpace(string(output))) {
+		if c := psField(pid, "command="); c != "" {
+			out[pid] = c
 		}
 	}
+	return out
+}
+
+// isOurMockServer reports whether the process holding the port is a mock server this suite started.
+//
+// The old predicate was strings.Contains(cmdLine, "main"): too broad (any command line containing
+// that substring was a kill candidate) and, as it turns out, too narrow for the process that actually
+// matters. `go run internal/controllers/mockserver/main.go` compiles to the go-build cache and execs
+// the result as a CHILD, and it is the child that binds the port. Its command line carries no hint of
+// its origin -- it looks like:
+//
+//	/Users/<me>/Library/Caches/go-build/f7/f7968fa0…-d/main
+//
+// so the only reliable signals are the go-build cache path itself, or the PARENT's command line,
+// which is still the readable `go run …/mockserver/main.go`. Checking both is what makes an orphan
+// from an interrupted run recognisable; matching on neither is why the port was never reclaimed.
+func isOurMockServer(pid, cmdLine string) bool {
+	if strings.Contains(cmdLine, "mockserver") {
+		return true
+	}
+	if strings.Contains(cmdLine, "/go-build/") && strings.HasSuffix(cmdLine, "/main") {
+		return true
+	}
+	if ppid := psField(pid, "ppid="); ppid != "" && ppid != "1" {
+		if strings.Contains(psField(ppid, "command="), "mockserver") {
+			return true
+		}
+	}
+	return false
+}
+
+// reclaimPort kills mock servers left behind by an interrupted run and reports whether the port ended
+// up free. It deliberately refuses to kill anything it cannot identify as ours -- Docker, a database,
+// a colleague's server -- and says so, rather than guessing.
+func reclaimPort(port int) error {
+	for pid, cmdLine := range portHolders(port) {
+		if !isOurMockServer(pid, cmdLine) {
+			return fmt.Errorf("port %d is held by PID %s which is NOT a mock server from this suite (%s); "+
+				"refusing to kill it -- free the port or stop that process", port, pid, cmdLine)
+		}
+		// Kill the whole process group: `go run` leaves the compiled child behind otherwise.
+		if p, err := strconv.Atoi(pid); err == nil {
+			if pgid, gerr := syscall.Getpgid(p); gerr == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			}
+			_ = syscall.Kill(p, syscall.SIGKILL)
+		}
+	}
+
+	// Killing is asynchronous; wait briefly for the socket to be released.
+	for i := 0; i < 20; i++ {
+		if len(portHolders(port)) == 0 {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if h := portHolders(port); len(h) > 0 {
+		return fmt.Errorf("port %d still held after kill: %v", port, h)
+	}
+	return nil
 }
 
 func startMockServer() error {
-	// Kill eventuali processi rimasti dalla volta precedente
-	killProcessOnPort(30007)
-
-	// Aspetta un attimo per essere sicuri
-	time.Sleep(500 * time.Millisecond)
+	// Reclaim the port from a mock server left behind by an interrupted run. Failing here is
+	// deliberate: continuing into the health-check loop below produces a 30-second wait followed by a
+	// cascade of "connection refused" assertion failures that name neither the port nor the cause.
+	if err := reclaimPort(30007); err != nil {
+		return fmt.Errorf("cannot start mock server: %w", err)
+	}
 
 	// Avvia il mock server come processo separato
 	mockServerCmd = exec.Command("go", "run", "internal/controllers/mockserver/main.go")
+	// Own process group, so stopMockServer can kill `go run` AND the compiled child it execs.
+	// Without this the child outlives the suite and holds :30007 against the next run.
+	mockServerCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Redirect output per debug in un file di log
 	logFile, err := os.Create("mockserver.log")
 	if err != nil {
@@ -131,15 +193,30 @@ func startMockServer() error {
 		time.Sleep(time.Second)
 	}
 
-	// Se arriviamo qui, killa il processo e restituisci errore
+	// Surface WHY it did not come up. The reason is in mockserver.log -- typically
+	// "listen tcp :30007: bind: address already in use" -- and without it the failure presents as
+	// unrelated connection errors in whichever test runs first.
+	tail := ""
+	if b, rerr := os.ReadFile("mockserver.log"); rerr == nil {
+		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+		if len(lines) > 6 {
+			lines = lines[len(lines)-6:]
+		}
+		tail = "\n  mockserver.log:\n    " + strings.Join(lines, "\n    ")
+	}
 	stopMockServer()
-	return fmt.Errorf("mock server failed to start within 30 seconds")
+	return fmt.Errorf("mock server did not become healthy on :30007 within 30s%s", tail)
 }
 
 func stopMockServer() {
 	if mockServerCmd != nil && mockServerCmd.Process != nil {
-		// Prima prova SIGTERM gentile
-		mockServerCmd.Process.Signal(syscall.SIGTERM)
+		// Signal the process GROUP: `go run` forwards nothing to the child it execs, so signalling
+		// only the parent leaves the actual listener alive holding :30007.
+		if pgid, err := syscall.Getpgid(mockServerCmd.Process.Pid); err == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		} else {
+			mockServerCmd.Process.Signal(syscall.SIGTERM)
+		}
 
 		// Aspetta un po'
 		done := make(chan error, 1)
@@ -151,7 +228,10 @@ func stopMockServer() {
 		case <-done:
 			// Processo terminato correttamente
 		case <-time.After(2 * time.Second):
-			// Timeout, forza il kill
+			// Timeout, forza il kill -- again on the whole group.
+			if pgid, err := syscall.Getpgid(mockServerCmd.Process.Pid); err == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			}
 			mockServerCmd.Process.Kill()
 			mockServerCmd.Wait()
 		}
@@ -160,7 +240,9 @@ func stopMockServer() {
 	}
 
 	// Cleanup finale per essere sicuri
-	killProcessOnPort(30007)
+	if err := reclaimPort(30007); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
 }
 
 func TestMain(m *testing.M) {
@@ -170,6 +252,23 @@ func TestMain(m *testing.M) {
 	testenv = env.New()
 
 	testenv.Setup(
+		// Remove a cluster left behind by an interrupted run before creating ours. Finish() -- which
+		// stops the mock server and destroys the cluster -- does not execute when the process is
+		// killed, so both leak, and the next run inherits them. The name is specific to this suite,
+		// so deleting it cannot disturb a cluster anyone is using for something else.
+		func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
+			out, err := exec.Command("kind", "get", "clusters").Output()
+			if err != nil {
+				return ctx, nil // kind not on PATH is the provider's problem to report, not ours
+			}
+			for _, c := range strings.Fields(string(out)) {
+				if c == clusterName {
+					fmt.Fprintf(os.Stderr, "removing leftover kind cluster %q from a previous run\n", clusterName)
+					_ = exec.Command("kind", "delete", "cluster", "--name", clusterName).Run()
+				}
+			}
+			return ctx, nil
+		},
 		envfuncs.CreateCluster(kind.NewProvider(), clusterName),
 		e2e.CreateNamespace(namespace),
 		e2e.CreateNamespace(altNamespace),
