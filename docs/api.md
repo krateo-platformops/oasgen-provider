@@ -39,7 +39,7 @@ the CRDs it generates from it. Sources of truth:
 | `additionalStatusFields[]` | ✖︎ | ✔︎ | Extra response fields surfaced in status (typically technical ids used by `get`). |
 | `excludedSpecFields[]` | ✖︎ | ✔︎ | Fields excluded from the generated spec (server-generated ids etc.). Dots inside a single field name are escaped bracket-style: `'["searchCriteria.title"]'`. |
 | `configurationFields[]` | ✖︎ | ✔︎ | OAS parameters lifted into the generated `*Configuration` CRD: `fromOpenAPI.{name,in}` + `fromRestDefinition.actions` (`["*"]` = all actions, min 1 item). |
-| `compareScope` | ✖︎ | mutable | Drift-comparison scope: `fullSpec` (default) compares every spec field against the observed response; `identifiersAndStatus` compares only identifiers + additionalStatusFields (requires at least one of them; CEL-enforced). |
+| `compareScope` | ✖︎ | mutable | Drift-comparison scope. `fullSpec` (default) compares every spec field against the observed response. `identifiersAndStatus` compares only identifiers + additionalStatusFields (requires at least one of them; CEL-enforced). `updatable` compares only the fields the **update verb's request body can express**, derived from the OAS rather than declared by hand — a field the update cannot send is one the controller cannot fix, so comparing it would loop forever; requires an update verb (CEL-enforced). |
 | `observeApiRef` / `createApiRef` / `updateApiRef` / `deleteApiRef` | ✖︎ | mutable | Delegate a whole verb to a snowplow RESTAction (below). |
 
 **Immutability** is CEL-enforced (`self == oldSelf`) on `resourceGroup`, `kind`,

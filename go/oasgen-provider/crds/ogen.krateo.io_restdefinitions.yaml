@@ -93,9 +93,16 @@ spec:
                           everything worth reconciling (e.g. all other spec fields are create-only / server-managed). It trades
                           precision for ergonomics: no per-field responseTransform/fieldMapping is needed to stop false drift on
                           divergently-shaped response fields. Being reconcile behavior rather than CRD shape, it is mutable.
+                        - "updatable": only the fields the UPDATE verb's request body can actually express are compared,
+                          derived from the OAS rather than declared by hand. A field the update cannot send is a field the
+                          controller cannot fix, so comparing it can only produce an update that changes nothing and a
+                          difference that returns on the next reconcile. This sits between "fullSpec" (which loops on
+                          server-assigned or create-only fields) and "identifiersAndStatus" (which stops comparing almost
+                          everything, including drift that IS fixable). Requires an update verb — see the validation below.
                     enum:
                     - fullSpec
                     - identifiersAndStatus
+                    - updatable
                     type: string
                   configurationFields:
                     description: 'ConfigurationFields: the list of fields to use as
@@ -1180,6 +1187,12 @@ spec:
                   rule: '!has(self.compareScope) || self.compareScope != ''identifiersAndStatus''
                     || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields)
                     && size(self.additionalStatusFields) > 0)'
+                - message: 'compareScope ''updatable'' requires an update verb: with
+                    no update verb the set of updatable fields is empty, so nothing
+                    would ever be compared and the resource would silently never report
+                    drift'
+                  rule: '!has(self.compareScope) || self.compareScope != ''updatable''
+                    || self.verbsDescription.exists(v, v.action == ''update'')'
               resourceGroup:
                 description: 'Group: the group of the resource to manage'
                 type: string
