@@ -5,12 +5,18 @@ on:
     branches:
       - main
 
-# oasgen-provider is a Go MONOREPO (go/oasgen-provider + go/rest-dynamic-controller). The image
-# build now uses the shared reusable (component-image-build, push:false) instead of the previous
-# inline docker matrix — one source of truth, folded-aware. Only oasgen-provider publishes an image
-# here (rest-dynamic-controller builds from its own repo since the dedup). The Go suite stays in the
-# shared local test.yaml (one definition across the PR, push-to-main and release-tag triggers so
-# they cannot drift), and the oasgen-specific CRD-drift guard is unchanged.
+# oasgen-provider is a Go MONOREPO (go/oasgen-provider + go/rest-dynamic-controller), and every job
+# here is the org-shared reusable rather than a local re-implementation:
+#
+#   lint-docs — shared
+#   build     — shared component-image-build (push:false), BOTH module images
+#   test      — ./test.yaml, itself a thin caller of the shared component-go-checks, once per module
+#
+# The hand-rolled `crds-drift` job that used to sit here is gone: the shared reusable exposes the same
+# guard as `crd_drift`, which test.yaml sets on the CRD-owning module (#86). The previous header also
+# claimed "Only oasgen-provider publishes an image here (rest-dynamic-controller builds from its own
+# repo)" -- untrue since #64 folded that build in, and its repo is archived.
+
 jobs:
   lint-docs:
     uses: krateo-platformops/.github/.github/workflows/lint-docs.yaml@main
@@ -29,35 +35,3 @@ jobs:
   test:
     uses: ./.github/workflows/test.yaml
     secrets: inherit
-
-  crds-drift:
-    name: CRDs drift guard
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: go/oasgen-provider
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go/oasgen-provider/go.mod
-      - name: Regenerate CRDs
-        run: go generate ./apis/...
-      # Diff the WHOLE tree, not just crds/. The generated CRDs are copied to every place they must
-      # exist -- the chart that ships them and the rest-dynamic-controller envtest fixture -- so a
-      # guard scoped to crds/ would pass while the copy users install stayed stale. That is not
-      # hypothetical: it happened while fixing #51, where `make generate` updated crds/ alone and the
-      # shipped chart kept the old enum, with CI green (#84).
-      #
-      # Scoping to the whole tree rather than listing the destinations means this cannot fall behind
-      # when a destination is added -- the diff covers whatever codegen writes, by construction.
-      #
-      # go.mod/go.sum are excluded because they are not codegen output: `go generate` can touch them
-      # incidentally, and failing on that would be noise rather than drift.
-      - name: Fail if any generated artifact is out of date
-        working-directory: ${{ github.workspace }}
-        run: |
-          if ! git diff --exit-code -- . ':(exclude)**/go.mod' ':(exclude)**/go.sum'; then
-            echo "::error::Generated artifacts are out of date. Run 'make generate' in go/oasgen-provider and commit the result (this also syncs the CRD chart and the RDC testdata copy)." >&2
-            exit 1
-          fi
