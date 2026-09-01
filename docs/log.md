@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-08-10T00:00:00Z
+timestamp: 2026-09-01T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,42 @@ timestamp: 2026-08-10T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-09-01 — 0.22.0
+
+Four correctness fixes, two of which failed **silently** — reporting success while the
+resource was diverged or gone.
+
+- **Empty arrays are now an opinion** (#76). `compareSlices` only rejected a CR slice
+  *longer* than the remote one, so an empty CR slice matched **any** remote array: the
+  loop body never ran and the comparison returned equal. Emptying a list could never be
+  enforced, and the controller reported `Ready=True` and "External resource is up to date"
+  while diverged. The map subset rule (a key absent from the CR is an opinion not
+  expressed) is unchanged and now pinned by its own test.
+- **Delete verifies before releasing the finalizer** (#77). A 2xx on DELETE means the
+  deletion was *requested*. An API deleting asynchronously with no pollable operation
+  answers 204 immediately and keeps the resource, so the CR vanished while the resource
+  lived on — and if that deletion later failed, nothing remained to retry. The RESTAction
+  path already verified; the native path now does too.
+- **Read-only resources get a usable spec** (#75). A resource exposing only `findby`/`get`
+  derived its spec from a create body that does not exist, so its identifiers named fields
+  present nowhere and it could never resolve — generated, admitted, non-functional.
+  Identifiers are now materialised as **selectors**, typed from the observe response.
+  Fixing it exposed a second defect: `getBaseSchemaForStatus` returned the first action's
+  error, so a findby-only resource aborted on "action 'get' not defined" before findby was
+  consulted, losing its status schema too.
+- **`compareScope: updatable` is reachable** (#51). RDC has implemented it in full since
+  0.20.0, but the CRD enum never listed the value, so the API server rejected it at
+  admission — shipped and unusable. Adding it *is* the fix; the issue was half-shipped, not
+  stale. A CEL guard now requires an update verb, since without one the comparison set is
+  empty and the resource would silently never report drift.
+- Dependencies: plumbing `v1.14.2`, whose crdgen fix translates `uniqueItems` instead of
+  emitting a CRD the API server refuses — on our path, since every managed resource's CRD
+  comes from `crdgen.Generate`. Also `x/crypto v0.55.0` for CVE-2026-56854 (CRITICAL), which
+  had turned `main` red on its own as the vulnerability DB updated, and `x/mod v0.40.0`.
+- `spec.oasPath` accepts hyphens in the ConfigMap key segment (#74): `[a-zA-Z0-9.-_]` is a
+  character *range* spanning `/` and `:`, so it both rejected `my-oas.yaml` and wrongly
+  accepted `we/ird`.
 
 ## 2026-08-10 — 0.21.0
 - The **rest-dynamic-controller image now builds from this monorepo** (#64), so one tag
