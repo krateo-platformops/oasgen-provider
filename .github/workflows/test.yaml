@@ -1,20 +1,24 @@
-# Canonical Krateo COMPONENT test suite — the SINGLE definition of "the tests pass", called by
-# every trigger that needs it rather than copied into each one. Identical byte-for-byte across all
-# component repos, like release-tag.yaml.
+# The Go suite for both modules of this monorepo.
 #
-# Triggers:
-#   • push to main   — direct pushes used to run nothing at all, so anything landing outside a PR
-#                      was released untested (see the note below)
-#   • workflow_call  — release-pullrequest.yaml (per-PR) and release-tag.yaml (gating the release)
+# This file holds no test logic. It is a thin caller of the org-shared
+# component-go-checks.yaml -- the canonical Go PR checks for every krateo-* Go repo -- once per
+# module, which is exactly how core-provider drives its three modules. What used to live here was a
+# local re-implementation of that reusable: a hand-rolled matrix plus a separately hand-rolled
+# CRD-drift job in release-pullrequest.yaml, both duplicating capabilities the shared workflow already
+# exposes as `module`, `test_args` and `crd_drift` (#86).
 #
-# Why this file exists: tests used to run on `pull_request` only. release-tag.yaml had no test step,
-# so a tag could publish an image that failed its own suite, and a push straight to main was
-# released with zero CI. rest-dynamic-controller 0.16.0 and 0.16.1 shipped that way — including a
-# regression test written the same day that had never executed in CI.
+# It remains a workflow of its own, rather than the callers invoking the reusable directly, for two
+# reasons:
 #
-# -tags=unit,integration is deliberate: the envtest/kind suite in internal/controllers is only
-# compiled under the `integration` tag, and dropping it silently skips those tests rather than
-# failing. -p 1 keeps packages that stand up clusters from racing each other.
+#   * the test_args below are declared ONCE. Three callers -- pull_request, push-to-main, and the
+#     release-tag gate -- would otherwise each carry their own copy of the build tags and timeout,
+#     which is precisely the drift this change exists to remove;
+#   * `push: main` cannot be expressed by a reusable workflow itself, so something in this repo has to
+#     own that trigger.
+#
+# RELEASE GATE: release-tag.yaml calls this and its build job declares `needs: [test]`. That
+# dependency is what stops a tag publishing images whose suite failed (#88) -- it was missing until
+# then, and the two ran concurrently. Do not remove either half.
 name: test
 
 on:
@@ -27,25 +31,20 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        mod: [oasgen-provider, rest-dynamic-controller]
-    defaults:
-      run:
-        working-directory: go/${{ matrix.mod }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go/${{ matrix.mod }}/go.mod
-      - name: Gather dependencies
-        run: go mod download
-      - name: Run coverage
-        run: go test -race -tags=unit,integration -p 1 -coverprofile=coverage.txt -timeout 20m -covermode=atomic ./...
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+  # crd_drift runs only here: oasgen-provider owns the RestDefinition CRD, rest-dynamic-controller
+  # merely carries a copy of it as an envtest fixture. The shared guard diffs the whole tree, so it
+  # covers that fixture and the shipped CRD chart as well as crds/ itself (#84).
+  oasgen-provider:
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/oasgen-provider
+      crd_drift: true
+      test_args: -race -tags=unit,integration -p 1 -coverprofile=coverage.txt -timeout 20m -covermode=atomic ./...
+    secrets: inherit
+
+  rest-dynamic-controller:
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/rest-dynamic-controller
+      test_args: -race -tags=unit,integration -p 1 -coverprofile=coverage.txt -timeout 20m -covermode=atomic ./...
+    secrets: inherit
