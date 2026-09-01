@@ -480,6 +480,7 @@ type QueryParam struct {
 // +kubebuilder:validation:XValidation:rule="!(has(self.createApiRef) && has(self.observeApiRef) && !has(self.observeApiRef.notFoundExpr))",message="createApiRef with observeApiRef requires observeApiRef.notFoundExpr, so a create can be triggered when the delegated observe reports the resource absent"
 // +kubebuilder:validation:XValidation:rule="!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby')",message="createApiRef requires a get or findby verb so the controller can verify the create converged (level-based convergence)"
 // +kubebuilder:validation:XValidation:rule="!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0)",message="compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against"
+// +kubebuilder:validation:XValidation:rule="!has(self.compareScope) || self.compareScope != 'updatable' || self.verbsDescription.exists(v, v.action == 'update')",message="compareScope 'updatable' requires an update verb: with no update verb the set of updatable fields is empty, so nothing would ever be compared and the resource would silently never report drift"
 type Resource struct {
 	// Name: the name of the resource to manage
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Kind is immutable, you cannot change that once the CRD has been generated"
@@ -504,7 +505,13 @@ type Resource struct {
 	//     everything worth reconciling (e.g. all other spec fields are create-only / server-managed). It trades
 	//     precision for ergonomics: no per-field responseTransform/fieldMapping is needed to stop false drift on
 	//     divergently-shaped response fields. Being reconcile behavior rather than CRD shape, it is mutable.
-	// +kubebuilder:validation:Enum=fullSpec;identifiersAndStatus
+	//   - "updatable": only the fields the UPDATE verb's request body can actually express are compared,
+	//     derived from the OAS rather than declared by hand. A field the update cannot send is a field the
+	//     controller cannot fix, so comparing it can only produce an update that changes nothing and a
+	//     difference that returns on the next reconcile. This sits between "fullSpec" (which loops on
+	//     server-assigned or create-only fields) and "identifiersAndStatus" (which stops comparing almost
+	//     everything, including drift that IS fixable). Requires an update verb — see the validation below.
+	// +kubebuilder:validation:Enum=fullSpec;identifiersAndStatus;updatable
 	// +optional
 	CompareScope string `json:"compareScope,omitempty"`
 	// ConfigurationFields: the list of fields to use as configuration fields
