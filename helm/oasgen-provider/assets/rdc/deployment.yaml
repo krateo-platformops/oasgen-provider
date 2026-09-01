@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/instance: {{ "{{" }} trunc 63 .resource {{ "}}" }}
     app.kubernetes.io/version: {{ "{{" }} trunc 63 .apiVersion {{ "}}" }}
     app.kubernetes.io/component: controller
-    app.kubernetes.io/part-of: krateoplatformops
+    app.kubernetes.io/part-of: krateo
     app.kubernetes.io/managed-by: krateo
 spec:
   {{- if not .Values.rdc.autoscaling.enabled }}
