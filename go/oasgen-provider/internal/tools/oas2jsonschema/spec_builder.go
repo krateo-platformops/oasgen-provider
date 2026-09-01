@@ -3,6 +3,7 @@ package oas2jsonschema
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	pathparsing "github.com/krateo-platformops/oasgen-provider/internal/tools/pathparsing"
@@ -29,6 +30,21 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 	// Kept for legacy reasons, disabled by default.
 	if g.generatorConfig.IncludeIdentifiersInSpec {
 		addIdentifiersToSpec(baseSchema, g.resourceConfig.Identifiers)
+	}
+
+	// A READ-ONLY resource (no create verb) has no request body to derive its spec from, so the spec
+	// would otherwise contain nothing but path/query parameters and configurationRef. Its declared
+	// identifiers would then name fields that exist nowhere: findby compares each listed item against the
+	// CR and never matches, while get binds its {id} from a status field that only that findby could have
+	// populated. The two block each other, and the resource is generated, statically valid, admitted by
+	// the API server, and non-functional (#75).
+	//
+	// The generator's implicit assumption is that an identifier is always a spec field, which holds only
+	// because a create body normally defines it. Where there is no create body, materialise the
+	// identifiers into the spec explicitly: they are SELECTORS, values the user supplies to choose which
+	// existing object this CR refers to.
+	if !g.hasCreateVerb() {
+		warnings = append(warnings, g.addIdentifierSelectorsToSpec(baseSchema)...)
 	}
 
 	// Schema preparation for CRD compatibility.
@@ -185,6 +201,73 @@ func addIdentifiersToSpec(schema *Schema, identifiers []string) {
 			})
 		}
 	}
+}
+
+// hasCreateVerb reports whether the resource declares a create action. Its request body is what the spec
+// schema is normally derived from, so its absence is what makes a resource read-only.
+func (g *OASSchemaGenerator) hasCreateVerb() bool {
+	for _, verb := range g.resourceConfig.Verbs {
+		if strings.EqualFold(verb.Action, ActionCreate) {
+			return true
+		}
+	}
+	return false
+}
+
+// addIdentifierSelectorsToSpec materialises the declared identifiers of a read-only resource into the spec
+// as user-supplied selectors, so the user can express WHICH existing object the CR refers to.
+//
+// The type is taken from the get/findby response schema when the identifier appears there, so a numeric id
+// stays numeric rather than being forced to string; identifiers absent from that schema fall back to
+// string. An identifier that is present in neither the spec nor the response schema names a field the
+// controller can never read, so it is reported as a warning rather than silently added — the resource would
+// otherwise reach Ready while being unable to resolve.
+func (g *OASSchemaGenerator) addIdentifierSelectorsToSpec(schema *Schema) []error {
+	var warnings []error
+
+	statusSchema, err := g.getBaseSchemaForStatus()
+	if err != nil {
+		// Not fatal: fall back to untyped selectors rather than failing generation outright.
+		statusSchema = nil
+	}
+
+	for _, identifier := range g.resourceConfig.Identifiers {
+		if slices.ContainsFunc(schema.Properties, func(p Property) bool { return p.Name == identifier }) {
+			continue // already expressible (e.g. it is also a path/query parameter)
+		}
+
+		selector := &Schema{
+			Type:        []string{"string"},
+			Description: "SELECTOR: identifies which existing object this resource refers to. This resource declares no create verb, so this field selects an object rather than defining one.",
+		}
+
+		var found bool
+		if statusSchema != nil {
+			for _, p := range statusSchema.Properties {
+				if p.Name == identifier && p.Schema != nil {
+					found = true
+					if len(p.Schema.Type) > 0 {
+						selector.Type = p.Schema.Type
+					}
+					break
+				}
+			}
+		}
+
+		if !found {
+			warnings = append(warnings, SchemaGenerationError{
+				Path: fmt.Sprintf("identifiers.%s", identifier),
+				Code: CodeIdentifierNotResolvable,
+				Message: fmt.Sprintf("identifier %q is not present in the get/findby response schema, so findby can never match on it; "+
+					"it is exposed in the spec as a string selector, but verify it names a real field of the listed items", identifier),
+				Got: identifier,
+			})
+		}
+
+		schema.Properties = append(schema.Properties, Property{Name: identifier, Schema: selector})
+	}
+
+	return warnings
 }
 
 // isAuthorizationHeader checks if the given parameter is an authorization header (case-insensitive).

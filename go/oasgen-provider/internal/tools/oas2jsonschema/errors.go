@@ -55,6 +55,11 @@ const (
 	CodeNoStatusSchema GenerationCode = "NoStatusSchema"
 	// CodeFieldNotFound indicates that a field was not found in the schema.
 	CodeFieldNotFound GenerationCode = "FieldNotFound"
+	// CodeIdentifierNotResolvable indicates that a declared identifier names no field the controller can
+	// ever read: it is absent from the generated spec AND from the response schema that populates status.
+	// findby compares each listed item against the CR, so an identifier that exists in neither place can
+	// never match, and the resource is generated, admitted, and non-functional.
+	CodeIdentifierNotResolvable GenerationCode = "IdentifierNotResolvable"
 )
 
 // SchemaGenerationError defines a structured error for schema generation warnings.

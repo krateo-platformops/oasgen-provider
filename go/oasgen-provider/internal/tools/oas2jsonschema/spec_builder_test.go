@@ -700,3 +700,135 @@ func TestRemoveFieldAtPath(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildSpecSchema_ReadOnlyResource covers #75: a resource whose OAS exposes only findby/get -- no
+// create -- produced a spec containing nothing but its path parameters and configurationRef, because the
+// spec is derived from the create request body and there isn't one. Its declared identifiers then named
+// fields that existed nowhere, so findby could never match and get could never bind its {id}: the two
+// paths block each other and the resource is generated, admitted, and non-functional.
+//
+// Reproduces the reported shape: Aruba's read-only LoadBalancer, identified by name, listed under a
+// projectId path parameter.
+func TestBuildSpecSchema_ReadOnlyResource(t *testing.T) {
+	newDoc := func(listItem []Property) *mockOASDocument {
+		return &mockOASDocument{
+			Paths: map[string]*mockPathItem{
+				"/projects/{projectId}/loadBalancers": {Ops: map[string]Operation{
+					"get": &mockOperation{
+						Parameters: []ParameterInfo{
+							{Name: "projectId", In: "path", Schema: &Schema{Type: []string{"string"}}, Required: true},
+						},
+						Responses: map[int]ResponseInfo{
+							200: {Content: map[string]*Schema{
+								"application/json": {Type: []string{"object"}, Properties: listItem},
+							}},
+						},
+					},
+				}},
+			},
+		}
+	}
+
+	verbs := []Verb{{Action: ActionFindBy, Path: "/projects/{projectId}/loadBalancers", Method: "get"}}
+
+	t.Run("identifier is materialised into the spec as a selector", func(t *testing.T) {
+		g := &OASSchemaGenerator{
+			doc: newDoc([]Property{
+				{Name: "name", Schema: &Schema{Type: []string{"string"}}},
+				{Name: "id", Schema: &Schema{Type: []string{"string"}}},
+			}),
+			generatorConfig: DefaultGeneratorConfig(),
+			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"name"}},
+		}
+
+		out, warnings, err := g.BuildSpecSchema()
+		require.NoError(t, err)
+		require.NotNil(t, out)
+
+		var got map[string]interface{}
+		require.NoError(t, json.Unmarshal(out, &got))
+		props, _ := got["properties"].(map[string]interface{})
+
+		// Before the fix these were exactly ["projectId"] (plus configurationRef where auth applies),
+		// and a CR carrying spec.name was rejected: unknown field "spec.name".
+		assert.Contains(t, props, "name", "the identifier must be expressible in the spec, or nothing can select the object")
+		assert.Contains(t, props, "projectId", "path parameters are still projected")
+
+		for _, w := range warnings {
+			if ge, ok := w.(SchemaGenerationError); ok {
+				assert.NotEqual(t, CodeIdentifierNotResolvable, ge.Code,
+					"name IS present in the findby response schema, so it must not warn")
+			}
+		}
+	})
+
+	t.Run("identifier type is taken from the response schema, not forced to string", func(t *testing.T) {
+		g := &OASSchemaGenerator{
+			doc: newDoc([]Property{
+				{Name: "serial", Schema: &Schema{Type: []string{"integer"}}},
+			}),
+			generatorConfig: DefaultGeneratorConfig(),
+			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"serial"}},
+		}
+
+		out, _, err := g.BuildSpecSchema()
+		require.NoError(t, err)
+
+		var got map[string]interface{}
+		require.NoError(t, json.Unmarshal(out, &got))
+		props := got["properties"].(map[string]interface{})
+		serial := props["serial"].(map[string]interface{})
+		assert.Equal(t, "integer", serial["type"], "a numeric identifier must stay numeric")
+	})
+
+	t.Run("identifier absent from the response schema warns", func(t *testing.T) {
+		g := &OASSchemaGenerator{
+			doc: newDoc([]Property{
+				{Name: "id", Schema: &Schema{Type: []string{"string"}}},
+			}),
+			generatorConfig: DefaultGeneratorConfig(),
+			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"nonexistent"}},
+		}
+
+		_, warnings, err := g.BuildSpecSchema()
+		require.NoError(t, err)
+
+		var found bool
+		for _, w := range warnings {
+			if ge, ok := w.(SchemaGenerationError); ok && ge.Code == CodeIdentifierNotResolvable {
+				found = true
+			}
+		}
+		assert.True(t, found, "an identifier naming no field of the listed items can never match; that must be reported, not silently accepted")
+	})
+
+	t.Run("a resource WITH a create verb is unaffected", func(t *testing.T) {
+		doc := newDoc([]Property{{Name: "name", Schema: &Schema{Type: []string{"string"}}}})
+		doc.Paths["/projects/{projectId}/loadBalancers"].Ops["post"] = &mockOperation{
+			RequestBody: RequestBodyInfo{Content: map[string]*Schema{
+				"application/json": {Type: []string{"object"}, Properties: []Property{
+					{Name: "displayName", Schema: &Schema{Type: []string{"string"}}},
+				}},
+			}},
+		}
+		g := &OASSchemaGenerator{
+			doc:             doc,
+			generatorConfig: DefaultGeneratorConfig(),
+			resourceConfig: &ResourceConfig{
+				Verbs: append(verbs, Verb{Action: ActionCreate, Path: "/projects/{projectId}/loadBalancers", Method: "post"}),
+				// 'name' is NOT in the create body: with a create verb present the selector logic must not
+				// run, so the spec keeps deriving purely from that body plus parameters.
+				Identifiers: []string{"name"},
+			},
+		}
+
+		out, _, err := g.BuildSpecSchema()
+		require.NoError(t, err)
+
+		var got map[string]interface{}
+		require.NoError(t, json.Unmarshal(out, &got))
+		props := got["properties"].(map[string]interface{})
+		assert.Contains(t, props, "displayName", "the create body still drives the spec")
+		assert.NotContains(t, props, "name", "selector materialisation must apply ONLY to read-only resources")
+	})
+}

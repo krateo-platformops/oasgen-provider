@@ -807,10 +807,23 @@ func TestGenerateStatusSchema(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Expected no error, but got: %v", err)
 		}
-		if len(result.GenerationWarnings) != 2 { // One for 'id', one for 'non_existent_field'
-			t.Fatalf("Expected 2 generation warnings for missing fields, but got %d", len(result.GenerationWarnings))
+		// Three warnings: 'id' and 'non_existent_field' are both absent from the (empty) status response
+		// schema, and this resource declares NO create verb, so the read-only selector path also reports
+		// that its identifier 'id' names no field of the observed object (CodeIdentifierNotResolvable).
+		// That third warning is the point of #75: such a resource used to be generated, admitted and
+		// non-functional in silence.
+		if len(result.GenerationWarnings) != 3 {
+			t.Fatalf("Expected 3 generation warnings, but got %d: %v", len(result.GenerationWarnings), result.GenerationWarnings)
 		}
-		if !strings.Contains(result.GenerationWarnings[1].Error(), "non_existent_field") {
+		// Search rather than index: warning order depends on which builder runs first, which is not what
+		// this test is about.
+		var mentionsMissingField bool
+		for _, w := range result.GenerationWarnings {
+			if strings.Contains(w.Error(), "non_existent_field") {
+				mentionsMissingField = true
+			}
+		}
+		if !mentionsMissingField {
 			t.Errorf("Warning message should mention 'non_existent_field'")
 		}
 

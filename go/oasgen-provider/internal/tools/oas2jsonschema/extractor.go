@@ -64,15 +64,26 @@ func (g *OASSchemaGenerator) getBaseSchemaForSpec() (*Schema, error) {
 // getBaseSchemaForStatus returns the base schema for the status, which is the response body of the 'get' or 'findby' action.
 // TODO: what about no get/findby action but only update? (maybe this could be configured in the GeneratorConfig)
 func (g *OASSchemaGenerator) getBaseSchemaForStatus() (*Schema, error) {
+	// Try each observe action in turn and only fail if NONE yields a schema. Returning the first action's
+	// error aborted before findby was ever consulted, so a resource declaring findby but no get -- the
+	// normal shape for a read-only resource -- lost its status schema entirely to
+	// "action 'get' not defined in resource verbs", even though findby could have supplied it (#75).
+	var firstErr error
 	actions := []string{ActionGet, ActionFindBy}
 	for _, action := range actions {
 		schema, err := ExtractSchemaForAction(g.doc, g.resourceConfig.Verbs, action, g.generatorConfig)
 		if err != nil {
-			return nil, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if schema != nil {
 			return schema, nil
 		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return nil, nil
 }
