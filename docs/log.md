@@ -13,6 +13,31 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-09-01 — 0.22.1
+
+A patch release whose only user-visible change is chart content; no Go source changed, so the
+images are identical to 0.22.0 apart from their tag.
+
+- Dead-org (`krateoplatformops`) references removed from shipped content (#87): the CRD chart's
+  `icon` URL, and `app.kubernetes.io/part-of` in the RDC assets. The label matters more than the
+  icon — `assets/rdc/` is mount-and-render, so it was stamped on **every generated controller in
+  every cluster**. It now reads `krateo`, matching core-provider's equivalent `assets/cdc/`. Nothing
+  selects pods by it (it is absent from the selector and the pod template), but anything selecting
+  the Deployment or ConfigMap objects on the old value needs updating.
+
+The rest of the release is CI and test infrastructure, which does not reach a cluster but is worth
+recording because it changes what a release *guarantees*:
+
+- **The release gate now gates** (#88). `build` had no `needs: [test]`, so images published whatever
+  the suite did — observed on the 0.22.0 run, where all four jobs started within the same second.
+  0.22.1 is the first release where a failing suite actually stops the images.
+- **CRD generation writes every destination, and the guard diffs the whole tree** (#84). The
+  generated `crds/` was checked while the versioned chart that ships them was not — the copy users
+  install was the unguarded one, and it had already gone stale once during the #51 fix.
+- The RDC integration suite is re-runnable after an interrupt (#85), and every workflow job now
+  resolves to an org-shared reusable rather than a local re-implementation (#86, #94) — including
+  `preflight-refs`, which was 292 lines of Python duplicated byte-for-byte in two repos.
+
 ## 2026-09-01 — 0.22.0
 
 Four correctness fixes, two of which failed **silently** — reporting success while the
