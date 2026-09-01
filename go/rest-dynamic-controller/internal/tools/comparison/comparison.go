@@ -163,11 +163,15 @@ func CompareExisting(mg map[string]interface{}, rm map[string]interface{}, path 
 	return ComparisonResult{IsEqual: true}, nil
 }
 
-// compareSlices compares two []interface{} element-by-element and in order, mirroring CompareExisting's
-// semantics: only the elements present in the first slice (the CR) are compared, so the second slice
-// (the observed remote value) may be longer. Nested maps recurse into CompareExisting and nested slices
-// recurse into compareSlices; primitive elements are compared with the same type-normalizing CompareAny
-// used for scalar fields.
+// compareSlices compares two []interface{} element-by-element and in order. Nested maps recurse into
+// CompareExisting and nested slices recurse into compareSlices; primitive elements are compared with the
+// same type-normalizing CompareAny used for scalar fields.
+//
+// Unlike CompareExisting, which deliberately ignores map keys ABSENT from the CR (configurationRef and
+// other cluster-only fields must not count as drift), a slice is compared by LENGTH as well as content.
+// A key present in the CR holding an explicit [] is not an absent key: it is the user declaring the list
+// empty. Treating present-and-empty as "no opinion" removed the only way to express that state, and did
+// so while reporting success.
 //
 // This closes two latent defects in the previous inline implementation:
 //   - primitive elements were compared with a raw `v != rmSlice[i]`, so an int64 CR value and the same
@@ -178,12 +182,15 @@ func CompareExisting(mg map[string]interface{}, rm map[string]interface{}, path 
 func compareSlices(valueSlice, rmSlice []interface{}, path []string) (ComparisonResult, error) {
 	pathStr := fmt.Sprintf("%v", path)
 
-	// If the first slice is longer than the second, they are not equal. If the second slice is longer,
-	// we ignore the extra elements because we only compare fields that exist in the first map.
-	if len(valueSlice) > len(rmSlice) {
+	// Lengths must match. The previous rule only rejected a CR slice LONGER than the remote one and
+	// ignored a longer remote as "extra elements", which made an empty CR slice compare equal to any
+	// remote slice at all: 0 > n is false, the range body never runs, and the function returns equal.
+	// Emptying a list could therefore never be enforced, and because the walk is positional, neither
+	// could reordering against a shorter CR slice -- both reported Ready=True while diverged (#76).
+	if len(valueSlice) != len(rmSlice) {
 		return ComparisonResult{
 			IsEqual: false,
-			Reason:  &Reason{Reason: "first slice is longer than second", FirstValue: valueSlice, SecondValue: rmSlice},
+			Reason:  &Reason{Reason: "slice lengths differ", FirstValue: valueSlice, SecondValue: rmSlice},
 		}, nil
 	}
 
