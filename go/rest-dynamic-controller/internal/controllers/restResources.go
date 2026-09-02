@@ -904,16 +904,34 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	}
 	reqConfiguration.Body = tb
 
+	// A 404 on DELETE is the SUCCESS condition, not a failure: it means the resource is already gone.
+	// Observe() a few hundred lines above already treats not-found this way; the delete path did not, and
+	// that inconsistency was harmless only while the delete was issued exactly once. Holding the finalizer
+	// until the resource is verified gone (#77) introduced the retry that reaches it: the first DELETE
+	// succeeds, the resource disappears asynchronously, and every retry then 404s, returns an error, and
+	// never releases the finalizer -- so the CR hangs in Deleting forever and the resource cannot be
+	// deleted through Kubernetes at all (#98). Reported against 0.22.1 on an API with no async block
+	// declared for delete.
 	response, err := apiCall(ctx, &http.Client{}, callInfo.Path, reqConfiguration)
+	alreadyGone := false
 	if err != nil {
-		log.Error(err, "Performing REST call")
-		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
-		return err
+		if restclient.IsNotFoundError(err) {
+			alreadyGone = true
+			log.Debug("External resource already absent on delete; treating as deleted", "kind", mg.GetKind())
+		} else {
+			log.Error(err, "Performing REST call")
+			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
+			return err
+		}
 	}
 
 	// If delete is asynchronous, poll the operation to completion so the resource is actually gone before
 	// we report success. PostGet is not meaningful for delete (the resource no longer exists).
-	if cfg := asyncConfigForAction(clientInfo.Resource.VerbsDescription, string(apiaction.Delete)); cfg != nil {
+	//
+	// Skipped when the resource was already absent: there is no operation to poll, and `response` carries
+	// the 404 rather than an operation handle, so driving async over it would fail on a delete that has in
+	// fact completed.
+	if cfg := asyncConfigForAction(clientInfo.Resource.VerbsDescription, string(apiaction.Delete)); cfg != nil && !alreadyGone {
 		if _, aerr := driveAsync(ctx, cli, clientInfo, mg, cfg, string(apiaction.Delete), response, reqConfiguration, log); aerr != nil {
 			log.Error(aerr, "Driving async delete operation")
 			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", aerr))
