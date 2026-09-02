@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-09-01T00:00:00Z
+timestamp: 2026-09-02T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,32 @@ timestamp: 2026-09-01T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-09-02 — 0.22.2
+
+Fixes a regression introduced in 0.22.1 that made resources **undeletable through
+Kubernetes** on APIs that delete asynchronously. Upgrade from 0.22.1 promptly.
+
+- **A 404 on DELETE is the success condition, not an error** (#98). 0.22.1 began holding
+  the finalizer until the resource was verified gone (#77) — correct in itself — but the
+  native delete path returned every `apiCall` error, including 404. So the first DELETE
+  succeeded, the resource disappeared, and every retry thereafter 404'd, errored, and never
+  released the finalizer: the CR hung in `Deleting` permanently and only a hand-edited
+  finalizer cleared it. The external resource was removed correctly; the CR was not.
+
+  The trade was bad in both directions: #77 fixed a rare silent orphan and 0.22.1 replaced
+  it with a guaranteed hang. `Observe()` had always treated not-found as absence; the delete
+  path now does the same, and skips the async block when the resource was already gone —
+  there is no operation to poll, and the response carries the 404 rather than a handle.
+
+  It shipped because the 0.22.1 test covered the resource-still-present path and never the
+  already-absent one, which is the path every retry takes. The regression test now deletes
+  **twice**, the second delete being precisely that retry.
+
+Also in this release, though not user-visible: the org-shared image-existence check now sizes
+its wait for a test-gated build. 0.22.1's charts failed to publish and needed a manual re-run
+because that check budgeted ~30m for images to appear, assuming the build starts immediately
+— an assumption the release gate added in #88 invalidated by putting the test suite first.
 
 ## 2026-09-01 — 0.22.1
 
