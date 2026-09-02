@@ -743,6 +743,57 @@ func TestController(t *testing.T) {
 
 			return ctx
 		}).
+		// A second Delete must also succeed. On an API that deletes asynchronously the finalizer is held
+		// until the resource is verified gone (#77), so Delete is retried -- and every retry after the
+		// first DELETE took effect gets a 404, because the resource is already gone. Returning that as an
+		// error means the finalizer never releases and the CR hangs in Deleting forever, which made
+		// resources undeletable through Kubernetes on 0.22.1 (#98). 404 is the success condition here.
+		Assess("DeleteIsIdempotentWhenAlreadyGone", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			body := `{"name":"gone-1","id":"gone-1","description":"to be deleted twice"}`
+			creq, _ := http.NewRequest("POST", "http://localhost:30007/resource", strings.NewReader(body))
+			creq.Header.Set("Authorization", "Bearer test")
+			creq.Header.Set("Content-Type", "application/json")
+			if cresp, cerr := http.DefaultClient.Do(creq); cerr != nil {
+				t.Error("Error seeding resource", "error", cerr)
+				return ctx
+			} else {
+				cresp.Body.Close()
+			}
+
+			u := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "sample.krateo.io/v1alpha1",
+				"kind":       "Sample",
+				"metadata": map[string]interface{}{
+					"name":      "gone-1",
+					"namespace": namespace,
+				},
+				"spec": map[string]interface{}{
+					"name": "gone-1",
+					"configurationRef": map[string]interface{}{
+						"name":      "my-sample-config",
+						"namespace": namespace,
+					},
+				},
+				"status": map[string]interface{}{
+					"id": "gone-1",
+				},
+			}}
+
+			if err := handler.Delete(ctx, u); err != nil {
+				t.Errorf("first Delete should succeed: %v", err)
+				return ctx
+			}
+
+			// The retry. Before the fix this returned "unexpected status: 404" forever.
+			if err := handler.Delete(ctx, u); err != nil {
+				t.Errorf("second Delete on an already-absent resource must succeed -- a 404 here is the "+
+					"resource being gone, and returning it as an error strands the finalizer (#98): %v", err)
+			} else {
+				t.Log("Delete is idempotent: a 404 on an already-deleted resource released the finalizer")
+			}
+
+			return ctx
+		}).
 		// A CR whose create never succeeded has no identifier in status, so the delete path /resource/{id}
 		// cannot be built at all. Delete must still release the finalizer: returning the "missing path
 		// parameter" error instead strands the CR in Deleting forever, and its namespace with it.
