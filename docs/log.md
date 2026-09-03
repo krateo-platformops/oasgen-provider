@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-09-02T00:00:00Z
+timestamp: 2026-09-03T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,33 @@ timestamp: 2026-09-02T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-09-03 — 0.22.3
+
+Third fix on the delete path in as many releases, and the last of one root cause.
+
+- **The observe verb decides, not the delete status code** (#101). 0.22.2 released the
+  finalizer when DELETE returned 404, but any *other* error still returned before the
+  existence check could run — so an API that answers a delete with an error for a resource
+  it has already removed hung the CR forever. Seen on Aruba `security/Kms`: `DELETE` → 400
+  "Some kms keys are not deleted", while a direct `GET` on the same id → 404.
+
+  The rule that finally holds is the one the reporter stated: **the finalizer releases when
+  the resource is observably gone, whatever the delete call said.** The delete status code is
+  a proxy; the observe verb is the ground truth.
+
+  One safeguard is load-bearing. `externalResourceStillExists` previously answered "not
+  present" both when the resource was verifiably absent and when it could not check at all —
+  no get verb, no buildable request. Releasing on the latter would orphan the resource, which
+  is the failure #77 exists to prevent, so it now reports whether it actually verified, and
+  only an affirmative absence releases. Where deletion cannot be verified the delete error
+  stands and the operation is retried.
+
+This is the third bug of identical shape: #77, #98 and #101 were each a branch that decided
+the finalizer's fate before reaching the existence check, and each fix moved that check one
+branch earlier. The structural remedy — making Delete level-triggered, so the check leads
+rather than trails, and expressing "in progress" as `Pending` instead of an error — is
+tracked in #103 rather than attempted in a hotfix.
 
 ## 2026-09-02 — 0.22.2
 
