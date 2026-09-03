@@ -67,22 +67,31 @@ func hasObserveVerb(verbs []getter.VerbsDescription) bool {
 // returns HTTP 200 even if a teardown stage failed, so a bare success is not proof of deletion. It returns
 // (false, nil) when there is no usable get verb to check with, in which case the caller trusts the delete
 // result (a documented limitation for resources with no get observe).
-func (h *handler) externalResourceStillExists(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured, log logging.Logger) (bool, error) {
+// It returns (stillExists, verified, err). `verified` distinguishes "the get verb answered and the
+// resource is absent" from "there was no way to check" -- both of which previously returned
+// (false, nil) and were indistinguishable to callers.
+//
+// That conflation is safe where a successful delete is being confirmed: no get verb means trusting
+// the delete result, a documented limitation. It is NOT safe when the delete itself FAILED, where
+// "could not check" must mean "retry", not "assume gone" -- otherwise any delete error on a resource
+// without a get verb would release the finalizer and orphan the resource, which is the bug #77 exists
+// to prevent (#101).
+func (h *handler) externalResourceStillExists(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured, log logging.Logger) (stillExists bool, verified bool, err error) {
 	getCall, getInfo, err := builder.APICallBuilder(cli, clientInfo, apiaction.Get)
 	if err != nil || getCall == nil || getInfo == nil {
-		log.Debug("No get verb to verify deletion; trusting the delete RESTAction result")
-		return false, nil
+		log.Debug("No get verb to verify deletion; trusting the delete result")
+		return false, false, nil
 	}
 	getReq := builder.BuildCallConfig(getInfo, mg, clientInfo.ConfigurationSpec, nil)
 	if getReq == nil {
-		return false, nil
+		return false, false, nil
 	}
 	_, cerr := getCall(ctx, &http.Client{}, getInfo.Path, getReq)
 	if restclient.IsNotFoundError(cerr) {
-		return false, nil // gone
+		return false, true, nil // verifiably gone
 	}
 	if cerr != nil {
-		return false, fmt.Errorf("verifying deletion via get: %w", cerr)
+		return false, false, fmt.Errorf("verifying deletion via get: %w", cerr)
 	}
-	return true, nil // get succeeded: still present
+	return true, true, nil // get succeeded: verifiably still present
 }

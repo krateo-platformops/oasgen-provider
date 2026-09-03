@@ -36,6 +36,10 @@ type MockServer struct {
 	// deletes asynchronously and declares no pollable operation: the 2xx means "deletion requested",
 	// not "deletion completed", and a subsequent GET still returns the resource.
 	lingerOnDelete bool
+	// deleteErrorsButRemoves reproduces an API that REMOVES the resource and still answers the DELETE
+	// with an error -- Aruba security/Kms answers 400 "Some kms keys are not deleted" for a key a
+	// direct GET already 404s on (#101). The delete status code is a proxy; the observe verb is truth.
+	deleteErrorsButRemoves bool
 }
 
 func NewMockServer(port int) *MockServer {
@@ -361,6 +365,14 @@ func (ms *MockServer) deleteResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// deleteErrorsButRemoves: actually remove the resource, then answer with an error anyway. A
+	// following GET 404s, so the observe verb disagrees with the delete status code.
+	if ms.deleteErrorsButRemoves {
+		delete(ms.resources, id)
+		ms.writeError(w, http.StatusBadRequest, "Some items are not deleted")
+		return
+	}
+
 	// lingerOnDelete: report success WITHOUT removing the resource, so a following GET still finds it.
 	// This is what an asynchronously-deleting API does when its OAS declares no pollable operation.
 	if ms.lingerOnDelete {
@@ -399,12 +411,13 @@ func (ms *MockServer) healthCheck(w http.ResponseWriter, r *http.Request) {
 // POST /admin/config - Configura comportamento del server per i test
 func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 	var config struct {
-		SimulateErrors       *bool `json:"simulateErrors,omitempty"`
-		ResponseDelay        *int  `json:"responseDelayMs,omitempty"`
-		AuthFailures         *bool `json:"authFailures,omitempty"`
-		AsyncOperations      *bool `json:"asyncOperations,omitempty"`
-		CompletePendingAsync *bool `json:"completePendingAsync,omitempty"`
-		LingerOnDelete       *bool `json:"lingerOnDelete,omitempty"`
+		SimulateErrors         *bool `json:"simulateErrors,omitempty"`
+		ResponseDelay          *int  `json:"responseDelayMs,omitempty"`
+		AuthFailures           *bool `json:"authFailures,omitempty"`
+		AsyncOperations        *bool `json:"asyncOperations,omitempty"`
+		CompletePendingAsync   *bool `json:"completePendingAsync,omitempty"`
+		LingerOnDelete         *bool `json:"lingerOnDelete,omitempty"`
+		DeleteErrorsButRemoves *bool `json:"deleteErrorsButRemoves,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
@@ -430,6 +443,9 @@ func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if config.LingerOnDelete != nil {
 		ms.lingerOnDelete = *config.LingerOnDelete
+	}
+	if config.DeleteErrorsButRemoves != nil {
+		ms.deleteErrorsButRemoves = *config.DeleteErrorsButRemoves
 	}
 	if config.SimulateErrors != nil {
 		ms.simulateErrors = *config.SimulateErrors

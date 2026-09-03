@@ -794,6 +794,71 @@ func TestController(t *testing.T) {
 
 			return ctx
 		}).
+		// An API may answer a DELETE with an error for a resource it has ALREADY removed. Aruba
+		// security/Kms returns 400 "Some kms keys are not deleted" while a direct GET returns 404.
+		// The delete status code is a proxy; the observe verb is the ground truth, and returning the
+		// error without consulting it left the CR in Deleting forever (#101).
+		//
+		// Only an affirmative, VERIFIED absence releases: where there is no get verb to ask, the
+		// original delete error stands, because "could not check" must not become "assume gone". That
+		// branch is not covered here -- it needs a RestDefinition fixture with no get verb -- so it
+		// rests on code inspection rather than on this test.
+		Assess("DeleteReleasesWhenErrorButResourceVerifiablyGone", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			body := `{"name":"kms-1","id":"kms-1","description":"delete errors but removes"}`
+			creq, _ := http.NewRequest("POST", "http://localhost:30007/resource", strings.NewReader(body))
+			creq.Header.Set("Authorization", "Bearer test")
+			creq.Header.Set("Content-Type", "application/json")
+			if cresp, cerr := http.DefaultClient.Do(creq); cerr != nil {
+				t.Error("Error seeding resource", "error", cerr)
+				return ctx
+			} else {
+				cresp.Body.Close()
+			}
+
+			if _, err := http.Post("http://localhost:30007/admin/config", "application/json",
+				strings.NewReader(`{"deleteErrorsButRemoves": true}`)); err != nil {
+				t.Error("Error configuring mock server", "error", err)
+				return ctx
+			}
+			defer func() {
+				http.Post("http://localhost:30007/admin/config", "application/json",
+					strings.NewReader(`{"deleteErrorsButRemoves": false}`))
+			}()
+
+			u := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "sample.krateo.io/v1alpha1",
+				"kind":       "Sample",
+				"metadata":   map[string]interface{}{"name": "kms-1", "namespace": namespace},
+				"spec": map[string]interface{}{
+					"name": "kms-1",
+					"configurationRef": map[string]interface{}{
+						"name":      "my-sample-config",
+						"namespace": namespace,
+					},
+				},
+				"status": map[string]interface{}{"id": "kms-1"},
+			}}
+
+			if err := handler.Delete(ctx, u); err != nil {
+				t.Errorf("Delete must release the finalizer when the DELETE errored but the resource is "+
+					"verifiably absent -- holding it strands the CR in Deleting forever (#101): %v", err)
+			} else {
+				t.Log("Delete released the finalizer despite the delete error, because the resource is verifiably gone")
+			}
+
+			// Confirm the resource really was removed, so this tests the intended path and not a
+			// vacuous success against a resource that never existed.
+			req, _ := http.NewRequest("GET", "http://localhost:30007/resource/kms-1", nil)
+			req.Header.Set("Authorization", "Bearer test")
+			if resp, rerr := http.DefaultClient.Do(req); rerr == nil {
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusNotFound {
+					t.Errorf("precondition: resource should be gone, got %d", resp.StatusCode)
+				}
+			}
+
+			return ctx
+		}).
 		// A CR whose create never succeeded has no identifier in status, so the delete path /resource/{id}
 		// cannot be built at all. Delete must still release the finalizer: returning the "missing path
 		// parameter" error instead strands the CR in Deleting forever, and its namespace with it.
