@@ -823,7 +823,9 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
 			return err
 		}
-		stillExists, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
+		// `verified` is ignored here on purpose: this branch runs after the RESTAction reported success,
+		// so no get verb means trusting that result -- the documented limitation, unchanged.
+		stillExists, _, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
 		if verr != nil {
 			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", verr))
 			return verr
@@ -919,9 +921,27 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			alreadyGone = true
 			log.Debug("External resource already absent on delete; treating as deleted", "kind", mg.GetKind())
 		} else {
-			log.Error(err, "Performing REST call")
-			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
-			return err
+			// The status code of a DELETE is a PROXY for whether the resource is gone; the observe verb is
+			// the ground truth, and the controller already knows how to ask it. Returning here without
+			// asking is what left the existence check below unreachable on any non-404 error, so an API
+			// that answers a delete with, say, 400 for a resource it has already removed hung the CR in
+			// Deleting forever (#101 -- observed on Aruba security/Kms, where DELETE returned 400
+			// "Some kms keys are not deleted" while a direct GET returned 404).
+			//
+			// Only an AFFIRMATIVE, verified absence releases here. If there is no get verb, or the get
+			// itself failed, `verified` is false and the original delete error stands: "could not check"
+			// must mean retry, never "assume gone" -- assuming would orphan the resource, which is the
+			// failure #77 exists to prevent.
+			stillExists, verified, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
+			if verr == nil && verified && !stillExists {
+				alreadyGone = true
+				log.Info("Delete returned an error but the external resource is verifiably absent; releasing finalizer",
+					"kind", mg.GetKind(), "deleteError", err.Error())
+			} else {
+				log.Error(err, "Performing REST call")
+				h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
+				return err
+			}
 		}
 	}
 
@@ -950,7 +970,9 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// verifiably absent. Where an async operation IS declared, driveAsync above has already polled it to
 	// completion and this check simply confirms it. Where the API has no get verb to probe with,
 	// externalResourceStillExists reports (false, nil) and we trust the delete result, as before.
-	stillExists, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
+	// `verified` ignored: reached only when the DELETE itself succeeded, so an unverifiable resource
+	// falls back to trusting that success, as before.
+	stillExists, _, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
 	if verr != nil {
 		log.Error(verr, "Verifying deletion")
 		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", verr))
