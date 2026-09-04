@@ -1,0 +1,13 @@
+# Configuration instance for the no-get-verb delete fixture. Mirrors sample-config.yaml.
+apiVersion: sample.krateo.io/v1alpha1
+kind: NogetsampleConfiguration
+metadata:
+  name: my-noget-config
+  namespace: default
+spec:
+  authentication:
+    bearer:
+      tokenRef:
+        name: sample-auth-sec
+        namespace: default
+        key: token

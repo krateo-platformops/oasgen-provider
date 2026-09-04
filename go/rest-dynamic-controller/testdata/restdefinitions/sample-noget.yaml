@@ -1,0 +1,36 @@
+# A resource with NO get verb, used to exercise the unverifiable branch of the delete path.
+#
+# externalResourceStillExists probes with the `get` action specifically, so a resource declaring only
+# findby cannot be verified as deleted. That is a real shape -- collection-only APIs exist -- and it is
+# the case where "the resource is observably gone" is unanswerable, so the delete result is the only
+# signal available.
+#
+# It matters because the safe default inverts here: everywhere else an affirmative absence releases the
+# finalizer, but where absence CANNOT be established, "could not check" must mean retry rather than
+# "assume gone". Assuming would orphan the external resource, which is the failure #77 exists to
+# prevent and which #101 nearly reintroduced. That branch had no test until #103.
+apiVersion: ogen.krateo.io/v1alpha1
+kind: RestDefinition
+metadata:
+  name: sample-noget
+  namespace: demo-system
+spec:
+  oasPath: configmap://demo-system/sample/openapi.yaml
+  resourceGroup: sample.krateo.io
+  resource:
+    identifiers:
+    - name
+    additionalStatusFields:
+    - id
+    kind: Nogetsample
+    verbsDescription:
+    - action: create
+      method: POST
+      path: /resource
+    - action: delete
+      method: DELETE
+      path: /resource/{id}
+    # deliberately NO get verb
+    - action: findby
+      method: GET
+      path: /resource
