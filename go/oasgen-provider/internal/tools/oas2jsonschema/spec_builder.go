@@ -236,25 +236,38 @@ func (g *OASSchemaGenerator) addIdentifierSelectorsToSpec(schema *Schema) []erro
 			continue // already expressible (e.g. it is also a path/query parameter)
 		}
 
+		// A DOTTED identifier is a nested path, not a key containing dots. RDC reads it that way --
+		// isInResource splits on "." and walks spec -> metadata -> name via NestedFieldNoCopy -- so
+		// emitting a flat property literally named "metadata.name" produces a spec the controller can
+		// never read: findby compares against a field that does not exist and matches nothing, silently,
+		// on a resource that reports Ready (#106).
+		//
+		// composeStatusSchema already handles this class of value correctly with the same two helpers.
+		// Diverging from it here is what created the bug, so the selector path now uses them too.
+		pathSegments, perr := pathparsing.ParsePath(identifier)
+		if perr != nil {
+			warnings = append(warnings, SchemaGenerationError{
+				Path:    fmt.Sprintf("identifiers.%s", identifier),
+				Code:    CodeFieldNotFound,
+				Message: fmt.Sprintf("invalid path format for identifier '%s': %v", identifier, perr),
+				Got:     identifier,
+			})
+			continue
+		}
+		leaf := pathSegments[len(pathSegments)-1]
+
 		selector := &Schema{
 			Type:        []string{"string"},
 			Description: "SELECTOR: identifies which existing object this resource refers to. This resource declares no create verb, so this field selects an object rather than defining one.",
 		}
 
-		var found bool
-		if statusSchema != nil {
-			for _, p := range statusSchema.Properties {
-				if p.Name == identifier && p.Schema != nil {
-					found = true
-					if len(p.Schema.Type) > 0 {
-						selector.Type = p.Schema.Type
-					}
-					break
-				}
+		// Resolve the declared type by walking the SAME path through the observe response, so a nested
+		// identifier keeps its type instead of silently becoming a string.
+		if found, typ := lookupTypeByPath(statusSchema, pathSegments); found {
+			if len(typ) > 0 {
+				selector.Type = typ
 			}
-		}
-
-		if !found {
+		} else {
 			warnings = append(warnings, SchemaGenerationError{
 				Path: fmt.Sprintf("identifiers.%s", identifier),
 				Code: CodeIdentifierNotResolvable,
@@ -264,10 +277,39 @@ func (g *OASSchemaGenerator) addIdentifierSelectorsToSpec(schema *Schema) []erro
 			})
 		}
 
-		schema.Properties = append(schema.Properties, Property{Name: identifier, Schema: selector})
+		g.addPropertyByPath(schema, pathSegments, Property{Name: leaf, Schema: selector})
 	}
 
 	return warnings
+}
+
+// lookupTypeByPath walks a parsed path through a schema and reports the leaf's declared type.
+//
+// It exists because an identifier may be nested ("metadata.name"), so checking only the top-level
+// properties -- as this file did before #106 -- both misses the type and misreports the field as
+// absent, firing CodeIdentifierNotResolvable for an identifier that is perfectly valid.
+func lookupTypeByPath(schema *Schema, path []string) (bool, []string) {
+	cur := schema
+	for i, seg := range path {
+		if cur == nil {
+			return false, nil
+		}
+		var next *Schema
+		for _, p := range cur.Properties {
+			if p.Name == seg {
+				next = p.Schema
+				break
+			}
+		}
+		if next == nil {
+			return false, nil
+		}
+		if i == len(path)-1 {
+			return true, next.Type
+		}
+		cur = next
+	}
+	return false, nil
 }
 
 // isAuthorizationHeader checks if the given parameter is an authorization header (case-insensitive).
