@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
@@ -223,4 +224,69 @@ func TestFindBy_NoPagination(t *testing.T) {
 	bodyMap, ok := resp.ResponseBody.(map[string]interface{})
 	assert.True(t, ok)
 	assert.Equal(t, "1", bodyMap["id"])
+}
+
+// TestFindBy_Pagination_NeverTerminating covers #119: the paginated findby loop had no page cap, so a
+// server that always advertises a next page walked forever. A reconcile that never returns is worse
+// than one that fails — it holds a worker and produces no diagnosis.
+//
+// The assertion that matters is not merely "it stops": it is that stopping is reported as a DISTINCT
+// outcome from not-found. IsNotFoundError keys on a 404, and the reconciler acts on not-found by
+// CREATING the resource. Folding the cap into a 404 would tell it "this does not exist" when the truth
+// is "I stopped looking", and it would create a duplicate of the very object it never finished
+// searching for — reintroducing, through a different door, the silent-wrong failure #119 is about.
+func TestFindBy_Pagination_NeverTerminating(t *testing.T) {
+	var requests int32
+	// Always answers with a next-page token and never the item being searched for.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Next-Token", "always-more")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, `{"items": [{"id": "x", "name": "not-the-one"}]}`)
+	}))
+	defer server.Close()
+
+	doc, err := libopenapi.NewDocument([]byte(paginatedOpenAPISpec))
+	assert.NoError(t, err)
+	v3Doc, errs := doc.BuildV3Model()
+	assert.Empty(t, errs)
+
+	client := &UnstructuredClient{
+		Server:    server.URL,
+		DocScheme: v3Doc,
+		Resource: &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"spec": map[string]interface{}{"name": "never-present"},
+			},
+		},
+		IdentifierFields: []string{"name"},
+	}
+	findByAction := &getter.VerbsDescription{
+		Pagination: &getter.Pagination{
+			Type: "continuationToken",
+			ContinuationToken: &getter.ContinuationTokenConfig{
+				Request:  getter.ContinuationTokenRequest{TokenIn: "query", TokenPath: "token"},
+				Response: getter.ContinuationTokenResponse{TokenIn: "header", TokenPath: "X-Next-Token"},
+			},
+		},
+	}
+
+	_, err = client.FindBy(context.Background(), server.Client(), "/items",
+		&RequestConfiguration{Method: http.MethodGet}, findByAction)
+
+	// 1. It terminates at all.
+	assert.Error(t, err, "an endlessly-paginating server must not loop forever")
+
+	// 2. It is NOT reported as absence. This is the load-bearing assertion.
+	assert.False(t, IsNotFoundError(err),
+		"hitting the page cap must not look like not-found: the reconciler creates on not-found, so it "+
+			"would duplicate a resource it never finished searching for (#119)")
+
+	// 3. The error says which of the two happened, so an operator is not left guessing.
+	assert.Contains(t, err.Error(), "safety limit")
+
+	// 4. It stopped at the cap rather than merely somewhere.
+	assert.Equal(t, int32(maxFindByPages), atomic.LoadInt32(&requests),
+		"should scan exactly maxFindByPages pages before giving up")
 }

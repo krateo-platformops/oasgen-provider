@@ -280,7 +280,29 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 
 	paginator.Init()
 
+	// Bound the walk. This loop had no cap at all: its only exits were a match, a transport error, or
+	// the paginator reporting done, so a findby over a large collection with no match walked every page,
+	// and a paginator that never reports done walked forever (#119).
+	//
+	// This is a SAFETY BACKSTOP, not a policy knob. It exists to make a runaway terminate, and is set
+	// high enough that no legitimate search reaches it. The per-RestDefinition bound an author actually
+	// wants -- "scan at most N pages for this resource" -- is the `maxPages` field proposed in #119, and
+	// belongs with that design rather than being smuggled in as a constant here.
+	pagesScanned := 0
+
 	for {
+		if pagesScanned >= maxFindByPages {
+			// NOT a 404. IsNotFoundError keys on a 404 StatusError, and the reconciler acts on not-found
+			// by CREATING the resource -- so returning one here would tell it "this does not exist" when
+			// the truth is "I stopped looking", and it would create a duplicate of something it never
+			// finished searching for. "I scanned N pages and did not conclude" is a different answer
+			// from "it is not there", and must stay one.
+			return Response{}, fmt.Errorf(
+				"findby stopped after scanning %d pages without finding a match or reaching the end of the collection; "+
+					"this is a safety limit, not a conclusion that the resource is absent", maxFindByPages)
+		}
+		pagesScanned++
+
 		// Build and execute the request with the current paginator configuration (e.g., continuationToken).
 		response, httpResp, err := u.CallForPagination(ctx, cli, path, opts, paginator)
 		if err != nil {
@@ -324,6 +346,10 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 		Inner:      fmt.Errorf("item not found after checking all pages"),
 	}
 }
+
+// maxFindByPages caps the paginated findby walk -- a runaway backstop, deliberately far above any
+// real search, and NOT the per-resource bound an author would configure (#119).
+const maxFindByPages = 1000
 
 // CallFindBySingle executes a non-paginated FindBy operation.
 func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration) (Response, error) {
