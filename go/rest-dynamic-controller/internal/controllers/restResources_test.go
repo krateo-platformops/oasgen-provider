@@ -906,7 +906,11 @@ func TestController(t *testing.T) {
 							// Each kind resolves its own <Kind>Configuration, so the no-get fixture
 							// needs its own instance -- pointing at my-sample-config would fail at
 							// client-info resolution and hold the finalizer for the wrong reason.
-							"name":      map[string]string{"Sample": "my-sample-config", "Nogetsample": "my-noget-config"}[kind],
+							"name": map[string]string{
+								"Sample":          "my-sample-config",
+								"Nogetsample":     "my-noget-config",
+								"Tombstonesample": "my-tombstone-config",
+							}[kind],
 							"namespace": namespace,
 						},
 					},
@@ -944,6 +948,14 @@ func TestController(t *testing.T) {
 					wantRelease: true, why: "#101: the observe verb outranks the delete status code",
 				},
 				{
+					// #111: the get answers 200 with a tombstone. The status code says present, notFoundBody
+					// says absent, and notFoundBody wins -- otherwise a soft-deleting API wedges its CR in
+					// Deleting forever. Observe already resolved absence this way; the delete probe did not.
+					name: "success/200-tombstone/verifiable", kind: "Tombstonesample", id: "mx-f", seedFirst: true,
+					serverCfg:   `{"tombstoneOnDelete": true}`,
+					wantRelease: true, why: "#111: a 200 tombstone is absence, not presence",
+				},
+				{
 					name: "error/still-present/unverifiable", kind: "Nogetsample", id: "mx-e", seedFirst: true,
 					serverCfg:   `{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": true}`,
 					wantRelease: false, why: "no get verb: absence cannot be established, so the delete error governs -- retry, never assume gone",
@@ -952,12 +964,12 @@ func TestController(t *testing.T) {
 
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
-					configure(`{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": false}`)
+					configure(`{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": false, "tombstoneOnDelete": false}`)
 					if tc.seedFirst {
 						seed(tc.id)
 					}
 					configure(tc.serverCfg)
-					defer configure(`{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": false}`)
+					defer configure(`{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": false, "tombstoneOnDelete": false}`)
 
 					err := handler.Delete(ctx, cr(tc.kind, tc.id))
 					released := err == nil

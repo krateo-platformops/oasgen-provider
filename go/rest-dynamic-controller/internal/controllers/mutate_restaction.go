@@ -136,12 +136,36 @@ func (h *handler) externalResourceStillExists(ctx context.Context, cli restclien
 	if getReq == nil {
 		return false, false, nil
 	}
-	_, cerr := getCall(ctx, &http.Client{}, getInfo.Path, getReq)
+	body, cerr := getCall(ctx, &http.Client{}, getInfo.Path, getReq)
 	if restclient.IsNotFoundError(cerr) {
 		return false, true, nil // verifiably gone
 	}
 	if cerr != nil {
 		return false, false, fmt.Errorf("verifying deletion via get: %w", cerr)
 	}
-	return true, true, nil // get succeeded: verifiably still present
+
+	// A 200 does not always mean "still there". Some APIs answer GET for a deleted resource with a
+	// TOMBSTONE -- 200 plus a record carrying status: Deleted -- rather than 404, so treating the status
+	// code alone as presence wedges the CR in Deleting forever (#111, observed on Aruba security/Kmip
+	// whose own list endpoint reports zero, including with includeDeleted=true).
+	//
+	// notFoundBody already exists for exactly this and Observe honours it; the delete verification did
+	// not, which is the same shape as every other bug on this path: two code paths that must agree, and
+	// one was not updated. Consulting it here makes the observe verb's notion of absence a single
+	// definition rather than two.
+	if prog := notFoundBodyForAction(clientInfo.Resource.VerbsDescription, string(apiaction.Get)); prog != nil {
+		gone, perr := evalNotFoundBody(ctx, prog, body)
+		if perr != nil {
+			// A mistyped predicate must not read as "still present" and hold the finalizer forever, nor
+			// as "gone" and orphan the resource: report it unverifiable so the delete result governs.
+			log.Warn("notFoundBody predicate failed while verifying deletion; treating as unverifiable", "error", perr.Error())
+			return false, false, nil
+		}
+		if gone {
+			log.Debug("Get returned 200 but notFoundBody reports the resource absent; treating as deleted")
+			return false, true, nil
+		}
+	}
+
+	return true, true, nil // get succeeded and no tombstone predicate matched: verifiably still present
 }

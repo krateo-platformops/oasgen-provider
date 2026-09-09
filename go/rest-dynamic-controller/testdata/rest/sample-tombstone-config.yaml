@@ -1,0 +1,13 @@
+# Configuration instance for the tombstone delete fixture (#111).
+apiVersion: sample.krateo.io/v1alpha1
+kind: TombstonesampleConfiguration
+metadata:
+  name: my-tombstone-config
+  namespace: default
+spec:
+  authentication:
+    bearer:
+      tokenRef:
+        name: sample-auth-sec
+        namespace: default
+        key: token
