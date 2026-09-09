@@ -386,7 +386,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 			WithMessage(fmt.Sprintf("Dynamic Controller '%s' not deployed yet", obj.Name)))
 
 		return reconciler.ExternalObservation{
-			ResourceExists:   false,
+			ResourceExists:   resourceExistsForController(deployOk, deployReady),
 			ResourceUpToDate: true,
 		}, nil
 	}
@@ -404,8 +404,30 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		cr.SetConditions(rtv1.Unavailable().
 			WithMessage(fmt.Sprintf("Dynamic Controller '%s' not ready yet", obj.Name)))
 
+		// EXISTS BUT NOT READY IS NOT "DOES NOT EXIST". The Deployment is right there -- deployOk is
+		// true -- it simply has not finished rolling out.
+		//
+		// Reporting ResourceExists: false here told provider-runtime the external resource was GONE, so
+		// it re-entered the create handshake on a resource that had already been created: it re-set
+		// krateo.io/external-create-pending, and because Observe kept answering "not exists" past the
+		// creation grace period, the reconcile wedged on errCreateIncomplete ("cannot determine creation
+		// result"). The RestDefinition then sat Ready=False forever with a CRD that was in fact served
+		// and functional, and took its owning composition down with it.
+		//
+		// Observed on a 34-RestDefinition install where exactly one wedged -- the annotations are the
+		// proof: external-create-succeeded at 20:34:44, external-create-pending re-set at 20:35:59, 75
+		// seconds AFTER the create had succeeded. It is timing-dependent, so it recurs intermittently on
+		// any large multi-kind install and not at all on small ones.
+		//
+		// Readiness is surfaced through the Unavailable condition above, which is what conditions are
+		// for. ResourceUpToDate stays true so the runtime waits in the observe path rather than
+		// attempting an Update on a controller that is still starting.
+		//
+		// NOTE the deliberate asymmetry with the !deployOk branch above, which keeps returning false:
+		// there the Deployment genuinely does NOT exist, and Create is what deploys it. Returning true
+		// there would be a real bug -- the controller would never be created at all.
 		return reconciler.ExternalObservation{
-			ResourceExists:   false,
+			ResourceExists:   resourceExistsForController(deployOk, deployReady),
 			ResourceUpToDate: true,
 		}, nil
 	}
@@ -494,6 +516,27 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		ResourceExists:   true,
 		ResourceUpToDate: true,
 	}, nil
+}
+
+// resourceExistsForController answers the single question Observe must get right about the dynamic
+// controller: does the external resource EXIST? Readiness is a separate axis, surfaced through
+// conditions, and conflating the two is what wedged RestDefinitions on large installs (#122).
+//
+//	deployOk  deployReady  ->  exists
+//	false     -            ->  false   the Deployment is genuinely absent; Create is what deploys it,
+//	                                   so reporting true here would mean it is never created at all
+//	true      false        ->  TRUE    it exists, it is merely still rolling out. Reporting false told
+//	                                   provider-runtime the resource was GONE, so it re-entered the
+//	                                   create handshake on an already-created resource, re-set
+//	                                   krateo.io/external-create-pending, and wedged on
+//	                                   errCreateIncomplete once the creation grace period lapsed
+//	true      true         ->  true    the ordinary case
+//
+// The asymmetry between the first two rows is deliberate and load-bearing; see #122 for the live
+// reproduction, where external-create-pending was re-set 75 seconds AFTER create had succeeded.
+func resourceExistsForController(deployOk, deployReady bool) bool {
+	_ = deployReady // readiness never affects existence; named to make that explicit rather than implicit
+	return deployOk
 }
 
 func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) {

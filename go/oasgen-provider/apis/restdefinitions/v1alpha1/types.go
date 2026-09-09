@@ -262,6 +262,26 @@ type VerbsDescription struct {
 	// Path: the path to the api - has to be the same path as the one in the OAS file you are referencing
 	// +required
 	Path string `json:"path"`
+	// OASPath optionally overrides spec.oasPath for THIS VERB ONLY, using the same URI schemes:
+	//   configmap://<namespace>/<name>/<key>   |   http(s)://<url>
+	//
+	// A resource whose verbs span two OAS documents is otherwise undescribable, because spec.oasPath is
+	// singular. That is not a degraded case but an impossible one: when a vendor introduces an operation
+	// in a later API version, the resource cannot be expressed at all. Aruba's CloudServer is the
+	// motivating example -- findby/get/delete live in compute-provider.json (1.0.0) while create lives in
+	// compute-provider_v1.1.json (1.1.0), and Aruba's own SDK pins exactly that split.
+	//
+	// Documents are read as published and never merged: pre-merging would break the guarantee that a
+	// generated CRD traces back to one vendor document, which this repo checksum-enforces. Where two
+	// documents disagree about a schema both use, the RestDefinition is REJECTED at admission rather
+	// than silently preferring one.
+	//
+	// Which document supplies what is unchanged, only made explicit: the create verb's document drives
+	// the generated spec schema, the observe (get/findby) document drives status and identifiers, and
+	// security schemes come from the resource-level document.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^(configmap:\/\/([a-z0-9-]+)\/([a-z0-9-]+)\/([a-zA-Z0-9._-]+)|https?:\/\/\S+)$`
+	OASPath string `json:"oasPath,omitempty"`
 	// RequestFieldMapping provides explicit mapping from API parameters (path, query, or body)
 	// to fields in the Custom Resource.
 	//
