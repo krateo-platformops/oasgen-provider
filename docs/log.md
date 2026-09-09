@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-09-03T00:00:00Z
+timestamp: 2026-09-09T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,50 @@ timestamp: 2026-09-03T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-09-09 — 0.23.0
+
+A minor rather than a patch: the generated CRD shape changes for read-only resources, and the
+delete path was restructured. Everything here was found by running the provider against a live
+vendor API, not by inspection.
+
+- **Query parameter values were escaped twice** (#113). `buildPath` called `url.QueryEscape` and
+  then handed the escaped string to `url.Values`, whose `Encode()` escaped the `%` of the first
+  pass. A git ref `builder/sock-shop` left as `builder%252Fsock-shop`; the API decoded once, looked
+  up a ref literally named `builder%2Fsock-shop`, and returned 404 — so observe never saw the file
+  it had just created and the CR looped `Creating` forever. Path parameters were never affected and
+  are now pinned by a test so they cannot become so.
+
+- **Dotted identifiers emitted a flat key** (#106). A nested identifier such as `metadata.name` was
+  generated as a property literally named `"metadata.name"`, while RDC reads identifiers as nested
+  paths. The two could never agree, so `findby` matched nothing for any read-only resource with a
+  nested identifier — silently, on a CR reporting `Ready`. A regression in the #75 selector work;
+  `composeStatusSchema` had always handled the same class of value correctly, and the selector
+  builder now uses the same helpers.
+
+- **A 200 tombstone is absence, not presence** (#111). Some APIs answer `GET` for a deleted resource
+  with 200 and a `status: Deleted` record rather than 404. The delete verification read that as
+  "still there" and never released the finalizer. `notFoundBody` already expressed exactly this and
+  Observe already honoured it; the delete path now consults the same predicate, so absence has one
+  definition instead of two.
+
+- **One arbiter decides the finalizer** (#103). Three delete bugs in three releases (#77, #98, #101)
+  were a single defect: the authoritative existence check sat at the *end* of `Delete()`, so any
+  branch returning earlier decided without it, and each fix moved the check one branch earlier. It is
+  now the sole arbiter, and the delete call is best effort — its status code no longer decides
+  anything by itself. The rule: **release when the resource is observably gone, whatever the delete
+  call said**, except where absence cannot be established, in which case the delete result governs
+  and "could not check" means retry rather than "assume gone".
+
+  The delete contract is now tested as a matrix over {delete outcome} × {resource present} ×
+  {verifiable} rather than one case per past incident. Four tests in this codebase have passed while
+  testing nothing; two of them shipped, as #98 and #101.
+
+Also: grpc bumped in both modules.
+
+Not in this release, and tracked: per-verb `oasPath` (#108), envelope findby unwrapping (#110), and
+request-direction value transformation on path parameters (#117). Each changes API surface or CRD
+compatibility and wants a deliberate decision rather than inclusion in a bugfix cut.
 
 ## 2026-09-03 — 0.22.3
 
