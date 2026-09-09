@@ -832,3 +832,101 @@ func TestBuildSpecSchema_ReadOnlyResource(t *testing.T) {
 		assert.NotContains(t, props, "name", "selector materialisation must apply ONLY to read-only resources")
 	})
 }
+
+// TestBuildSpecSchema_NestedIdentifierSelector covers #106: a DOTTED identifier was emitted as a flat
+// property literally named "metadata.name", while RDC reads identifiers as nested paths (isInResource
+// splits on "." and walks spec -> metadata -> name). The two could never agree, so findby matched
+// nothing for any read-only resource with a nested identifier -- silently, on a CR reporting Ready.
+//
+// It shipped in 0.22.x because the #75 test modelled a FLAT findby item, where a flat emitted key looks
+// correct. This one uses the envelope shape real APIs return -- {total, values:[{metadata:{...}}]} --
+// which is what makes the difference observable.
+func TestBuildSpecSchema_NestedIdentifierSelector(t *testing.T) {
+	// The shape Aruba (and most metadata-wrapped APIs) actually return.
+	envelopeItem := []Property{
+		{Name: "metadata", Schema: &Schema{
+			Type: []string{"object"},
+			Properties: []Property{
+				{Name: "id", Schema: &Schema{Type: []string{"string"}}},
+				{Name: "name", Schema: &Schema{Type: []string{"string"}}},
+				{Name: "serial", Schema: &Schema{Type: []string{"integer"}}},
+			},
+		}},
+		{Name: "status", Schema: &Schema{Type: []string{"object"}}},
+	}
+	doc := &mockOASDocument{
+		Paths: map[string]*mockPathItem{
+			"/projects/{projectId}/cloudServers": {Ops: map[string]Operation{
+				"get": &mockOperation{
+					Parameters: []ParameterInfo{
+						{Name: "projectId", In: "path", Schema: &Schema{Type: []string{"string"}}, Required: true},
+					},
+					Responses: map[int]ResponseInfo{
+						200: {Content: map[string]*Schema{
+							"application/json": {Type: []string{"array"}, Items: &Schema{Type: []string{"object"}, Properties: envelopeItem}},
+						}},
+					},
+				},
+			}},
+		},
+	}
+	verbs := []Verb{{Action: ActionFindBy, Path: "/projects/{projectId}/cloudServers", Method: "get"}}
+
+	t.Run("dotted identifier nests instead of becoming a flat dotted key", func(t *testing.T) {
+		g := &OASSchemaGenerator{
+			doc:             doc,
+			generatorConfig: DefaultGeneratorConfig(),
+			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"metadata.name"}},
+		}
+		out, _, err := g.BuildSpecSchema()
+		require.NoError(t, err)
+
+		var got map[string]interface{}
+		require.NoError(t, json.Unmarshal(out, &got))
+		props := got["properties"].(map[string]interface{})
+
+		assert.NotContains(t, props, "metadata.name",
+			"a flat key containing a dot is unreadable by RDC, which walks spec->metadata->name (#106)")
+		require.Contains(t, props, "metadata", "the identifier must nest under a real metadata object")
+
+		md := props["metadata"].(map[string]interface{})
+		mdProps, ok := md["properties"].(map[string]interface{})
+		require.True(t, ok, "metadata must be an object with properties")
+		assert.Contains(t, mdProps, "name", "the leaf must exist at the nested path RDC reads")
+	})
+
+	t.Run("nested identifier keeps its declared type", func(t *testing.T) {
+		g := &OASSchemaGenerator{
+			doc:             doc,
+			generatorConfig: DefaultGeneratorConfig(),
+			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"metadata.serial"}},
+		}
+		out, _, err := g.BuildSpecSchema()
+		require.NoError(t, err)
+
+		var got map[string]interface{}
+		require.NoError(t, json.Unmarshal(out, &got))
+		md := got["properties"].(map[string]interface{})["metadata"].(map[string]interface{})
+		serial := md["properties"].(map[string]interface{})["serial"].(map[string]interface{})
+		assert.Equal(t, "integer", serial["type"],
+			"the type must be resolved by walking the same nested path, not defaulted to string")
+	})
+
+	t.Run("a nested identifier that really is absent still warns", func(t *testing.T) {
+		g := &OASSchemaGenerator{
+			doc:             doc,
+			generatorConfig: DefaultGeneratorConfig(),
+			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"metadata.nonexistent"}},
+		}
+		_, warnings, err := g.BuildSpecSchema()
+		require.NoError(t, err)
+
+		var found bool
+		for _, w := range warnings {
+			if ge, ok := w.(SchemaGenerationError); ok && ge.Code == CodeIdentifierNotResolvable {
+				found = true
+			}
+		}
+		assert.True(t, found, "the warning must still discriminate a genuinely absent nested identifier")
+	})
+}
