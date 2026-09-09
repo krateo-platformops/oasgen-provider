@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-09-09T00:00:00Z
+timestamp: 2026-09-10T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,41 @@ timestamp: 2026-09-09T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-09-10 — 0.23.1
+
+Two field-reported failures, both of which presented as a resource being permanently stuck rather
+than as an error.
+
+- **A RestDefinition could wedge forever while its controller was still starting** (#122). `Observe`
+  reported `ResourceExists: false` when the dynamic controller Deployment existed but had not
+  finished rolling out. provider-runtime reads that as "the external resource is gone" and re-enters
+  the create handshake, so a reconcile landing mid-rollout re-set
+  `krateo.io/external-create-pending` on a resource that had **already** been created and then wedged
+  on `errCreateIncomplete` once the creation grace period lapsed. The RestDefinition sat `Ready=False`
+  permanently with a CRD that was in fact served and functional, and took its owning composition down
+  with it.
+
+  Reported from a 34-RestDefinition install where exactly one wedged — the slowest controller to
+  become Ready — with `external-create-succeeded` at 20:34:44 and `external-create-pending` re-set at
+  20:35:59, 75 seconds later. It is timing-dependent, so it recurs intermittently on large multi-kind
+  installs and never on small ones.
+
+  Existence and readiness are now separate axes: readiness is surfaced through the condition, and
+  only a genuinely absent Deployment reports non-existence. That asymmetry is deliberate — where the
+  Deployment is missing, `Create` is what deploys it, so reporting it as existing would mean the
+  controller is never created at all.
+
+- **A paginated `findby` could never terminate** (#119, in part). The pagination loop had no page
+  cap: a server that always advertises a next page walked forever, holding a reconcile worker and
+  producing no diagnosis. It is now bounded.
+
+  What the bound *returns* matters more than the bound itself. It is deliberately not a 404, because
+  the reconciler acts on not-found by **creating** — so reporting the cap as absence would say "this
+  does not exist" when the truth is "I stopped looking", and create a duplicate of the object it never
+  finished searching for. "I scanned N pages and did not conclude" stays a distinct answer.
+
+  This is the safety half of #119. The `pageNumber` strategy itself is still open.
 
 ## 2026-09-09 — 0.23.0
 
