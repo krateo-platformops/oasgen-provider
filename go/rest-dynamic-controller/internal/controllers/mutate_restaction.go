@@ -62,6 +62,56 @@ func hasObserveVerb(verbs []getter.VerbsDescription) bool {
 	return false
 }
 
+// resolveDeleteOutcome is THE rule for whether a delete may release the finalizer. Every delete path --
+// RESTAction-delegated and native, success and failure -- goes through here, so the decision exists in
+// one place instead of being re-derived at each exit.
+//
+// That scattering was the defect behind three separate bugs (#77, #98, #101): the authoritative check
+// sat at the END of Delete(), so any branch returning earlier decided without it, and each fix moved
+// the check one branch earlier rather than making it the sole arbiter (#103).
+//
+// The rule, in priority order:
+//
+//	verifiably absent   -> release. Whatever the delete call said; a 404, a 400, or a 2xx are all just
+//	                       proxies for this, and the observe verb is the ground truth.
+//	verifiably present  -> hold and retry. A 2xx means the deletion was REQUESTED, not completed.
+//	not verifiable      -> defer to deleteErr. No get verb, or the get itself failed. Absence cannot be
+//	                       established, so "could not check" must mean retry, NEVER "assume gone" --
+//	                       assuming would orphan the external resource, the failure #77 exists to
+//	                       prevent. A successful delete is still trusted here, the documented limitation.
+//
+// Returns nil to release the finalizer, or the error to surface while holding it.
+func (h *handler) resolveDeleteOutcome(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured, deleteErr error, log logging.Logger) error {
+	stillExists, verified, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
+	if verr != nil {
+		// The probe itself failed: we know nothing, so retry rather than guess.
+		log.Error(verr, "Verifying deletion")
+		return verr
+	}
+
+	if verified {
+		if !stillExists {
+			if deleteErr != nil {
+				log.Info("Delete returned an error but the external resource is verifiably absent; releasing finalizer",
+					"deleteError", deleteErr.Error())
+			}
+			return nil
+		}
+		log.Debug("External resource still present after delete; holding finalizer")
+		// Phrasing is load-bearing: DeleteHoldsFinalizerWhileResourceLingers asserts on "still present"
+		// so it cannot pass on an unrelated error, which is how an earlier delete test passed vacuously.
+		return fmt.Errorf("delete of %s did not remove the external resource, which is still present; retrying", mg.GetName())
+	}
+
+	// Unverifiable: the delete result is the only signal there is.
+	if deleteErr != nil {
+		log.Debug("Delete failed and deletion cannot be verified; holding finalizer", "kind", mg.GetKind())
+		return deleteErr
+	}
+	log.Debug("No get verb to verify deletion; trusting the successful delete")
+	return nil
+}
+
 // externalResourceStillExists probes whether the external resource is still present via the get verb, so a
 // RESTAction-delegated delete is only considered complete when the resource is verifiably gone — a RESTAction
 // returns HTTP 200 even if a teardown stage failed, so a bare success is not proof of deletion. It returns

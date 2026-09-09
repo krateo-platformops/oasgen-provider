@@ -859,6 +859,118 @@ func TestController(t *testing.T) {
 
 			return ctx
 		}).
+		// THE DELETE RULE, as a matrix rather than one case per past incident.
+		//
+		// Three bugs on this path (#77, #98, #101) were the same defect: a branch that decided the
+		// finalizer's fate before consulting whether the resource was actually gone. Each fix moved that
+		// check one branch earlier, and each was written with a test for its own symptom. Tested per
+		// symptom, the next uncovered branch is invisible -- which is why there was a third.
+		//
+		// The rule that holds is: the finalizer releases when the resource is OBSERVABLY GONE, whatever
+		// the delete call said -- with one inversion, that where absence cannot be established the delete
+		// result governs and an error means retry, never "assume gone" (#77's orphan).
+		//
+		// So the axes are {delete outcome} x {resource actually present} x {verifiable}, and this table
+		// is the contract. A new delete behaviour should add a row here, not a bespoke Assess block.
+		Assess("DeleteRuleMatrix", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			seed := func(id string) {
+				body := fmt.Sprintf(`{"name":%q,"id":%q,"description":"matrix"}`, id, id)
+				req, _ := http.NewRequest("POST", "http://localhost:30007/resource", strings.NewReader(body))
+				req.Header.Set("Authorization", "Bearer test")
+				req.Header.Set("Content-Type", "application/json")
+				if resp, err := http.DefaultClient.Do(req); err == nil {
+					resp.Body.Close()
+				}
+			}
+			configure := func(payload string) {
+				http.Post("http://localhost:30007/admin/config", "application/json", strings.NewReader(payload))
+			}
+			present := func(id string) bool {
+				req, _ := http.NewRequest("GET", "http://localhost:30007/resource/"+id, nil)
+				req.Header.Set("Authorization", "Bearer test")
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					return false
+				}
+				defer resp.Body.Close()
+				return resp.StatusCode == http.StatusOK
+			}
+			cr := func(kind, id string) *unstructured.Unstructured {
+				return &unstructured.Unstructured{Object: map[string]interface{}{
+					"apiVersion": "sample.krateo.io/v1alpha1",
+					"kind":       kind,
+					"metadata":   map[string]interface{}{"name": id, "namespace": namespace},
+					"spec": map[string]interface{}{
+						"name": id,
+						"configurationRef": map[string]interface{}{
+							// Each kind resolves its own <Kind>Configuration, so the no-get fixture
+							// needs its own instance -- pointing at my-sample-config would fail at
+							// client-info resolution and hold the finalizer for the wrong reason.
+							"name":      map[string]string{"Sample": "my-sample-config", "Nogetsample": "my-noget-config"}[kind],
+							"namespace": namespace,
+						},
+					},
+					"status": map[string]interface{}{"id": id},
+				}}
+			}
+
+			cases := []struct {
+				name        string
+				kind        string // Sample = verifiable (has get); Nogetsample = unverifiable
+				id          string
+				seedFirst   bool
+				serverCfg   string
+				wantRelease bool // true => Delete returns nil and the finalizer is released
+				why         string
+			}{
+				{
+					name: "success/gone/verifiable", kind: "Sample", id: "mx-a", seedFirst: true,
+					serverCfg:   `{"lingerOnDelete": false, "deleteErrorsButRemoves": false}`,
+					wantRelease: true, why: "the ordinary case",
+				},
+				{
+					name: "success/still-present/verifiable", kind: "Sample", id: "mx-b", seedFirst: true,
+					serverCfg:   `{"lingerOnDelete": true}`,
+					wantRelease: false, why: "#77: a 2xx means requested, not completed -- releasing here orphans it",
+				},
+				{
+					name: "404/gone/verifiable", kind: "Sample", id: "mx-c", seedFirst: false,
+					serverCfg:   `{"lingerOnDelete": false, "deleteErrorsButRemoves": false}`,
+					wantRelease: true, why: "#98: 404 IS the success condition; every retry after a real delete hits this",
+				},
+				{
+					name: "error/gone/verifiable", kind: "Sample", id: "mx-d", seedFirst: true,
+					serverCfg:   `{"deleteErrorsButRemoves": true}`,
+					wantRelease: true, why: "#101: the observe verb outranks the delete status code",
+				},
+				{
+					name: "error/still-present/unverifiable", kind: "Nogetsample", id: "mx-e", seedFirst: true,
+					serverCfg:   `{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": true}`,
+					wantRelease: false, why: "no get verb: absence cannot be established, so the delete error governs -- retry, never assume gone",
+				},
+			}
+
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					configure(`{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": false}`)
+					if tc.seedFirst {
+						seed(tc.id)
+					}
+					configure(tc.serverCfg)
+					defer configure(`{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": false}`)
+
+					err := handler.Delete(ctx, cr(tc.kind, tc.id))
+					released := err == nil
+
+					if released != tc.wantRelease {
+						t.Errorf("release=%v want=%v (%s)\n  delete error: %v\n  resource still present upstream: %v",
+							released, tc.wantRelease, tc.why, err, present(tc.id))
+					}
+				})
+			}
+
+			return ctx
+		}).
 		// A CR whose create never succeeded has no identifier in status, so the delete path /resource/{id}
 		// cannot be built at all. Delete must still release the finalizer: returning the "missing path
 		// parameter" error instead strands the CR in Deleting forever, and its namespace with it.

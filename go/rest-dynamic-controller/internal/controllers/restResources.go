@@ -823,17 +823,11 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
 			return err
 		}
-		// `verified` is ignored here on purpose: this branch runs after the RESTAction reported success,
-		// so no get verb means trusting that result -- the documented limitation, unchanged.
-		stillExists, _, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
-		if verr != nil {
-			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", verr))
-			return verr
-		}
-		if stillExists {
-			err := fmt.Errorf("delete RESTAction %s/%s completed but the external resource is still present; retrying", ref.Namespace, ref.Name)
-			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
-			return err
+		// One arbiter for every delete path (see resolveDeleteOutcome). The RESTAction reported success,
+		// so deleteErr is nil: an unverifiable resource falls back to trusting that result, as before.
+		if outcome := h.resolveDeleteOutcome(ctx, cli, clientInfo, mg, nil, log); outcome != nil {
+			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", outcome))
+			return outcome
 		}
 		if err := unstructuredtools.SetConditions(mg, condition.Deleting()); err != nil {
 			log.Warn("Setting condition", "error", err)
@@ -914,34 +908,24 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// never releases the finalizer -- so the CR hangs in Deleting forever and the resource cannot be
 	// deleted through Kubernetes at all (#98). Reported against 0.22.1 on an API with no async block
 	// declared for delete.
+	// The delete call is now BEST EFFORT: its status code no longer decides the finalizer's fate on its
+	// own. Whatever it returns, resolveDeleteOutcome below asks the observe verb and applies one rule.
 	response, err := apiCall(ctx, &http.Client{}, callInfo.Path, reqConfiguration)
 	alreadyGone := false
+	var deleteErr error
 	if err != nil {
 		if restclient.IsNotFoundError(err) {
+			// Not a special case so much as the common one: every retry after a delete that took effect
+			// lands here. Recorded so the async block below is skipped -- there is no operation to poll
+			// and `response` holds the 404, not a handle.
 			alreadyGone = true
 			log.Debug("External resource already absent on delete; treating as deleted", "kind", mg.GetKind())
 		} else {
-			// The status code of a DELETE is a PROXY for whether the resource is gone; the observe verb is
-			// the ground truth, and the controller already knows how to ask it. Returning here without
-			// asking is what left the existence check below unreachable on any non-404 error, so an API
-			// that answers a delete with, say, 400 for a resource it has already removed hung the CR in
-			// Deleting forever (#101 -- observed on Aruba security/Kms, where DELETE returned 400
-			// "Some kms keys are not deleted" while a direct GET returned 404).
-			//
-			// Only an AFFIRMATIVE, verified absence releases here. If there is no get verb, or the get
-			// itself failed, `verified` is false and the original delete error stands: "could not check"
-			// must mean retry, never "assume gone" -- assuming would orphan the resource, which is the
-			// failure #77 exists to prevent.
-			stillExists, verified, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
-			if verr == nil && verified && !stillExists {
-				alreadyGone = true
-				log.Info("Delete returned an error but the external resource is verifiably absent; releasing finalizer",
-					"kind", mg.GetKind(), "deleteError", err.Error())
-			} else {
-				log.Error(err, "Performing REST call")
-				h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
-				return err
-			}
+			// Do NOT decide here. A failed delete is not proof the resource survived, any more than a
+			// successful one is proof it is gone -- both are proxies. Record the error and let the single
+			// arbiter weigh it against what the observe verb reports.
+			log.Debug("Delete call failed; deferring to the observe verb", "kind", mg.GetKind(), "error", err.Error())
+			deleteErr = err
 		}
 	}
 
@@ -969,20 +953,12 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// Holding the finalizer (returning the error) means the delete is retried until the resource is
 	// verifiably absent. Where an async operation IS declared, driveAsync above has already polled it to
 	// completion and this check simply confirms it. Where the API has no get verb to probe with,
-	// externalResourceStillExists reports (false, nil) and we trust the delete result, as before.
-	// `verified` ignored: reached only when the DELETE itself succeeded, so an unverifiable resource
-	// falls back to trusting that success, as before.
-	stillExists, _, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
-	if verr != nil {
-		log.Error(verr, "Verifying deletion")
-		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", verr))
-		return verr
-	}
-	if stillExists {
-		err := fmt.Errorf("delete of %s returned success but the external resource is still present; retrying", mg.GetName())
-		log.Debug("External resource still present after delete; holding finalizer", "kind", mg.GetKind())
-		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
-		return err
+	// resolveDeleteOutcome reports "not verifiable" and we trust the delete result, as before.
+	// THE decision, for every native delete: success, 404, or any other error. resolveDeleteOutcome asks
+	// the observe verb and applies one rule, so no branch above needs to reason about the finalizer.
+	if outcome := h.resolveDeleteOutcome(ctx, cli, clientInfo, mg, deleteErr, log); outcome != nil {
+		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", outcome))
+		return outcome
 	}
 
 	log.Debug("Setting condition", "kind", mg.GetKind())
