@@ -40,6 +40,9 @@ type MockServer struct {
 	// with an error -- Aruba security/Kms answers 400 "Some kms keys are not deleted" for a key a
 	// direct GET already 404s on (#101). The delete status code is a proxy; the observe verb is truth.
 	deleteErrorsButRemoves bool
+	// tombstoneOnDelete reproduces an API that answers GET for a deleted resource with 200 and a
+	// record carrying status "deleted", rather than 404 (#111, Aruba security/Kmip).
+	tombstoneOnDelete bool
 }
 
 func NewMockServer(port int) *MockServer {
@@ -365,6 +368,16 @@ func (ms *MockServer) deleteResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// tombstoneOnDelete: mark the record deleted but KEEP serving it on GET with 200, which is what an
+	// API with soft deletes does. The resource is gone as far as the user is concerned.
+	if ms.tombstoneOnDelete {
+		if r, ok := ms.resources[id]; ok {
+			r.Status = "deleted"
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	// deleteErrorsButRemoves: actually remove the resource, then answer with an error anyway. A
 	// following GET 404s, so the observe verb disagrees with the delete status code.
 	if ms.deleteErrorsButRemoves {
@@ -418,6 +431,7 @@ func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 		CompletePendingAsync   *bool `json:"completePendingAsync,omitempty"`
 		LingerOnDelete         *bool `json:"lingerOnDelete,omitempty"`
 		DeleteErrorsButRemoves *bool `json:"deleteErrorsButRemoves,omitempty"`
+		TombstoneOnDelete      *bool `json:"tombstoneOnDelete,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
@@ -446,6 +460,9 @@ func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if config.DeleteErrorsButRemoves != nil {
 		ms.deleteErrorsButRemoves = *config.DeleteErrorsButRemoves
+	}
+	if config.TombstoneOnDelete != nil {
+		ms.tombstoneOnDelete = *config.TombstoneOnDelete
 	}
 	if config.SimulateErrors != nil {
 		ms.simulateErrors = *config.SimulateErrors

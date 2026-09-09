@@ -1,0 +1,32 @@
+# Fixture for #111: an API that answers GET for a DELETED resource with 200 plus a tombstone
+# ({...,"status":"deleted"}) instead of 404. notFoundBody is the declared way to express that,
+# and Observe already honours it; this fixture exists so the DELETE verification honours it too.
+apiVersion: ogen.krateo.io/v1alpha1
+kind: RestDefinition
+metadata:
+  name: sample-tombstone
+  namespace: demo-system
+spec:
+  oasPath: configmap://demo-system/sample/openapi.yaml
+  resourceGroup: sample.krateo.io
+  resource:
+    identifiers:
+    - name
+    additionalStatusFields:
+    - id
+    kind: Tombstonesample
+    verbsDescription:
+    - action: create
+      method: POST
+      path: /resource
+    - action: delete
+      method: DELETE
+      path: /resource/{id}
+    - action: get
+      method: GET
+      path: /resource/{id}
+      notFoundBody:
+        inline: .status == "deleted"
+    - action: findby
+      method: GET
+      path: /resource
