@@ -622,3 +622,90 @@ func TestUnstructuredClient_UpdatableBodyPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildPath_QueryValueEscapedExactlyOnce pins the escaping contract for query parameter VALUES:
+// buildPath receives raw values (every writer in builder.go — static per-verb queries, field mappings
+// and spec/status auto-population — passes the CR value verbatim), so the value must reach the wire
+// percent-encoded EXACTLY ONCE.
+//
+// The real case is RepoContent's read verb: a git ref named "builder/sock-shop" is sent as ?ref=.
+// Escaped once it is "builder%2Fsock-shop", which GitHub decodes back to the branch name. Escaped
+// twice it is "builder%252Fsock-shop", which GitHub reads as a literal ref named "builder%2Fsock-shop"
+// and answers 404 — the defect the github-provider-kog plugin works around by PathUnescape-ing in a
+// loop until the value stops changing.
+func TestBuildPath_QueryValueEscapedExactlyOnce(t *testing.T) {
+	baseUrl := "https://api.github.com"
+	path := "/repos/{owner}/{repo}/contents/{path}"
+	parameters := map[string]string{
+		"owner": "krateo-platformops",
+		"repo":  "oas",
+		"path":  "values.yaml",
+	}
+	query := map[string]string{
+		"ref": "builder/sock-shop",
+	}
+
+	got := buildPath(baseUrl, path, parameters, query)
+	if got == nil {
+		t.Fatalf("buildPath returned nil")
+	}
+
+	// On the wire: RawQuery is what net/http writes verbatim into the request line.
+	const wantRawQuery = "ref=builder%2Fsock-shop"
+	if got.RawQuery != wantRawQuery {
+		t.Errorf("expected raw query %q, got %q", wantRawQuery, got.RawQuery)
+	}
+
+	// At the server: one decode must return the original value, with no residual escaping.
+	if v := got.Query().Get("ref"); v != "builder/sock-shop" {
+		t.Errorf("expected the server to decode ref back to %q, got %q", "builder/sock-shop", v)
+	}
+}
+
+// TestBuildPath_QueryValueSpecialCharsEscapedOnce covers the rest of the characters that a single
+// spurious url.QueryEscape pass would mangle: '%' would become '%25' twice over, and a space would
+// survive as a literal '+' rather than being decoded back to a space.
+func TestBuildPath_QueryValueSpecialCharsEscapedOnce(t *testing.T) {
+	cases := map[string]string{
+		"slash":   "builder/sock-shop",
+		"space":   "hello world",
+		"plus":    "a+b",
+		"percent": "100%",
+		"amp":     "a&b=c",
+		"unicode": "caffè",
+	}
+
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := buildPath("https://api.example.com", "/search", map[string]string{}, map[string]string{"q": raw})
+			if got == nil {
+				t.Fatalf("buildPath returned nil")
+			}
+			if v := got.Query().Get("q"); v != raw {
+				t.Errorf("expected one decode of the wire value to yield %q, got %q (raw query %q)", raw, v, got.RawQuery)
+			}
+		})
+	}
+}
+
+// TestBuildPath_PathParamEscapedExactlyOnce is the path-side counterpart. Path parameters were audited
+// alongside the query defect and are NOT double-escaped: buildPath applies url.PathEscape once, and the
+// later url.Parse(parsed.String()) round-trip preserves the escaped form in RawPath instead of
+// re-encoding it. This test pins that so the query fix cannot regress it.
+func TestBuildPath_PathParamEscapedExactlyOnce(t *testing.T) {
+	got := buildPath("https://api.example.com", "/repos/{owner}/{repo}/contents/{path}",
+		map[string]string{"owner": "krateo-platformops", "repo": "oas", "path": "charts/values.yaml"},
+		map[string]string{})
+	if got == nil {
+		t.Fatalf("buildPath returned nil")
+	}
+
+	const wantEscaped = "/repos/krateo-platformops/oas/contents/charts%2Fvalues.yaml"
+	if got.EscapedPath() != wantEscaped {
+		t.Errorf("expected escaped path %q, got %q", wantEscaped, got.EscapedPath())
+	}
+	const wantDecoded = "/repos/krateo-platformops/oas/contents/charts/values.yaml"
+	if got.Path != wantDecoded {
+		t.Errorf("expected the server to decode the path to %q, got %q", wantDecoded, got.Path)
+	}
+}

@@ -32,6 +32,17 @@ import (
 
 type APICallType string
 
+// buildPath assembles the request URL from the server base URL, the OAS path template, the path
+// parameters and the query parameters. Every caller (see builder.BuildCallConfig) supplies RAW values —
+// straight out of the CR spec/status, a fieldMapping or a static per-verb query — so this function owns
+// percent-encoding, and must apply it EXACTLY ONCE.
+//
+// Path parameters are escaped here, with url.PathEscape; the later url.Parse(parsed.String())
+// round-trip preserves that escaped form in RawPath rather than re-encoding it, so one pass is all
+// they get. Query parameters are NOT escaped here: url.Values.Encode() below escapes both key and
+// value. Escaping them here as well would percent-encode the '%' of the first pass, so a git ref
+// "builder/sock-shop" would leave as "builder%252Fsock-shop" and the upstream API would look up a
+// ref literally named "builder%2Fsock-shop" and 404.
 func buildPath(baseUrl string, path string, parameters map[string]string, query map[string]string) *url.URL {
 	for key, param := range parameters {
 		param = url.PathEscape(param)
@@ -40,8 +51,7 @@ func buildPath(baseUrl string, path string, parameters map[string]string, query 
 
 	params := url.Values{}
 	for key, param := range query {
-		queryParam := url.QueryEscape(param)
-		params.Add(key, queryParam)
+		params.Add(key, param) // raw: params.Encode() below does the single escaping pass
 	}
 
 	parsed, err := url.Parse(baseUrl)

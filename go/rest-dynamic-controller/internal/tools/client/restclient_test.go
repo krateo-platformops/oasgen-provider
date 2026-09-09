@@ -1375,3 +1375,36 @@ func TestDebuggingRoundTripper_RedactsSensitiveValues(t *testing.T) {
 	assert.NotContains(t, out.String(), "hunter2")
 	assert.Contains(t, out.String(), "***REDACTED***")
 }
+
+// TestCall_QueryValueReachesServerEscapedOnce is the end-to-end proof of the query-escaping contract:
+// the value a caller puts in RequestConfiguration.Query must arrive at the upstream server decodable in
+// ONE pass. It asserts on the request as the server sees it, so it covers the whole chain
+// (buildPath -> url.Values.Encode -> http.Request.URL.RequestURI), not just the URL builder.
+//
+// The regression it guards is a git ref named "builder/sock-shop" arriving as "builder%252Fsock-shop":
+// buildPath used to url.QueryEscape each value before handing it to url.Values, whose Encode() escapes
+// again, so the '%' of the first pass became '%25'. GitHub then looked up a ref literally named
+// "builder%2Fsock-shop" and answered 404, which stalled RepoContent's observe forever.
+func TestCall_QueryValueReachesServerEscapedOnce(t *testing.T) {
+	var gotRawQuery, gotDecoded string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRawQuery = r.URL.RawQuery
+		gotDecoded = r.URL.Query().Get("query")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+	}))
+	defer srv.Close()
+
+	client := createTestClient(t)
+	client.Server = srv.URL
+
+	_, err := client.Call(context.Background(), srv.Client(), "/api/search", &RequestConfiguration{
+		Method: "GET",
+		Query:  map[string]string{"query": "builder/sock-shop"},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "query=builder%2Fsock-shop", gotRawQuery, "the query value must be percent-encoded exactly once on the wire")
+	assert.Equal(t, "builder/sock-shop", gotDecoded, "one decode at the server must yield the original value")
+}
