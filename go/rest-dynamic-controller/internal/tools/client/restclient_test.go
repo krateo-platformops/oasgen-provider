@@ -1408,3 +1408,64 @@ func TestCall_QueryValueReachesServerEscapedOnce(t *testing.T) {
 	assert.Equal(t, "query=builder%2Fsock-shop", gotRawQuery, "the query value must be percent-encoded exactly once on the wire")
 	assert.Equal(t, "builder/sock-shop", gotDecoded, "one decode at the server must yield the original value")
 }
+
+// TestCall_FollowsTemporaryRedirect covers #132: a renamed GitHub repository is served at its old name
+// with a 307, which every ordinary client follows. This one did not, so the CR sat ReconcileError
+// forever on "unexpected status: 307" and never converged.
+//
+// The cause is subtle and easy to reintroduce: http.Request built as a STRUCT LITERAL leaves GetBody
+// nil, and net/http refuses to follow a method-preserving redirect whose body it cannot replay. It
+// hands the 3xx back to the caller instead, where it fails the OAS status gate — correctly, since no
+// sane document lists 307 as a success for an update.
+//
+// The fix must stay on the transport side. Adding 307 to successCodes would make the controller treat
+// "this resource lives somewhere else now" as success and silently stop reconciling the real object,
+// which is worse than failing loudly.
+func TestCall_FollowsTemporaryRedirect(t *testing.T) {
+	var paths []string
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if r.URL.Path == "/resource/old-name" {
+			w.Header().Set("Location", "/resource/new-name")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, `{"id":"1","name":"new-name"}`)
+	}))
+	defer srv.Close()
+
+	uri, err := url.Parse(srv.URL + "/resource/old-name")
+	assert.NoError(t, err)
+
+	payload := []byte(`{"private":true}`)
+	req := &http.Request{
+		Method: http.MethodPatch,
+		URL:    uri,
+		Proto:  "HTTP/1.1",
+		Body:   io.NopCloser(bytes.NewReader(payload)),
+		Header: http.Header{"Content-Type": []string{"application/json"}},
+	}
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(payload)), nil }
+
+	resp, err := srv.Client().Do(req)
+	assert.NoError(t, err)
+	defer resp.Body.Close()
+
+	// 1. The redirect was followed rather than surfaced.
+	assert.Equal(t, http.StatusOK, resp.StatusCode,
+		"a 307 must be followed; returning it to the caller fails the OAS status gate and the resource never converges (#132)")
+
+	// 2. Both hops happened — proving it redirected rather than answering 200 directly.
+	assert.Equal(t, []string{"/resource/old-name", "/resource/new-name"}, paths)
+
+	// 3. THE BODY WAS REPLAYED. This is the assertion that actually pins the fix: 307 preserves the
+	//    method AND the body, so a PATCH that arrives at the new location with an empty body would
+	//    silently write nothing.
+	assert.Equal(t, []string{`{"private":true}`, `{"private":true}`}, bodies,
+		"the body must be replayed on the redirected request, which is exactly what GetBody provides")
+}
