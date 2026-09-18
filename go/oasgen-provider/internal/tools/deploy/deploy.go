@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"strings"
 
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/deployment"
 	hasher "github.com/krateo-platformops/oasgen-provider/internal/tools/hash"
@@ -14,6 +15,9 @@ import (
 
 	crd "github.com/krateo-platformops/oasgen-provider/internal/tools/crd"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -23,15 +27,20 @@ const (
 	ControllerResourceSuffix = "-controller"
 	// rbacVersion is the fixed version used to NAME the RDC RBAC objects, decoupling them from the target CRD
 	// version so a version bump neither orphans nor duplicates the RBAC set. Rules are version-independent.
-	rbacVersion              = "v1alpha1"
-	ConfigmapResourceSuffix  = "-configmap"
+	rbacVersion             = "v1alpha1"
+	ConfigmapResourceSuffix = "-configmap"
 )
 
 type UndeployOptions struct {
-	ConfigurationGVR       schema.GroupVersionResource
-	KubeClient             client.Client
-	NamespacedName         types.NamespacedName
-	GVR                    schema.GroupVersionResource
+	ConfigurationGVR schema.GroupVersionResource
+	KubeClient       client.Client
+	NamespacedName   types.NamespacedName
+	GVR              schema.GroupVersionResource
+	// GVK is the managed resource's kind, needed to LIST its instances before uninstalling the CRD.
+	// A GVR alone cannot be listed without a RESTMapper, and guessing the Kind from the plural would
+	// silently under-count -- which, for this particular check, means deleting production resources.
+	// Callers already hold it: they derive GVR from it.
+	GVK                    schema.GroupVersionKind
 	RBACFolderPath         string
 	Log                    func(msg string, keysAndValues ...any)
 	SkipCRD                bool
@@ -386,12 +395,68 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	return hsh.GetHash(), nil
 }
 
+// ErrLiveInstances is returned when a CRD cannot be uninstalled because instances of it still exist.
+// Callers should treat it as "not yet", not as a failure to retry differently: the RestDefinition keeps
+// its finalizer and the CRD, its CRs and their external resources all survive.
+var ErrLiveInstances = fmt.Errorf("CRD still has live instances")
+
+// liveInstanceCount reports how many instances of gvr exist cluster-wide.
+//
+// A missing CRD is not an error: it means the kind is already gone, so there is nothing to protect.
+// Any OTHER failure is propagated, because a count we could not take must never read as zero.
+func liveInstanceCount(ctx context.Context, kube client.Client, gvk schema.GroupVersionKind) (int, error) {
+	if gvk.Kind == "" {
+		// Without a Kind nothing can be listed, and a zero here would authorise the delete. Refuse.
+		return 0, fmt.Errorf("cannot list instances: no Kind supplied")
+	}
+	var list unstructured.UnstructuredList
+	list.SetGroupVersionKind(gvk)
+	if err := kube.List(ctx, &list); err != nil {
+		if apimeta.IsNoMatchError(err) || apierrors.IsNotFound(err) ||
+			strings.Contains(err.Error(), "the server could not find the requested resource") ||
+			strings.Contains(err.Error(), "no matches for") {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return len(list.Items), nil
+}
+
 func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) error {
 	if opts.Log == nil {
 		return fmt.Errorf("log function is required")
 	}
 
 	if !opts.SkipCRD {
+		// REFUSE TO DROP A CRD THAT STILL HAS INSTANCES.
+		//
+		// Uninstalling a CRD cascade-deletes every CR of that kind, and those CRs carry finalizers that
+		// delete the EXTERNAL resource. So deleting a RestDefinition could destroy real infrastructure --
+		// a GitHub repository, a cloud server -- with no per-CR opt-in and nothing to undo it (#125).
+		//
+		// A guard already existed via the restresources-still-exist finalizer, but it was consulted only
+		// for SkipDeploy, never for SkipCRD, and it reflects what a PREVIOUS reconcile observed. A CR
+		// created since then would not be seen. This check is taken here, at the moment of the
+		// destructive act, against the live cluster.
+		//
+		// A LIST failure refuses too. "I could not count" must never read as "there were none" -- that is
+		// the same conflation that produced the delete-path bugs in #77/#98/#101, and here the cost of
+		// getting it wrong is unrecoverable rather than merely wrong.
+		n, cerr := liveInstanceCount(ctx, opts.KubeClient, opts.GVK)
+		if cerr != nil {
+			opts.Log("Refusing to uninstall CRD: cannot determine whether instances exist",
+				"name", opts.GVR.GroupResource().String(), "error", cerr.Error())
+			return fmt.Errorf("verifying %s has no live instances before uninstalling its CRD: %w",
+				opts.GVR.GroupResource().String(), cerr)
+		}
+		if n > 0 {
+			opts.Log("Refusing to uninstall CRD: live instances exist",
+				"name", opts.GVR.GroupResource().String(), "instances", n)
+			return fmt.Errorf("%w: %s has %d live instance(s); uninstalling the CRD would cascade-delete "+
+				"them and their finalizers would delete the external resources they manage. Delete the "+
+				"instances first if that is intended", ErrLiveInstances, opts.GVR.GroupResource().String(), n)
+		}
+
 		err := crd.Uninstall(ctx, opts.KubeClient, opts.GVR.GroupResource())
 		if err == nil && opts.Log != nil {
 			opts.Log("CRD successfully uninstalled", "name", opts.GVR.GroupResource().String())

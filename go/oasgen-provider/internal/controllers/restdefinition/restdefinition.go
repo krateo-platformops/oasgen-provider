@@ -968,15 +968,30 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 		Kind:    text.CapitaliseFirstLetter(cr.Spec.Resource.Kind),
 	})
 
+	// The GVK used to LIST instances before the CRD is dropped (#125) deliberately uses
+	// observedVersion, not targetVersion, for the same reason manageFinalizers does: the apiserver
+	// serves every instance through any served version, and the observed one is guaranteed to exist on
+	// the CRD. targetVersion may be a bump that has not been deployed yet, and listing against a version
+	// the CRD does not serve fails -- which this guard treats as "cannot verify" and refuses on, blocking
+	// the delete forever for a reason that has nothing to do with live instances.
+	listGVK := schema.GroupVersionKind{
+		Group:   cr.Spec.ResourceGroup,
+		Version: observedVersion(cr),
+		Kind:    text.CapitaliseFirstLetter(cr.Spec.Resource.Kind),
+	}
+
 	skipDeploy := meta.FinalizerExists(cr, restresourcesStillExistFinalizer)
 
 	configurationGVR := getConfigurationGVR(cr, hasSecuritySchemes)
 	opts := deploy.UndeployOptions{
 		ConfigurationGVR: configurationGVR,
-		SkipCRD:          false,
-		SkipDeploy:       skipDeploy,
-		RBACFolderPath:   RDCrbacConfigFolder,
-		KubeClient:       e.kube,
+		// GVK lets Undeploy LIST live instances before dropping the CRD (#125). Without it the count
+		// cannot be taken, and Undeploy refuses rather than assuming zero.
+		GVK:            listGVK,
+		SkipCRD:        false,
+		SkipDeploy:     skipDeploy,
+		RBACFolderPath: RDCrbacConfigFolder,
+		KubeClient:     e.kube,
 		NamespacedName: types.NamespacedName{
 			Namespace: cr.Namespace,
 			Name:      cr.Name,
