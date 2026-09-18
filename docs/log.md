@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-09-10T00:00:00Z
+timestamp: 2026-09-18T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,38 @@ timestamp: 2026-09-10T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-09-18 — 0.23.2
+
+Two field-reported defects, one of which could destroy production infrastructure.
+
+- **Deleting a RestDefinition could delete real external resources** (#125). Its generated CRD was
+  uninstalled unconditionally, which cascade-deletes every CR of that kind — and those CRs carry
+  finalizers that delete the *external* resource. So a routine lifecycle operation could remove live
+  GitHub repositories, with no per-CR opt-in and nothing to undo it.
+
+  A guard existed (the `restresources-still-exist` finalizer) but was consulted only for the
+  Deployment teardown, never for the CRD, so the ordering was: uninstall the CRD, *then* report that
+  resources still exist. It also reflected a previous reconcile's observation rather than the cluster's
+  state at the moment of deletion.
+
+  `Undeploy` now lists instances immediately before `crd.Uninstall` and refuses if any exist — covering
+  every caller, not just this path. A listing **failure** also refuses: "I could not count" must never
+  read as "there were none", and here that conflation is unrecoverable rather than merely wrong. A
+  missing CRD is the one exception, since the kind is already gone.
+
+  There is deliberately no force flag. Refusing is recoverable — delete the instances, then the
+  RestDefinition; the alternative is not.
+
+- **A renamed resource never reconciled** (#132). `http.Request` built as a struct literal leaves
+  `GetBody` nil, and Go will not follow a method-preserving redirect whose body it cannot replay — it
+  returns the 3xx to the caller, where it fails the OAS status gate. GitHub serves a renamed
+  repository's old name with a 307, so the CR sat `ReconcileError` on `unexpected status: 307` forever.
+
+  Fixed on the transport, not by accepting 307 as a success code: treating "this resource lives
+  somewhere else now" as success would silently stop reconciling the real object.
+
+Also: OpenTelemetry dependency bumps across both modules.
 
 ## 2026-09-10 — 0.23.1
 
