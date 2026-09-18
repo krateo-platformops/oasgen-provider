@@ -106,6 +106,21 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 		Body:   io.NopCloser(bytes.NewReader(payload)),
 		Header: headers,
 	}
+	// GetBody makes the body REPLAYABLE, which is what lets net/http follow a 307/308.
+	//
+	// Constructing http.Request as a struct literal leaves GetBody nil. http.Client will not follow a
+	// redirect that preserves the method when it cannot reproduce the body, so it hands the 3xx back to
+	// the caller instead -- where it fails the OAS status gate, because no sane document lists 307 as a
+	// success for an update. The resource then never converges.
+	//
+	// Observed on a GitHub repository that had been RENAMED: GitHub serves the old name with a 307, which
+	// every ordinary client follows, and this one did not -- so the CR sat ReconcileError forever on
+	// "unexpected status: 307" (#132).
+	//
+	// Deliberately NOT fixed by adding 307 to successCodes: that would treat "this resource lives
+	// somewhere else now" as success and silently stop reconciling the real object, which is worse than
+	// failing loudly.
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(payload)), nil }
 	// Carry the reconcile span on the request so the otelhttp transport emits a
 	// child client span and injects a W3C traceparent (continuing the trace).
 	req = req.WithContext(ctx)
@@ -447,6 +462,21 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 		Body:   io.NopCloser(bytes.NewReader(payload)),
 		Header: headers,
 	}
+	// GetBody makes the body REPLAYABLE, which is what lets net/http follow a 307/308.
+	//
+	// Constructing http.Request as a struct literal leaves GetBody nil. http.Client will not follow a
+	// redirect that preserves the method when it cannot reproduce the body, so it hands the 3xx back to
+	// the caller instead -- where it fails the OAS status gate, because no sane document lists 307 as a
+	// success for an update. The resource then never converges.
+	//
+	// Observed on a GitHub repository that had been RENAMED: GitHub serves the old name with a 307, which
+	// every ordinary client follows, and this one did not -- so the CR sat ReconcileError forever on
+	// "unexpected status: 307" (#132).
+	//
+	// Deliberately NOT fixed by adding 307 to successCodes: that would treat "this resource lives
+	// somewhere else now" as success and silently stop reconciling the real object, which is worse than
+	// failing loudly.
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(payload)), nil }
 	// Carry the reconcile span on the request so the otelhttp transport emits a
 	// child client span and injects a W3C traceparent (continuing the trace).
 	req = req.WithContext(ctx)
