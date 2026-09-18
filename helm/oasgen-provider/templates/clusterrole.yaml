@@ -45,6 +45,22 @@ rules:
   - create
   - patch
   - update
+# events.k8s.io is the group modern client-go event broadcasters write to; the legacy core ("") rule
+# above does NOT cover it. Without this the broadcaster 403s with "events.events.k8s.io is forbidden"
+# and every Kubernetes Event the provider emits is silently dropped (#126).
+#
+# Not cosmetic: it removed the diagnostics for #122 -- a RestDefinition wedged Ready=False with a CRD
+# that was in fact served -- leaving hand-read annotation timestamps as the only surviving evidence.
+# rest-dynamic-controller's RBAC already grants this (assets/rdc/rbac/clusterrole.yaml); only the
+# provider's own role was missing it.
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
 - apiGroups:
   - ""
   resources:
