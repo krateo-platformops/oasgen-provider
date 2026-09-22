@@ -15,9 +15,12 @@ type Paginator interface {
 	// UpdateRequest modifies an http.Request with the correct parameters for the current page/token.
 	UpdateRequest(req *http.Request) error
 
-	// ShouldContinue determines if another request is needed based on the last response.
-	// For instance, it's responsible for extracting the next token/page number and updating its internal state.
-	ShouldContinue(resp *http.Response, body []byte) (bool, error)
+	// Next judges the page just fetched and, when another exists, advances internal state to fetch it.
+	//
+	// It returns a THREE-valued PageResult rather than a bool. The bool it replaced meant both "the
+	// collection ended" and "I cannot tell", and the caller turned either into a 404 -- which the
+	// reconciler acts on by creating. See PageResult for why that had to become unrepresentable.
+	Next(p Page) (PageResult, error)
 }
 
 // NewPaginator is a factory that returns the correct paginator based on config.

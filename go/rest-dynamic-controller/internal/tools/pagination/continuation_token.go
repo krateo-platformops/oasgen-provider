@@ -51,31 +51,31 @@ func (p *continuationTokenPaginator) UpdateRequest(req *http.Request) error {
 	return nil
 }
 
-// ShouldContinue extracts the next token from the response and decides if another call is needed.
-func (p *continuationTokenPaginator) ShouldContinue(resp *http.Response, body []byte) (bool, error) {
+// Next extracts the next token from the response and reports whether another page exists.
+//
+// The body case used to be a commented-out stub that fell through to "no token", so a token declared
+// in the body silently ended the walk after page one -- the exact silent-termination this type system
+// now forbids. It goes through the shared ResponseValue primitive instead.
+func (p *continuationTokenPaginator) Next(page Page) (PageResult, error) {
 	cfg := p.config.Response
-	var extractedToken string
 
-	switch cfg.TokenIn {
-	case "header":
-		extractedToken = resp.Header.Get(cfg.TokenPath)
-	case "body":
-		// Not implemented yet
-		//res := gjson.GetBytes(body, cfg.TokenPath)
-		//if res.Exists() {
-		//	extractedToken = res.String()
-		//}
-	default:
-		return false, fmt.Errorf("unsupported tokenIn for response: %s", cfg.TokenIn)
+	v := ResponseValue{In: cfg.TokenIn, Path: cfg.TokenPath}
+	token, present, err := v.Resolve(page)
+	if err != nil {
+		// A malformed declaration (unknown location, unparseable path, non-JSON body) tells us nothing
+		// about whether more pages exist. It must not read as "the collection ended".
+		p.nextToken = ""
+		return Indeterminate, fmt.Errorf("continuationToken: %w", err)
 	}
 
-	// If a new token is found and it's not empty, we should continue.
-	if extractedToken != "" {
-		p.nextToken = extractedToken
-		return true, nil
+	if present && token != "" {
+		p.nextToken = token
+		return MorePages, nil
 	}
 
-	// No more tokens, we're done.
+	// A token that is simply ABSENT is how this strategy legitimately signals the end: the server stops
+	// sending one. That is a genuine Exhausted, not an Indeterminate -- unlike a malformed declaration
+	// above, which cannot distinguish the two.
 	p.nextToken = ""
-	return false, nil
+	return Exhausted, nil
 }

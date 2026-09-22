@@ -341,24 +341,40 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 			}, nil
 		}
 
-		// At this point, no match was found in the current page.
-		// Ask the paginator if we should continue to the next page (in other words, if there is a next page).
-		bodyBytes, _ := json.Marshal(response.ResponseBody) // Marshal body for analysis by paginator
-		shouldContinue, err := paginator.ShouldContinue(httpResp, bodyBytes)
+		// No match on this page. Ask the paginator what it makes of the page it just saw.
+		//
+		// The three outcomes below must stay distinct forever. Only Exhausted may become a 404, because
+		// the reconciler CREATES on 404 -- so collapsing "I stopped early" into "it is not there" makes
+		// the controller duplicate an external resource it never finished searching for (#119).
+		bodyBytes, _ := json.Marshal(response.ResponseBody) // raw form, for path-based extraction
+		verdict, err := paginator.Next(pagination.Page{
+			Response: httpResp,
+			Body:     bodyBytes,
+			Items:    itemList,
+			Index:    pagesScanned - 1, // pagesScanned was incremented for this page at the top
+		})
 		if err != nil {
-			return Response{}, fmt.Errorf("error checking pagination continuation: %w", err)
+			return Response{}, fmt.Errorf("determining whether more pages exist: %w", err)
 		}
 
-		if !shouldContinue {
-			// Paginator says we are done, break the loop.
-			break
+		switch verdict {
+		case pagination.MorePages:
+			continue
+		case pagination.Exhausted:
+			// The collection genuinely ended and nothing matched. This is authoritative absence.
+			return Response{}, &StatusError{
+				StatusCode: http.StatusNotFound,
+				Inner:      fmt.Errorf("item not found after checking all %d page(s)", pagesScanned),
+			}
+		case pagination.Indeterminate:
+			// The paginator could not tell whether more pages exist -- a declared signal was missing, or
+			// unreadable. NOT a 404: concluding absence here is the bug this type exists to prevent.
+			return Response{}, fmt.Errorf(
+				"pagination could not determine whether more pages exist after %d page(s); "+
+					"this is not a conclusion that the resource is absent", pagesScanned)
+		default:
+			return Response{}, fmt.Errorf("unknown pagination verdict %v", verdict)
 		}
-	}
-
-	// If the loop completes without finding a match, return a Not Found error.
-	return Response{}, &StatusError{
-		StatusCode: http.StatusNotFound,
-		Inner:      fmt.Errorf("item not found after checking all pages"),
 	}
 }
 
