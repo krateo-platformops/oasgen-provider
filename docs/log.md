@@ -13,6 +13,40 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## Unreleased
+
+- **`findby` could not paginate the strategy most APIs actually use** (#119). Only
+  `continuationToken` existed. Page-number pagination — `?page=N&per_page=M` — covers the
+  large majority of collection endpoints (162 of the 219 array-returning GETs in GitHub's own
+  OpenAPI document, none of which use a continuation token), and against every one of them a
+  `findby` read page one and stopped.
+
+  The consequence was not a slow search. A search that stops early returns not-found, and the
+  reconciler **creates** on not-found — so a resource sitting on page two was not merely missed,
+  it was duplicated.
+
+  `type: pageNumber` is now a first-class strategy. Nothing in it names a vendor: 0- vs 1-based
+  numbering, the parameter names, and how the last page is recognised are all declared, because
+  an engine that knew one API's spelling would simply relocate the bug to the next one. Three
+  end-of-collection mechanisms, exactly one per declaration — a header that marks a next page, a
+  total read from the body, or the short-page rule when nothing is declared.
+
+  `startPage` and `maxPages` are required with no defaults, deliberately. A defaulted
+  `startPage` guesses at 0- vs 1-based and silently skips a page; a defaulted `maxPages` is a
+  bound nobody chose that ends searches at a number the author never considered.
+
+  Preceded by a refactor (PR #141) that made the underlying bug class unrepresentable: a
+  paginator's verdict is now three-valued — more pages, genuinely exhausted, or could-not-tell —
+  where it used to be a bool whose `false` meant both "the collection ended" and "I have nothing
+  left to go on", with the caller turning either into a 404. Only *exhausted* may become absence.
+  Exhausting `maxPages`, a missing declared header, an unreadable body path: each reports that
+  the walk could not conclude, and the reconcile fails loudly rather than creating a duplicate.
+
+  That refactor also completed a stub. `continuationToken`'s response token could be documented
+  as `header` or `body` while the body branch was a `// Not implemented yet` comment that fell
+  through to "no token" — so a body token ended the walk after page one, silently. It works now,
+  and the CRD enum admits it.
+
 ## 2026-09-18 — 0.23.2
 
 Two field-reported defects, one of which could destroy production infrastructure.

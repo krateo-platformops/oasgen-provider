@@ -127,7 +127,9 @@ resource contract (identifiers, additionalStatusFields, compareScope). The CR's
 read from Secrets and whitespace-trimmed.
 
 - **Observe** — `get` when the identifier is known, else `findby` (list + identifier
-  match under `identifiersMatchPolicy`, optional `continuationToken` pagination).
+  match under `identifiersMatchPolicy`, optional `pageNumber` or `continuationToken`
+  pagination — a paginated search that cannot conclude says so rather than reporting
+  absence, because the reconciler creates on absence).
   `notFoundCodes` remap status codes to absence; a `notFoundBody` jq predicate detects
   body-signalled absence (tombstones, empty wrapper lists). The response is normalized
   through the verb's response `fieldMapping`/`responseTransform`, projected into status,

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pagination"
 	"github.com/pb33f/libopenapi"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -287,6 +288,6 @@ func TestFindBy_Pagination_NeverTerminating(t *testing.T) {
 	assert.Contains(t, err.Error(), "safety limit")
 
 	// 4. It stopped at the cap rather than merely somewhere.
-	assert.Equal(t, int32(maxFindByPages), atomic.LoadInt32(&requests),
-		"should scan exactly maxFindByPages pages before giving up")
+	assert.Equal(t, int32(pagination.MaxFindByPages), atomic.LoadInt32(&requests),
+		"should scan exactly pagination.MaxFindByPages pages before giving up")
 }

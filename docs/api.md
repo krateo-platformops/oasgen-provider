@@ -53,10 +53,29 @@ Five actions implement the four reconcile verbs (Observe ← `findby`/`get`, Cre
 
 - **`findby`** — searches a **collection** endpoint using `identifiers`. Used on the
   first reconcile, before the external id exists. `identifiersMatchPolicy: OR` (default)
-  matches on any identifier, `AND` requires all. Optional `pagination` (only
-  `type: continuationToken`; request token in `query` only, response token in `header`
-  only — both CEL-restricted). Not needed when a human-friendly key is the API's primary
-  key (`GET /resources/{name}`).
+  matches on any identifier, `AND` requires all. Not needed when a human-friendly key is
+  the API's primary key (`GET /resources/{name}`).
+
+  `pagination` is optional but matters more than it looks: a findby that stops before the
+  end returns not-found, and the reconciler **creates** on not-found — so an unpaginated
+  search over a multi-page collection does not merely fail to find the match, it creates a
+  duplicate of it. Two strategies, mutually exclusive by CEL:
+
+  - `type: pageNumber` — `?page=N&per_page=M`, the strategy behind the large majority of
+    collection endpoints. `request` declares `pagePath`/`startPage` (required, no default:
+    0- and 1-based APIs are both common and a wrong guess silently skips a page) and
+    optionally `sizePath`/`pageSize`. `response` declares how the LAST page is recognised —
+    `header` (a header whose content marks a next page, e.g. `Link` containing `rel="next"`)
+    or `body` (`totalPagesPath` or `totalItemsPath`); omit `response` entirely for the
+    short-page rule, which needs `request.pageSize` to compare against. `maxPages` is
+    required and has no default.
+  - `type: continuationToken` — request token in `query` or `header`, response token in
+    `header` or `body`.
+
+  Whenever a declared signal is missing or unreadable, the walk reports that it could not
+  conclude. It never reports absence: "I could not tell" and "there is nothing there"
+  reaching the same 404 is what created duplicates (#119). The same applies to exhausting
+  `maxPages` — a bound on effort says nothing about existence.
 - **`get`** — fetches a **single** resource, typically by a server-generated technical id
   stored in status via `additionalStatusFields`; used from the second reconcile on.
   Prefer defining both `findby` and `get`: `findby`-only works but pays the

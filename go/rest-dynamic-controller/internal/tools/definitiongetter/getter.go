@@ -33,16 +33,67 @@ var ErrDefinitionNotFound = errors.New("no matching RestDefinition found")
 const configurationVersion = "v1alpha1"
 
 // Pagination defines the pagination strategy for a "findby" action.
-// Currently, only 'continuationToken' is supported.
+//
+// MIRRORS oasgen-provider's apis/restdefinitions/v1alpha1/types.go. These two structs are the same
+// contract decoded twice, and a field present in only one is silently dropped rather than rejected --
+// which is how #51 shipped half-working. Change both or neither.
 type Pagination struct {
-	// Type specifies the pagination strategy. Currently, only 'continuationToken' is supported.
+	// Type specifies the pagination strategy: "continuationToken" or "pageNumber".
 	Type string `json:"type"`
 	// Configuration for 'continuationToken' pagination. Required if type is 'continuationToken'.
 	ContinuationToken *ContinuationTokenConfig `json:"continuationToken,omitempty"`
-	// (Future) Configuration for 'pageNumber' pagination.
-	//PageNumber *PageNumberConfig `json:"pageNumber,omitempty"`
+	// Configuration for 'pageNumber' pagination. Required if type is 'pageNumber'.
+	PageNumber *PageNumberConfig `json:"pageNumber,omitempty"`
 	// (Future) Configuration for 'offset' pagination.
 	//Offset *OffsetConfig `json:"offset,omitempty"`
+}
+
+// PageNumberConfig holds the settings for page-number pagination (?page=N&per_page=M).
+type PageNumberConfig struct {
+	// Request: how the page number (and optionally the page size) are sent.
+	Request PageNumberRequest `json:"request"`
+	// Response: how "another page exists" is recognised. Omitted selects the short-page rule.
+	Response *PageNumberResponse `json:"response,omitempty"`
+	// MaxPages bounds the walk. Exhausting it is its own outcome, never absence.
+	MaxPages int `json:"maxPages"`
+}
+
+// PageNumberRequest declares how the page cursor is sent.
+type PageNumberRequest struct {
+	// Where the page number goes. Only "query" is supported.
+	PageIn string `json:"pageIn"`
+	// PagePath is the parameter name carrying the page number, e.g. "page".
+	PagePath string `json:"pagePath"`
+	// StartPage is the number of the first page -- 1 for most APIs, 0 for 0-based ones.
+	StartPage int `json:"startPage"`
+	// SizeIn / SizePath / PageSize optionally request a page size.
+	SizeIn   string `json:"sizeIn,omitempty"`
+	SizePath string `json:"sizePath,omitempty"`
+	PageSize int    `json:"pageSize,omitempty"`
+}
+
+// PageNumberResponse declares how the last page is recognised. At most one mechanism.
+type PageNumberResponse struct {
+	// Header recognises "more pages exist" by matching a response header.
+	Header *PageNumberHeaderSignal `json:"header,omitempty"`
+	// Body recognises the end by comparing against a total the API reports.
+	Body *PageNumberBodySignal `json:"body,omitempty"`
+}
+
+// PageNumberHeaderSignal matches a header to decide whether another page exists.
+type PageNumberHeaderSignal struct {
+	// Name of the header, e.g. "Link".
+	Name string `json:"name"`
+	// Matches is a substring whose presence means another page exists, e.g. `rel="next"`.
+	Matches string `json:"matches"`
+}
+
+// PageNumberBodySignal reads a total from the body and compares it against progress so far.
+type PageNumberBodySignal struct {
+	// TotalPagesPath is a path to the total number of pages.
+	TotalPagesPath string `json:"totalPagesPath,omitempty"`
+	// TotalItemsPath is a path to the total number of items. Requires request.pageSize.
+	TotalItemsPath string `json:"totalItemsPath,omitempty"`
 }
 
 // ContinuationTokenConfig holds the specific settings for token-based pagination.
@@ -72,9 +123,6 @@ type ContinuationTokenResponse struct {
 	// For body fields, this should be a JSON path.
 	TokenPath string `json:"tokenPath"`
 }
-
-// PageNumberConfig is a placeholder for future page number pagination settings.
-//type PageNumberConfig struct{}
 
 // OffsetConfig is a placeholder for future offset pagination settings.
 //type OffsetConfig struct{}
@@ -238,8 +286,8 @@ type OperationRef struct {
 
 // PollConfig mirrors the polling endpoint and its terminal semantics.
 type PollConfig struct {
-	Method          string   `json:"method,omitempty"`
-	Path            string   `json:"path"`
+	Method string `json:"method,omitempty"`
+	Path   string `json:"path"`
 	// HandleParam is the NAME of the path parameter in Path that receives the extracted async operation
 	// handle. Defaults to "operationId" when empty, which is what every RestDefinition written before this
 	// field existed relies on. It has nothing to do with the OAS `operationId` keyword — that identifies an
