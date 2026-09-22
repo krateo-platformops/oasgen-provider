@@ -4,7 +4,7 @@ title: Real-world RestDefinition manifests
 description: Edge-case RestDefinition examples — requestFieldMapping to nested status fields, dot-escaped excludedSpecFields, identifiersMatchPolicy AND.
 resource: restdefinitions.ogen.krateo.io
 tags: [kog, restdefinition, examples]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-09-22T00:00:00Z
 ---
 
 # Real-world Examples of RestDefinition Manifests

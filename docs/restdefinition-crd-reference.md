@@ -4,7 +4,7 @@ title: RestDefinition CRD reference
 description: Generated field-by-field reference for restdefinitions.ogen.krateo.io (crdoc output from go/oasgen-provider/crds; regenerate after `make generate`).
 resource: restdefinitions.ogen.krateo.io
 tags: [kog, crd, restdefinition, generated]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-09-22T00:00:00Z
 ---
 
 # API Reference

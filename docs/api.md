@@ -4,7 +4,7 @@ title: oasgen-provider — api
 description: The RestDefinition CRD contract — actions, the full spec surface (mappings, transforms, async, delegated verbs), immutability, generated resources and supported authentication.
 resource: restdefinitions.ogen.krateo.io
 tags: [kog, crd, restdefinition]
-timestamp: 2026-08-10T00:00:00Z
+timestamp: 2026-09-22T00:00:00Z
 ---
 
 # API
