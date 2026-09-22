@@ -106,9 +106,9 @@ func TestContinuationTokenPaginator(t *testing.T) {
 			Header: http.Header{},
 		}
 		resp.Header.Set("X-Next-Token", "new-token")
-		shouldContinue, err := p.ShouldContinue(resp, nil)
+		verdict, err := p.Next(Page{Response: resp})
 		assert.NoError(t, err)
-		assert.True(t, shouldContinue)
+		assert.Equal(t, MorePages, verdict)
 		cp := p.(*continuationTokenPaginator)
 		assert.Equal(t, "new-token", cp.nextToken)
 	})
@@ -124,9 +124,11 @@ func TestContinuationTokenPaginator(t *testing.T) {
 		resp := &http.Response{
 			Header: http.Header{},
 		}
-		shouldContinue, err := p.ShouldContinue(resp, nil)
+		verdict, err := p.Next(Page{Response: resp})
 		assert.NoError(t, err)
-		assert.False(t, shouldContinue)
+		// An ABSENT token is how this strategy legitimately ends: the server stops sending one. That is
+		// genuine exhaustion, and the only verdict permitted to become a 404.
+		assert.Equal(t, Exhausted, verdict)
 		cp := p.(*continuationTokenPaginator)
 		assert.Equal(t, "", cp.nextToken)
 	})
@@ -139,8 +141,12 @@ func TestContinuationTokenPaginator(t *testing.T) {
 		})
 		p.Init()
 		resp := &http.Response{}
-		shouldContinue, err := p.ShouldContinue(resp, nil)
+		verdict, err := p.Next(Page{Response: resp})
 		assert.Error(t, err)
-		assert.False(t, shouldContinue)
+		// BEHAVIOUR CHANGE, deliberate: an unsupported location used to return false, which the caller
+		// turned into a 404 -- so a misconfigured RestDefinition reported the resource absent and the
+		// reconciler created a duplicate. A declaration it cannot read tells us nothing about whether
+		// more pages exist, so it is Indeterminate.
+		assert.Equal(t, Indeterminate, verdict)
 	})
 }
