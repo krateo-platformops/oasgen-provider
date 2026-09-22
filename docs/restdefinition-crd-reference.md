@@ -4,7 +4,7 @@ title: RestDefinition CRD reference
 description: Generated field-by-field reference for restdefinitions.ogen.krateo.io (crdoc output from go/oasgen-provider/crds; regenerate after `make generate`).
 resource: restdefinitions.ogen.krateo.io
 tags: [kog, crd, restdefinition, generated]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-09-22T00:00:00Z
 ---
 
 # API Reference
@@ -107,7 +107,7 @@ RestDefinitionSpec is the specification of a RestDefinition.
         <td>
           The resource to manage<br/>
           <br/>
-            <i>Validations</i>:<li>!(has(self.createApiRef) && has(self.observeApiRef) && !has(self.observeApiRef.notFoundExpr)): createApiRef with observeApiRef requires observeApiRef.notFoundExpr, so a create can be triggered when the delegated observe reports the resource absent</li><li>!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby'): createApiRef requires a get or findby verb so the controller can verify the create converged (level-based convergence)</li><li>!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0): compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against</li>
+            <i>Validations</i>:<li>!(has(self.createApiRef) && has(self.observeApiRef) && !has(self.observeApiRef.notFoundExpr)): createApiRef with observeApiRef requires observeApiRef.notFoundExpr, so a create can be triggered when the delegated observe reports the resource absent</li><li>!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby'): createApiRef requires a get or findby verb so the controller can verify the create converged (level-based convergence)</li><li>!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0): compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against</li><li>!has(self.compareScope) || self.compareScope != 'updatable' || self.verbsDescription.exists(v, v.action == 'update'): compareScope 'updatable' requires an update verb: with no update verb the set of updatable fields is empty, so nothing would ever be compared and the resource would silently never report drift</li>
         </td>
         <td>true</td>
       </tr><tr>
@@ -175,9 +175,15 @@ external resource is up to date.
     Fields outside that set no longer trigger updates, so use this ONLY when those fields capture
     everything worth reconciling (e.g. all other spec fields are create-only / server-managed). It trades
     precision for ergonomics: no per-field responseTransform/fieldMapping is needed to stop false drift on
-    divergently-shaped response fields. Being reconcile behavior rather than CRD shape, it is mutable.<br/>
+    divergently-shaped response fields. Being reconcile behavior rather than CRD shape, it is mutable.
+  - "updatable": only the fields the UPDATE verb's request body can actually express are compared,
+    derived from the OAS rather than declared by hand. A field the update cannot send is a field the
+    controller cannot fix, so comparing it can only produce an update that changes nothing and a
+    difference that returns on the next reconcile. This sits between "fullSpec" (which loops on
+    server-assigned or create-only fields) and "identifiersAndStatus" (which stops comparing almost
+    everything, including drift that IS fixable). Requires an update verb — see the validation below.<br/>
           <br/>
-            <i>Enum</i>: fullSpec, identifiersAndStatus<br/>
+            <i>Enum</i>: fullSpec, identifiersAndStatus, updatable<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -373,13 +379,36 @@ e.g. an existence check that returns 410 Gone or 204 for a missing resource. Int
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b>oasPath</b></td>
+        <td>string</td>
+        <td>
+          OASPath optionally overrides spec.oasPath for THIS VERB ONLY, using the same URI schemes:
+  configmap://<namespace>/<name>/<key>   |   http(s)://<url>
+
+A resource whose verbs span two OAS documents is otherwise undescribable, because spec.oasPath is
+singular. That is not a degraded case but an impossible one: when a vendor introduces an operation
+in a later API version, the resource cannot be expressed at all. Aruba's CloudServer is the
+motivating example -- findby/get/delete live in compute-provider.json (1.0.0) while create lives in
+compute-provider_v1.1.json (1.1.0), and Aruba's own SDK pins exactly that split.
+
+Documents are read as published and never merged: pre-merging would break the guarantee that a
+generated CRD traces back to one vendor document, which this repo checksum-enforces. Where two
+documents disagree about a schema both use, the RestDefinition is REJECTED at admission rather
+than silently preferring one.
+
+Which document supplies what is unchanged, only made explicit: the create verb's document drives
+the generated spec schema, the observe (get/findby) document drives status and identifiers, and
+security schemes come from the resource-level document.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexpagination">pagination</a></b></td>
         <td>object</td>
         <td>
           Pagination defines the pagination strategy for 'findby' actions. To be set only for 'findby' actions.
 If not set, no pagination will be used.<br/>
           <br/>
-            <i>Validations</i>:<li>self.type == 'continuationToken' ? has(self.continuationToken) : true: continuationToken configuration must be provided when type is 'continuationToken'</li>
+            <i>Validations</i>:<li>self.type == 'continuationToken' ? has(self.continuationToken) : true: continuationToken configuration must be provided when type is 'continuationToken'</li><li>self.type == 'pageNumber' ? has(self.pageNumber) : true: pageNumber configuration must be provided when type is 'pageNumber'</li><li>self.type == 'continuationToken' ? !has(self.pageNumber) : true: pageNumber must not be set when type is 'continuationToken'</li><li>self.type == 'pageNumber' ? !has(self.continuationToken) : true: continuationToken must not be set when type is 'pageNumber'</li>
         </td>
         <td>false</td>
       </tr><tr>
@@ -1146,9 +1175,9 @@ If not set, no pagination will be used.
         <td><b>type</b></td>
         <td>enum</td>
         <td>
-          Type specifies the pagination strategy. Currently, only 'continuationToken' is supported.<br/>
+          Type specifies the pagination strategy.<br/>
           <br/>
-            <i>Enum</i>: continuationToken<br/>
+            <i>Enum</i>: continuationToken, pageNumber<br/>
         </td>
         <td>true</td>
       </tr><tr>
@@ -1156,6 +1185,13 @@ If not set, no pagination will be used.
         <td>object</td>
         <td>
           Configuration for 'continuationToken' pagination. Required if type is 'continuationToken'.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexpaginationpagenumber">pageNumber</a></b></td>
+        <td>object</td>
+        <td>
+          Configuration for 'pageNumber' pagination. Required if type is 'pageNumber'.<br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -1254,9 +1290,14 @@ Response: defines how to extract the pagination token from the API response.
         <td><b>tokenIn</b></td>
         <td>enum</td>
         <td>
-          Where the token is located: "header" or "body". Currently, only "header" is supported.<br/>
+          Where the token is located: "header" or "body".
+
+"body" was listed here in prose while the enum admitted only "header", because the body branch of
+the extractor was a `// Not implemented yet` comment that fell through to "no token" -- i.e. a
+body token would have silently ended the walk after page one. It is implemented now, through the
+same ResponseValue primitive the pageNumber strategy uses, so the enum admits it (#119).<br/>
           <br/>
-            <i>Enum</i>: header<br/>
+            <i>Enum</i>: header, body<br/>
         </td>
         <td>true</td>
       </tr><tr>
@@ -1266,6 +1307,240 @@ Response: defines how to extract the pagination token from the API response.
           The path or name of the header or body field.
 For headers, this is simply the name.
 For body fields, this should be a JSON path.<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].pagination.pageNumber
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexpagination)</sup></sup>
+
+
+
+Configuration for 'pageNumber' pagination. Required if type is 'pageNumber'.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>maxPages</b></td>
+        <td>integer</td>
+        <td>
+          MaxPages bounds the walk. REQUIRED, with no default, deliberately: the author must state how far
+this search may go rather than inheriting a number they never considered.
+
+Exhausting it is reported as its own outcome, NEVER as not-found. "I scanned N pages and did not
+conclude" is not "it does not exist", and collapsing the two would recreate the very bug this
+strategy exists to fix -- with the added insult that the bound was deliberate.<br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+            <i>Maximum</i>: 1000<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexpaginationpagenumberrequest">request</a></b></td>
+        <td>object</td>
+        <td>
+          Request: how the page number (and optionally the page size) are sent.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexpaginationpagenumberresponse">response</a></b></td>
+        <td>object</td>
+        <td>
+          Response: how "is there another page" is recognised. Optional: omitting it selects the
+short-page rule, which is the common case.<br/>
+          <br/>
+            <i>Validations</i>:<li>!(has(self.header) && has(self.body)): declare at most one of header or body: two ways to recognise the last page cannot both be authoritative</li>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].pagination.pageNumber.request
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexpaginationpagenumber)</sup></sup>
+
+
+
+Request: how the page number (and optionally the page size) are sent.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>pageIn</b></td>
+        <td>enum</td>
+        <td>
+          Where the page number goes. Only "query" is supported: no API in practice paginates by header
+page number, and allowing it would be untested surface.<br/>
+          <br/>
+            <i>Enum</i>: query<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>pagePath</b></td>
+        <td>string</td>
+        <td>
+          PagePath is the parameter name carrying the page number, e.g. "page".<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>startPage</b></td>
+        <td>integer</td>
+        <td>
+          StartPage is the number of the FIRST page. 1 for GitHub and most APIs; 0-based ones say 0.
+Required rather than defaulted: a wrong guess here silently skips or repeats a page.<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>pageSize</b></td>
+        <td>integer</td>
+        <td>
+          <br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>sizeIn</b></td>
+        <td>enum</td>
+        <td>
+          SizeIn / SizePath / PageSize optionally request a page size. Omit them to accept the API's
+default -- but note the short-page rule cannot work without PageSize, since it compares the
+number of items returned against the number requested.<br/>
+          <br/>
+            <i>Enum</i>: query<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>sizePath</b></td>
+        <td>string</td>
+        <td>
+          <br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].pagination.pageNumber.response
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexpaginationpagenumber)</sup></sup>
+
+
+
+Response: how "is there another page" is recognised. Optional: omitting it selects the
+short-page rule, which is the common case.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexpaginationpagenumberresponsebody">body</a></b></td>
+        <td>object</td>
+        <td>
+          Body recognises the end by comparing against a total the API reports.<br/>
+          <br/>
+            <i>Validations</i>:<li>has(self.totalPagesPath) != has(self.totalItemsPath): declare exactly one of totalPagesPath or totalItemsPath</li>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexpaginationpagenumberresponseheader">header</a></b></td>
+        <td>object</td>
+        <td>
+          Header recognises "more pages exist" by matching a response header, e.g. Link containing
+rel="next". Covers GitHub, GitLab and Jira without the engine knowing any of their names.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].pagination.pageNumber.response.body
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexpaginationpagenumberresponse)</sup></sup>
+
+
+
+Body recognises the end by comparing against a total the API reports.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>totalItemsPath</b></td>
+        <td>string</td>
+        <td>
+          TotalItemsPath is a path to the total NUMBER OF ITEMS, e.g. ".total_count". Requires
+request.pageSize, since pages are derived from items per page.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>totalPagesPath</b></td>
+        <td>string</td>
+        <td>
+          TotalPagesPath is a path to the total NUMBER OF PAGES, e.g. ".total_pages".<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].pagination.pageNumber.response.header
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexpaginationpagenumberresponse)</sup></sup>
+
+
+
+Header recognises "more pages exist" by matching a response header, e.g. Link containing
+rel="next". Covers GitHub, GitLab and Jira without the engine knowing any of their names.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>matches</b></td>
+        <td>string</td>
+        <td>
+          Matches is a substring whose PRESENCE means another page exists, e.g. `rel="next"`.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>name</b></td>
+        <td>string</td>
+        <td>
+          Name of the header, e.g. "Link".<br/>
         </td>
         <td>true</td>
       </tr></tbody>

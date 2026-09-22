@@ -7,24 +7,125 @@ import (
 )
 
 // Pagination defines the pagination strategy for a "findby" action.
-// Currently, only 'continuationToken' is supported.
+//
+// WHY THIS MATTERS MORE THAN IT LOOKS: a findby that stops before the end returns not-found, and the
+// reconciler CREATES on not-found. So a collection whose match sits beyond the first page does not
+// merely fail to be found -- the controller creates a duplicate of it. Declaring pagination correctly
+// is therefore a correctness requirement, not a performance one (#119).
 // +kubebuilder:validation:XValidation:rule="self.type == 'continuationToken' ? has(self.continuationToken) : true",message="continuationToken configuration must be provided when type is 'continuationToken'"
+// +kubebuilder:validation:XValidation:rule="self.type == 'pageNumber' ? has(self.pageNumber) : true",message="pageNumber configuration must be provided when type is 'pageNumber'"
+// +kubebuilder:validation:XValidation:rule="self.type == 'continuationToken' ? !has(self.pageNumber) : true",message="pageNumber must not be set when type is 'continuationToken'"
+// +kubebuilder:validation:XValidation:rule="self.type == 'pageNumber' ? !has(self.continuationToken) : true",message="continuationToken must not be set when type is 'pageNumber'"
 type Pagination struct {
-	// Type specifies the pagination strategy. Currently, only 'continuationToken' is supported.
-	// +kubebuilder:validation:Enum=continuationToken
+	// Type specifies the pagination strategy.
+	// +kubebuilder:validation:Enum=continuationToken;pageNumber
 	// +required
 	Type string `json:"type"`
 	// Configuration for 'continuationToken' pagination. Required if type is 'continuationToken'.
 	// +optional
 	ContinuationToken *ContinuationTokenConfig `json:"continuationToken,omitempty"`
-
-	// (Future) Configuration for 'pageNumber' pagination.
+	// Configuration for 'pageNumber' pagination. Required if type is 'pageNumber'.
 	// +optional
-	//PageNumber *PageNumberConfig `json:"pageNumber,omitempty"`
+	PageNumber *PageNumberConfig `json:"pageNumber,omitempty"`
 
-	// (Future) Configuration for 'offset' pagination.
+	// (Future) Configuration for 'offset' pagination. Deliberately unimplemented rather than
+	// undesigned: it is pageNumber with offsetPath/limitPath and an advance of limit rather than 1,
+	// reusing HasMore unchanged. Recorded so the shape above can be trusted not to need reopening.
 	// +optional
 	//Offset *OffsetConfig `json:"offset,omitempty"`
+}
+
+// PageNumberConfig configures page-number pagination -- the strategy behind ?page=N&per_page=M, which
+// covers the large majority of collection endpoints in practice (162 of 219 array-returning GETs in
+// GitHub's own OpenAPI document, none of which use a continuation token).
+//
+// Nothing here names a vendor. Page numbering varies in every part -- 0- vs 1-based, the parameter
+// names, and above all how the LAST page is recognised -- so those are all declared rather than
+// inferred. An engine that knew GitHub's spelling would simply move the problem to the next API.
+type PageNumberConfig struct {
+	// Request: how the page number (and optionally the page size) are sent.
+	// +required
+	Request PageNumberRequest `json:"request"`
+	// Response: how "is there another page" is recognised. Optional: omitting it selects the
+	// short-page rule, which is the common case.
+	// +optional
+	Response *PageNumberResponse `json:"response,omitempty"`
+	// MaxPages bounds the walk. REQUIRED, with no default, deliberately: the author must state how far
+	// this search may go rather than inheriting a number they never considered.
+	//
+	// Exhausting it is reported as its own outcome, NEVER as not-found. "I scanned N pages and did not
+	// conclude" is not "it does not exist", and collapsing the two would recreate the very bug this
+	// strategy exists to fix -- with the added insult that the bound was deliberate.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	// +required
+	MaxPages int `json:"maxPages"`
+}
+
+// PageNumberRequest declares how the page cursor is sent.
+type PageNumberRequest struct {
+	// Where the page number goes. Only "query" is supported: no API in practice paginates by header
+	// page number, and allowing it would be untested surface.
+	// +kubebuilder:validation:Enum=query
+	// +required
+	PageIn string `json:"pageIn"`
+	// PagePath is the parameter name carrying the page number, e.g. "page".
+	// +required
+	PagePath string `json:"pagePath"`
+	// StartPage is the number of the FIRST page. 1 for GitHub and most APIs; 0-based ones say 0.
+	// Required rather than defaulted: a wrong guess here silently skips or repeats a page.
+	// +kubebuilder:validation:Minimum=0
+	// +required
+	StartPage int `json:"startPage"`
+	// SizeIn / SizePath / PageSize optionally request a page size. Omit them to accept the API's
+	// default -- but note the short-page rule cannot work without PageSize, since it compares the
+	// number of items returned against the number requested.
+	// +kubebuilder:validation:Enum=query
+	// +optional
+	SizeIn string `json:"sizeIn,omitempty"`
+	// +optional
+	SizePath string `json:"sizePath,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	PageSize int `json:"pageSize,omitempty"`
+}
+
+// PageNumberResponse declares how the last page is recognised. Exactly one mechanism, or none.
+//
+// Omitting this block entirely selects the SHORT-PAGE rule: a page returning fewer items than
+// PageSize is the last one. That is the common default and needs no declaration -- but it requires
+// request.pageSize, because "fewer than requested" is meaningless without a request.
+// +kubebuilder:validation:XValidation:rule="!(has(self.header) && has(self.body))",message="declare at most one of header or body: two ways to recognise the last page cannot both be authoritative"
+type PageNumberResponse struct {
+	// Header recognises "more pages exist" by matching a response header, e.g. Link containing
+	// rel="next". Covers GitHub, GitLab and Jira without the engine knowing any of their names.
+	// +optional
+	Header *PageNumberHeaderSignal `json:"header,omitempty"`
+	// Body recognises the end by comparing against a total the API reports.
+	// +optional
+	Body *PageNumberBodySignal `json:"body,omitempty"`
+}
+
+// PageNumberHeaderSignal matches a header to decide whether another page exists.
+type PageNumberHeaderSignal struct {
+	// Name of the header, e.g. "Link".
+	// +required
+	Name string `json:"name"`
+	// Matches is a substring whose PRESENCE means another page exists, e.g. `rel="next"`.
+	// +required
+	Matches string `json:"matches"`
+}
+
+// PageNumberBodySignal reads a total from the body and compares it against progress so far.
+// +kubebuilder:validation:XValidation:rule="has(self.totalPagesPath) != has(self.totalItemsPath)",message="declare exactly one of totalPagesPath or totalItemsPath"
+type PageNumberBodySignal struct {
+	// TotalPagesPath is a path to the total NUMBER OF PAGES, e.g. ".total_pages".
+	// +optional
+	TotalPagesPath string `json:"totalPagesPath,omitempty"`
+	// TotalItemsPath is a path to the total NUMBER OF ITEMS, e.g. ".total_count". Requires
+	// request.pageSize, since pages are derived from items per page.
+	// +optional
+	TotalItemsPath string `json:"totalItemsPath,omitempty"`
 }
 
 // ContinuationTokenConfig holds the specific settings for token-based pagination.
@@ -52,8 +153,13 @@ type ContinuationTokenRequest struct {
 
 // ContinuationTokenResponse defines how to extract the pagination token from the API response.
 type ContinuationTokenResponse struct {
-	// Where the token is located: "header" or "body". Currently, only "header" is supported.
-	// +kubebuilder:validation:Enum=header
+	// Where the token is located: "header" or "body".
+	//
+	// "body" was listed here in prose while the enum admitted only "header", because the body branch of
+	// the extractor was a `// Not implemented yet` comment that fell through to "no token" -- i.e. a
+	// body token would have silently ended the walk after page one. It is implemented now, through the
+	// same ResponseValue primitive the pageNumber strategy uses, so the enum admits it (#119).
+	// +kubebuilder:validation:Enum=header;body
 	// +required
 	TokenIn string `json:"tokenIn"`
 	// The path or name of the header or body field.
@@ -62,9 +168,6 @@ type ContinuationTokenResponse struct {
 	// +required
 	TokenPath string `json:"tokenPath"`
 }
-
-// PageNumberConfig is a placeholder for future page number pagination settings.
-//type PageNumberConfig struct{}
 
 // OffsetConfig is a placeholder for future offset pagination settings.
 //type OffsetConfig struct{}

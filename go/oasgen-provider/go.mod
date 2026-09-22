@@ -8,6 +8,7 @@ require (
 	github.com/go-andiamo/splitter v1.2.5
 	github.com/go-logr/logr v1.4.4
 	github.com/gobuffalo/flect v1.0.3
+	github.com/google/cel-go v0.29.0
 	github.com/krateo-platformops/plumbing v1.14.2
 	github.com/krateo-platformops/provider-runtime v1.3.0
 	github.com/pb33f/libopenapi v0.16.8
@@ -24,6 +25,7 @@ require (
 	sigs.k8s.io/controller-runtime v0.23.3
 	sigs.k8s.io/controller-tools v0.20.1
 	sigs.k8s.io/e2e-framework v0.6.0
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -51,7 +53,6 @@ require (
 	github.com/go-openapi/swag v0.23.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.2.2 // indirect
 	github.com/google/btree v1.1.3 // indirect
-	github.com/google/cel-go v0.29.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -127,7 +128,6 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2-0.20260122202528-d9cc6641c482 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
 replace github.com/pb33f/libopenapi => github.com/krateoplatformops/libopenapi v0.21.8

@@ -4,7 +4,7 @@ title: Real-world RestDefinition manifests
 description: Edge-case RestDefinition examples — requestFieldMapping to nested status fields, dot-escaped excludedSpecFields, identifiersMatchPolicy AND.
 resource: restdefinitions.ogen.krateo.io
 tags: [kog, restdefinition, examples]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-09-22T00:00:00Z
 ---
 
 # Real-world Examples of RestDefinition Manifests
@@ -261,3 +261,54 @@ spec:
 
 **Description**:
 In this example, the `identifiersMatchPolicy` is set to `AND` for the `findby` action. This means that when searching for a `PolicyConfiguration` resource, both the `type.id` and `settings` fields must match the corresponding fields in the API response for a resource to be considered a match. This is useful when multiple fields are required to uniquely identify a resource. The default behavior is `OR`, which would consider a match if any of the specified identifiers match but in this particular case both identifiers are necessary to uniquely identify the resource.
+
+## `pageNumber` pagination on a `findby`
+
+**Context**: GitHub's `GET /orgs/{org}/repos` returns 30 repositories per page and signals
+further pages with a `Link` header carrying `rel="next"`. Without a pagination block, a
+`findby` reads page one only — so a repository at position 31 is reported as not found, and
+because the reconciler **creates** on not-found, the controller creates a duplicate of a
+repository that already exists.
+
+```yaml
+verbsDescription:
+  - action: findby
+    method: GET
+    path: /orgs/{org}/repos
+    pagination:
+      type: pageNumber
+      pageNumber:
+        request:
+          pageIn: query
+          pagePath: page
+          startPage: 1        # GitHub is 1-based; 0-based APIs say 0
+          sizeIn: query
+          sizePath: per_page
+          pageSize: 100
+        response:
+          header:
+            name: Link
+            matches: 'rel="next"'
+        maxPages: 20          # required, no default
+```
+
+**Description**:
+`startPage` is required rather than defaulted because 0- and 1-based APIs are both common
+and a wrong guess silently skips or repeats a page — with no symptom other than a resource
+that is never found. `maxPages` is likewise required: it states how far this search may go,
+and reaching it is reported as *"I stopped looking"*, never as absence.
+
+Three ways to recognise the last page, exactly one per declaration:
+
+| Declaration | End of collection when |
+|---|---|
+| `response.header` | the header is present and does **not** contain `matches` |
+| `response.body.totalPagesPath` | pages fetched ≥ the reported total |
+| `response.body.totalItemsPath` | pages fetched × `pageSize` ≥ the reported total |
+| *(`response` omitted)* | the page held fewer items than `request.pageSize` |
+
+If the declared header or body path is **absent** from a response, the walk reports that it
+could not determine whether more pages exist, and the reconcile fails loudly. It does not
+fall back to "the collection ended" — the author said this is how the end would be
+recognised, and concluding absence from a signal that was never seen is what produced
+duplicates (#119).

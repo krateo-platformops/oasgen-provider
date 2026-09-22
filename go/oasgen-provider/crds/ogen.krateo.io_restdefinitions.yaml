@@ -988,10 +988,16 @@ spec:
                                     pagination token from the API response.'
                                   properties:
                                     tokenIn:
-                                      description: 'Where the token is located: "header"
-                                        or "body". Currently, only "header" is supported.'
+                                      description: |-
+                                        Where the token is located: "header" or "body".
+
+                                        "body" was listed here in prose while the enum admitted only "header", because the body branch of
+                                        the extractor was a `// Not implemented yet` comment that fell through to "no token" -- i.e. a
+                                        body token would have silently ended the walk after page one. It is implemented now, through the
+                                        same ResponseValue primitive the pageNumber strategy uses, so the enum admits it (#119).
                                       enum:
                                       - header
+                                      - body
                                       type: string
                                     tokenPath:
                                       description: |-
@@ -1007,11 +1013,115 @@ spec:
                               - request
                               - response
                               type: object
+                            pageNumber:
+                              description: Configuration for 'pageNumber' pagination.
+                                Required if type is 'pageNumber'.
+                              properties:
+                                maxPages:
+                                  description: |-
+                                    MaxPages bounds the walk. REQUIRED, with no default, deliberately: the author must state how far
+                                    this search may go rather than inheriting a number they never considered.
+
+                                    Exhausting it is reported as its own outcome, NEVER as not-found. "I scanned N pages and did not
+                                    conclude" is not "it does not exist", and collapsing the two would recreate the very bug this
+                                    strategy exists to fix -- with the added insult that the bound was deliberate.
+                                  maximum: 1000
+                                  minimum: 1
+                                  type: integer
+                                request:
+                                  description: 'Request: how the page number (and
+                                    optionally the page size) are sent.'
+                                  properties:
+                                    pageIn:
+                                      description: |-
+                                        Where the page number goes. Only "query" is supported: no API in practice paginates by header
+                                        page number, and allowing it would be untested surface.
+                                      enum:
+                                      - query
+                                      type: string
+                                    pagePath:
+                                      description: PagePath is the parameter name
+                                        carrying the page number, e.g. "page".
+                                      type: string
+                                    pageSize:
+                                      minimum: 1
+                                      type: integer
+                                    sizeIn:
+                                      description: |-
+                                        SizeIn / SizePath / PageSize optionally request a page size. Omit them to accept the API's
+                                        default -- but note the short-page rule cannot work without PageSize, since it compares the
+                                        number of items returned against the number requested.
+                                      enum:
+                                      - query
+                                      type: string
+                                    sizePath:
+                                      type: string
+                                    startPage:
+                                      description: |-
+                                        StartPage is the number of the FIRST page. 1 for GitHub and most APIs; 0-based ones say 0.
+                                        Required rather than defaulted: a wrong guess here silently skips or repeats a page.
+                                      minimum: 0
+                                      type: integer
+                                  required:
+                                  - pageIn
+                                  - pagePath
+                                  - startPage
+                                  type: object
+                                response:
+                                  description: |-
+                                    Response: how "is there another page" is recognised. Optional: omitting it selects the
+                                    short-page rule, which is the common case.
+                                  properties:
+                                    body:
+                                      description: Body recognises the end by comparing
+                                        against a total the API reports.
+                                      properties:
+                                        totalItemsPath:
+                                          description: |-
+                                            TotalItemsPath is a path to the total NUMBER OF ITEMS, e.g. ".total_count". Requires
+                                            request.pageSize, since pages are derived from items per page.
+                                          type: string
+                                        totalPagesPath:
+                                          description: TotalPagesPath is a path to
+                                            the total NUMBER OF PAGES, e.g. ".total_pages".
+                                          type: string
+                                      type: object
+                                      x-kubernetes-validations:
+                                      - message: declare exactly one of totalPagesPath
+                                          or totalItemsPath
+                                        rule: has(self.totalPagesPath) != has(self.totalItemsPath)
+                                    header:
+                                      description: |-
+                                        Header recognises "more pages exist" by matching a response header, e.g. Link containing
+                                        rel="next". Covers GitHub, GitLab and Jira without the engine knowing any of their names.
+                                      properties:
+                                        matches:
+                                          description: Matches is a substring whose
+                                            PRESENCE means another page exists, e.g.
+                                            `rel="next"`.
+                                          type: string
+                                        name:
+                                          description: Name of the header, e.g. "Link".
+                                          type: string
+                                      required:
+                                      - matches
+                                      - name
+                                      type: object
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: 'declare at most one of header or body:
+                                      two ways to recognise the last page cannot both
+                                      be authoritative'
+                                    rule: '!(has(self.header) && has(self.body))'
+                              required:
+                              - maxPages
+                              - request
+                              type: object
                             type:
                               description: Type specifies the pagination strategy.
-                                Currently, only 'continuationToken' is supported.
                               enum:
                               - continuationToken
+                              - pageNumber
                               type: string
                           required:
                           - type
@@ -1020,6 +1130,17 @@ spec:
                           - message: continuationToken configuration must be provided
                               when type is 'continuationToken'
                             rule: 'self.type == ''continuationToken'' ? has(self.continuationToken)
+                              : true'
+                          - message: pageNumber configuration must be provided when
+                              type is 'pageNumber'
+                            rule: 'self.type == ''pageNumber'' ? has(self.pageNumber)
+                              : true'
+                          - message: pageNumber must not be set when type is 'continuationToken'
+                            rule: 'self.type == ''continuationToken'' ? !has(self.pageNumber)
+                              : true'
+                          - message: continuationToken must not be set when type is
+                              'pageNumber'
+                            rule: 'self.type == ''pageNumber'' ? !has(self.continuationToken)
                               : true'
                         path:
                           description: 'Path: the path to the api - has to be the

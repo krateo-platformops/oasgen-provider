@@ -306,7 +306,7 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 	pagesScanned := 0
 
 	for {
-		if pagesScanned >= maxFindByPages {
+		if pagesScanned >= pagination.MaxFindByPages {
 			// NOT a 404. IsNotFoundError keys on a 404 StatusError, and the reconciler acts on not-found
 			// by CREATING the resource -- so returning one here would tell it "this does not exist" when
 			// the truth is "I stopped looking", and it would create a duplicate of something it never
@@ -314,7 +314,7 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 			// from "it is not there", and must stay one.
 			return Response{}, fmt.Errorf(
 				"findby stopped after scanning %d pages without finding a match or reaching the end of the collection; "+
-					"this is a safety limit, not a conclusion that the resource is absent", maxFindByPages)
+					"this is a safety limit, not a conclusion that the resource is absent", pagination.MaxFindByPages)
 		}
 		pagesScanned++
 
@@ -377,10 +377,6 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 		}
 	}
 }
-
-// maxFindByPages caps the paginated findby walk -- a runaway backstop, deliberately far above any
-// real search, and NOT the per-resource bound an author would configure (#119).
-const maxFindByPages = 1000
 
 // CallFindBySingle executes a non-paginated FindBy operation.
 func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration) (Response, error) {
