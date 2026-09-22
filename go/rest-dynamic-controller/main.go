@@ -113,7 +113,15 @@ func main() {
 	deploymentName := flag.String("deployment-name",
 		env.String("DEPLOYMENT_NAME", ""),
 		"The deployment name for stable resource identification in metrics.")
+	// SERVICE_VERSION wins if the deployment sets it; otherwise fall back to the stamp compiled in at
+	// build time (main.Build, set from the Dockerfile's BUILD_VERSION ARG). Build was already compiled
+	// in and only logged at startup, so the value existed but never reached telemetry -- service.version
+	// stayed empty and the collector filled it from the chart label, which cannot distinguish two images
+	// built from different commits at the same release (#127).
 	serviceVersion := env.String("SERVICE_VERSION", "") // image version, stamped as service.version on metrics/traces
+	if serviceVersion == "" {
+		serviceVersion = Build
+	}
 
 	flag.Usage = func() {
 		fmt.Fprintln(flag.CommandLine.Output(), "Flags:")
