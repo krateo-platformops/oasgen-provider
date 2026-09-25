@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-09-22T00:00:00Z
+timestamp: 2026-09-25T00:00:00Z
 ---
 
 # Log
@@ -13,7 +13,11 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
-## Unreleased
+## 2026-09-25 — 0.24.0
+
+A minor rather than a patch: `findby` gains a second pagination strategy, and the CRD grows the
+fields to declare it. Nothing existing changes shape — a RestDefinition written for 0.23.x is
+admitted unchanged.
 
 - **`findby` could not paginate the strategy most APIs actually use** (#119). Only
   `continuationToken` existed. Page-number pagination — `?page=N&per_page=M` — covers the
@@ -46,6 +50,15 @@ provider and the rest-dynamic-controller together.
   as `header` or `body` while the body branch was a `// Not implemented yet` comment that fell
   through to "no token" — so a body token ended the walk after page one, silently. It works now,
   and the CRD enum admits it.
+
+- **Every Kubernetes Event the provider emitted was silently dropped** (#126). The chart's
+  ClusterRole granted `events` only in the legacy core group (`""`). Modern client-go event
+  broadcasters write to `events.k8s.io`, so the broadcaster 403'd on every emit.
+
+  Nothing failed loudly, because event emission is best-effort by design: the reconcile carried on
+  and the provider looked healthy. What was lost was the diagnostic channel — `kubectl describe` on
+  a struggling resource showed nothing, so the one place an operator looks first was empty for
+  reasons unrelated to the resource. Both API groups are granted now.
 
 ## 2026-09-18 — 0.23.2
 
