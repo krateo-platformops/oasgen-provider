@@ -24,7 +24,11 @@ COPY apis/ apis/
 COPY internal/ internal/
 
 # Build
-RUN CGO_ENABLED=0 GO111MODULE=on go build -a -o /bin/manager main.go && \
+# BUILD_VERSION is stamped into the binary so a running pod can say exactly which build it is.
+# Without it service.version is empty and the collector falls back to the chart label, which cannot
+# attribute an incident to a commit (#127). rest-dynamic-controller already did this; this module did not.
+ARG BUILD_VERSION
+RUN CGO_ENABLED=0 GO111MODULE=on go build -a -ldflags="-X 'main.Build=${BUILD_VERSION}'" -o /bin/manager main.go && \
     strip /bin/manager
 
 # Deployment environment

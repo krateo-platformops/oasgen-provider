@@ -28,6 +28,11 @@ import (
 	"github.com/stoewer/go-strcase"
 )
 
+// Build is stamped at link time via -ldflags "-X main.Build=..." from the Dockerfile's BUILD_VERSION
+// ARG, which the release workflow supplies. Empty in a plain `go build`, which is fine: the fallback
+// below simply does not fire and SERVICE_VERSION behaves as it always did.
+var Build string
+
 const (
 	providerName              = "oasgen"
 	defaultOtelExportInterval = 30 * time.Second
@@ -104,6 +109,13 @@ func main() {
 	// This keeps the metrics and trace resources identical. oasgen-provider is the operator, so it
 	// carries no composition-id.
 	os.Setenv("OTEL_SERVICE_NAME", *metricsServiceName)
+	// SERVICE_VERSION wins if the deployment sets it; otherwise fall back to the stamp compiled in at
+	// build time. The fallback is what makes this work with no chart change, and it carries the BUILD
+	// rather than the chart version -- which is the point: a chart version cannot distinguish two images
+	// built from different commits at the same release (#127).
+	if os.Getenv("SERVICE_VERSION") == "" && Build != "" {
+		os.Setenv("SERVICE_VERSION", Build)
+	}
 	if sv := os.Getenv("SERVICE_VERSION"); sv != "" {
 		attrs := "service.version=" + sv
 		if existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); existing != "" {
