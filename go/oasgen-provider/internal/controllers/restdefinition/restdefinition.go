@@ -781,9 +781,11 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	}
 	e.log.Debug("Applying CRD", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)
 	owner := cr.Namespace + "/" + cr.Name
-	if _, err = crd.ApplyOrUpdateCRD(ctx, e.kube, crdu, owner); err != nil {
+	outcome, err := crd.ApplyOrUpdateCRD(ctx, e.kube, crdu, owner)
+	if err != nil {
 		return fmt.Errorf("installing CRD: %w", err)
 	}
+	e.noteAdoption(cr, crdu.Name, outcome)
 
 	if len(configurationFields) > 0 || hasSecuritySchemes {
 		cfgGVK := schema.GroupVersionKind{
@@ -807,9 +809,11 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 			return fmt.Errorf("unmarshalling configuration CRD: %w", cerr)
 		}
 		e.log.Debug("Applying Configuration CRD", "Kind", cfgGVK.Kind, "Group", cfgGVK.Group)
-		if _, cerr = crd.ApplyOrUpdateCRD(ctx, e.kube, cfgCRDU, owner); cerr != nil {
+		cfgOutcome, cerr := crd.ApplyOrUpdateCRD(ctx, e.kube, cfgCRDU, owner)
+		if cerr != nil {
 			return fmt.Errorf("installing configuration CRD: %w", cerr)
 		}
+		e.noteAdoption(cr, cfgCRDU.Name, cfgOutcome)
 	}
 	return nil
 }
@@ -1160,4 +1164,21 @@ func (e *external) getDocumentModelFromCR(ctx context.Context, cr *definitionv1a
 		return nil, "", err
 	}
 	return doc, oasContentDigest(contents), nil
+}
+
+// noteAdoption raises an Event when a CRD was taken over from a RestDefinition that no longer exists.
+//
+// Adoption is a change of ownership and it happens without anyone asking, so it must be visible. Before
+// #137 the same situation produced a hard failure an operator had to trace through provider source; the
+// fix makes it self-healing, and the risk of a self-healing fix is that it heals silently and nobody ever
+// learns the husk was there. The Event is what keeps "it just started working" from being the whole story.
+func (e *external) noteAdoption(cr *definitionv1alpha1.RestDefinition, crdName string, outcome crd.ApplyOutcome) {
+	if outcome.AdoptedFrom == "" {
+		return
+	}
+	e.rec.Eventf(cr, corev1.EventTypeNormal, "CRDOwnershipAdopted",
+		"took ownership of CRD %q from RestDefinition %q, which no longer exists",
+		crdName, outcome.AdoptedFrom)
+	e.log.Info("adopted CRD from a deleted RestDefinition",
+		"crd", crdName, "previousOwner", outcome.AdoptedFrom, "newOwner", cr.Namespace+"/"+cr.Name)
 }
