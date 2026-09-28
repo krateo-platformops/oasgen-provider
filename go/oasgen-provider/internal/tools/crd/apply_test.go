@@ -3,14 +3,17 @@ package crd
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
+	restdefinitionsv1alpha1 "github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/crd/generation"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -22,7 +25,21 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
 	require.NoError(t, apiextensionsv1.AddToScheme(s))
+	// RestDefinition too: the ownership check now asks whether the annotated owner still EXISTS, so a
+	// scheme that cannot represent one would make every owner look dangling (#137).
+	require.NoError(t, restdefinitionsv1alpha1.SchemeBuilder.AddToScheme(s))
 	return s
+}
+
+// liveRD builds a RestDefinition for "namespace/name", so a test can distinguish an owner that exists from
+// a husk that does not. Before #137 that distinction did not exist and no test needed it.
+func liveRD(t *testing.T, nsName string) *restdefinitionsv1alpha1.RestDefinition {
+	t.Helper()
+	ns, name, ok := strings.Cut(nsName, "/")
+	require.True(t, ok, "owner must be namespace/name")
+	return &restdefinitionsv1alpha1.RestDefinition{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+	}
 }
 
 // genCRD builds a single-version generated CRD, as crdgen would emit (served+storage on the one version).
@@ -77,11 +94,12 @@ func TestApplyOrUpdateCRD_Create(t *testing.T) {
 	cli := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	newcrd := genCRD("github.krateo.io", "PullRequest", "pullrequests", "v1-0-0", "A")
 
-	gvr, err := ApplyOrUpdateCRD(context.Background(), cli, newcrd, "demo/rd")
+	out, err := ApplyOrUpdateCRD(context.Background(), cli, newcrd, "demo/rd")
 	require.NoError(t, err)
-	assert.Equal(t, schema.GroupVersionResource{Group: "github.krateo.io", Version: "v1-0-0", Resource: "pullrequests"}, gvr)
+	assert.Equal(t, schema.GroupVersionResource{Group: "github.krateo.io", Version: "v1-0-0", Resource: "pullrequests"}, out.GVR)
+	assert.Empty(t, out.AdoptedFrom, "nothing was displaced by a plain create")
 
-	got, err := Get(context.Background(), cli, gvr.GroupResource())
+	got, err := Get(context.Background(), cli, out.GVR.GroupResource())
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Len(t, got.Spec.Versions, 1)
@@ -198,12 +216,17 @@ func TestApplyOrUpdateCRD_InPlaceKeepsSiblingVersion(t *testing.T) {
 	require.NotNil(t, findVer(got, generation.VacuumVersionName), "vacuum survives")
 }
 
-// The ownership guard: a CRD owned by one RestDefinition must not be modified by another (which would put two
-// RDCs on the same resource). A foreign owner is rejected with *ErrOwnershipConflict and the CRD is untouched.
+// The ownership guard: a CRD owned by one LIVE RestDefinition must not be modified by another (which would put
+// two RDCs on the same resource). A live foreign owner is rejected with *ErrOwnershipConflict, CRD untouched.
+//
+// The RestDefinition object below is not decoration. Before #137 this test passed without it, because the
+// check compared strings and never looked the owner up -- which is exactly why a husk that had been deleted
+// blocked regeneration forever. The guard is only meaningful when the owner it names actually exists.
 func TestApplyOrUpdateCRD_RejectsForeignOwner(t *testing.T) {
 	live := genCRD("g", "K", "widgets", "v1-0-0", "A")
 	live.Annotations = map[string]string{OwnerAnnotation: "demo/rd-a"}
-	cli := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(live).Build()
+	cli := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(live, liveRD(t, "demo/rd-a")).Build()
 
 	_, err := ApplyOrUpdateCRD(context.Background(), cli, genCRD("g", "K", "widgets", "v1-0-0", "B"), "demo/rd-b")
 	require.Error(t, err)
@@ -233,4 +256,90 @@ func TestApplyOrUpdateCRD_CreateStampsOwnerAndAdoptsUnowned(t *testing.T) {
 	got2, _ := Get(context.Background(), cli2, schema.GroupResource{Group: "g2", Resource: "gadgets"})
 	assert.Equal(t, "demo/rd-b", got2.Annotations[OwnerAnnotation], "unowned CRD adopted + stamped")
 	assert.Equal(t, "B", specDesc(findVer(got2, "v1-0-0")), "in-place update applied on adopt")
+}
+
+// TestApplyOrUpdateCRD_AdoptsDanglingOwner is the fix for #137.
+//
+// A RestDefinition that no longer exists cannot double-reconcile anything, so its leftover annotation is not
+// a conflict — it is litter. Before this, the two were indistinguishable, and the consequence was not a
+// cosmetic error: regeneration was refused permanently, with no path back that did not involve a human
+// editing annotations by hand. On a live cluster that was a 1h40m outage triggered by an ordinary chart bump.
+func TestApplyOrUpdateCRD_AdoptsDanglingOwner(t *testing.T) {
+	live := genCRD("g", "K", "widgets", "v1-0-0", "A")
+	live.Annotations = map[string]string{OwnerAnnotation: "demo/rd-husk"}
+	// Note what is NOT in the fake client: any RestDefinition called demo/rd-husk.
+	cli := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(live).Build()
+
+	out, err := ApplyOrUpdateCRD(context.Background(), cli, genCRD("g", "K", "widgets", "v1-0-0", "B"), "demo/rd-live")
+	require.NoError(t, err, "a deleted owner must not block regeneration")
+	assert.Equal(t, "demo/rd-husk", out.AdoptedFrom,
+		"the displaced owner must be reported so the caller can raise an Event: a self-healing fix that heals "+
+			"silently teaches nobody that the husk was there")
+
+	got, gerr := Get(context.Background(), cli, schema.GroupResource{Group: "g", Resource: "widgets"})
+	require.NoError(t, gerr)
+	assert.Equal(t, "demo/rd-live", got.Annotations[OwnerAnnotation], "ownership moves to the live RestDefinition")
+	assert.Equal(t, "B", specDesc(findVer(got, "v1-0-0")), "and the regeneration actually applied")
+}
+
+// TestApplyOrUpdateCRD_UndeterminedOwnerNeitherAdoptsNorConflicts is the forbidding test.
+//
+// A failed lookup is not evidence of absence. Adopting on it would hand a CRD to a second controller on the
+// strength of an RBAC denial or a dropped connection — turning a loud, recoverable refusal into a silent,
+// corrupting double-reconcile. It is equally not evidence of presence. Both answers must stay unavailable.
+//
+// This is the same discipline as pagination's Indeterminate (#119), and it is the reason that one is a type.
+func TestApplyOrUpdateCRD_UndeterminedOwnerNeitherAdoptsNorConflicts(t *testing.T) {
+	live := genCRD("g", "K", "widgets", "v1-0-0", "A")
+	live.Annotations = map[string]string{OwnerAnnotation: "demo/rd-a"}
+
+	// Fail ONLY the RestDefinition lookup; CRD reads must still work, or the test would be proving that a
+	// broken client fails rather than that an unverifiable owner is refused.
+	cli := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(live).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, isRD := obj.(*unstructured.Unstructured); isRD && key.Namespace != "" {
+					return apierrors.NewForbidden(
+						schema.GroupResource{Group: "ogen.krateo.io", Resource: "restdefinitions"}, key.Name,
+						fmt.Errorf("no RBAC for restdefinitions"))
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	out, err := ApplyOrUpdateCRD(context.Background(), cli, genCRD("g", "K", "widgets", "v1-0-0", "B"), "demo/rd-b")
+	require.Error(t, err)
+
+	var undetermined *ErrOwnershipUndetermined
+	require.ErrorAs(t, err, &undetermined,
+		"a lookup failure must be its own verdict, not a conflict and above all not an adoption")
+	assert.Equal(t, "demo/rd-a", undetermined.Owner)
+
+	var conflict *ErrOwnershipConflict
+	assert.NotErrorAs(t, err, &conflict, "an unverifiable owner is not a proven conflict either")
+	assert.Empty(t, out.AdoptedFrom, "nothing may be adopted on a failed lookup")
+
+	got, gerr := Get(context.Background(), cli, schema.GroupResource{Group: "g", Resource: "widgets"})
+	require.NoError(t, gerr)
+	assert.Equal(t, "A", specDesc(findVer(got, "v1-0-0")), "the CRD must be untouched")
+	assert.Equal(t, "demo/rd-a", got.Annotations[OwnerAnnotation], "and the owner annotation must be untouched")
+}
+
+// A malformed annotation names nobody, so it cannot be a live owner. Treating it as undetermined would wedge
+// forever on a value no future reconcile can improve — the #137 failure mode reintroduced by another route.
+func TestApplyOrUpdateCRD_MalformedOwnerAnnotationIsAdopted(t *testing.T) {
+	for _, bad := range []string{"no-slash", "/only-name", "only-ns/"} {
+		t.Run(bad, func(t *testing.T) {
+			live := genCRD("g", "K", "widgets", "v1-0-0", "A")
+			live.Annotations = map[string]string{OwnerAnnotation: bad}
+			cli := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(live).Build()
+
+			out, err := ApplyOrUpdateCRD(context.Background(), cli, genCRD("g", "K", "widgets", "v1-0-0", "B"), "demo/rd-live")
+			require.NoError(t, err)
+			assert.Equal(t, bad, out.AdoptedFrom)
+
+			got, _ := Get(context.Background(), cli, schema.GroupResource{Group: "g", Resource: "widgets"})
+			assert.Equal(t, "demo/rd-live", got.Annotations[OwnerAnnotation])
+		})
+	}
 }
