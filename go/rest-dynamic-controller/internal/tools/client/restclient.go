@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -266,9 +267,16 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 // It serves as the primary orchestrator for the `FindBy` action of the Rest Dynamic Controller,
 // delegating response parsing and item matching to helper functions: extractItemsFromResponse, findItemInList, and isItemMatch.
 func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration, findByAction *getter.VerbsDescription) (Response, error) {
+	// findByAction may legitimately be nil here (callers that do not have the verb to hand), in which
+	// case there is no declared itemsPath and inference applies.
+	var itemsPath string
+	if findByAction != nil {
+		itemsPath = findByAction.ItemsPath
+	}
+
 	if findByAction == nil || findByAction.Pagination == nil {
 		// No pagination configured, perform a single call.
-		return u.CallFindBySingle(ctx, cli, path, opts)
+		return u.CallFindBySingle(ctx, cli, path, opts, itemsPath)
 	}
 
 	// Set up debug transport once, before pagination starts
@@ -290,7 +298,7 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 	}
 	if paginator == nil {
 		// Paginator factory returned nil, treat as no pagination.
-		return u.CallFindBySingle(ctx, cli, path, opts)
+		return u.CallFindBySingle(ctx, cli, path, opts, itemsPath)
 	}
 
 	paginator.Init()
@@ -325,7 +333,7 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 		}
 
 		// Normalize the response to a list of items.
-		itemList, err := ExtractItemsFromResponse(response.ResponseBody)
+		itemList, err := ExtractItemsFromResponse(response.ResponseBody, itemsPath)
 		if err != nil {
 			// If extraction fails, we can't continue.
 			return Response{}, err
@@ -379,7 +387,10 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 }
 
 // CallFindBySingle executes a non-paginated FindBy operation.
-func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration) (Response, error) {
+// itemsPath names the envelope property holding the collection; empty means infer, which succeeds only
+// when the inference is unambiguous. It is threaded in rather than re-derived because the GENERATOR used
+// the same value to decide the item schema, and the two must agree (#110).
+func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration, itemsPath string) (Response, error) {
 	response, err := u.Call(ctx, cli, path, opts)
 	if err != nil {
 		return Response{}, err
@@ -389,7 +400,7 @@ func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Cli
 	}
 
 	// Extract the list of items from the response.
-	itemList, err := ExtractItemsFromResponse(response.ResponseBody)
+	itemList, err := ExtractItemsFromResponse(response.ResponseBody, itemsPath)
 	if err != nil {
 		return Response{}, err
 	}
@@ -602,7 +613,18 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 // It is a free function (not a method) because it does not depend on any UnstructuredClient state — this
 // lets other packages reuse the same list-normalization logic FindBy
 // uses, without needing a client instance.
-func ExtractItemsFromResponse(body interface{}) ([]interface{}, error) {
+// ExtractItemsFromResponse returns the collection a findby response carries.
+//
+// itemsPath, when non-empty, names the envelope property holding the collection (the same value the
+// GENERATOR used to find the item's schema -- see oasgen-provider's unwrapFindByItems). The two must
+// resolve to the same property or the CRD describes one list while this code searches another.
+//
+//	bare array            -> itself
+//	itemsPath declared    -> that property
+//	exactly one array     -> that one, unambiguously
+//	two or more arrays    -> an error; never a guess
+//	no array at all       -> the object itself, as a list of one
+func ExtractItemsFromResponse(body interface{}, itemsPath string) ([]interface{}, error) {
 	// Case 1: The body is already a standard list (JSON array).
 	if list, ok := body.([]interface{}); ok {
 		return list, nil
@@ -612,27 +634,74 @@ func ExtractItemsFromResponse(body interface{}) ([]interface{}, error) {
 	if body == nil {
 		return nil, fmt.Errorf("response body is nil")
 	}
-	if bodyMap, ok := body.(map[string]interface{}); ok {
-		if len(bodyMap) == 0 {
-			return []interface{}{}, nil
-		}
-
-		// Case 2: The body is an object, which may contain a list.
-		// Iterate through its values to find the first one that is a list.
-		for _, v := range bodyMap {
-			if list, ok := v.([]interface{}); ok {
-				return list, nil
-			}
-		}
-
-		// Case 3: If no list was found inside the object, assume the object
-		// itself is the single item we are looking for e.g. `{"id": 1}`.
-		// Wrap it in a slice to create a list of one, e.g. `[{"id": 1}]`.
-		return []interface{}{bodyMap}, nil
+	bodyMap, ok := body.(map[string]interface{})
+	if !ok {
+		// If the body is not a list or an object, it's an unexpected type.
+		return nil, fmt.Errorf("unexpected response type: %T", body)
+	}
+	if len(bodyMap) == 0 {
+		return []interface{}{}, nil
 	}
 
-	// If the body is not a list or an object, it's an unexpected type.
-	return nil, fmt.Errorf("unexpected response type: %T", body)
+	// A declared itemsPath is authoritative. If it does not resolve to an array, that is an error rather
+	// than a reason to look elsewhere: the author stated where the collection is, and quietly searching
+	// somewhere else would hide a wrong statement behind a plausible-looking result.
+	if itemsPath != "" {
+		raw, found, err := valueAtPath(bodyMap, itemsPath)
+		if err != nil {
+			return nil, fmt.Errorf("itemsPath %q: %w", itemsPath, err)
+		}
+		if !found {
+			return nil, fmt.Errorf("itemsPath %q is not present in the findby response", itemsPath)
+		}
+		list, isList := raw.([]interface{})
+		if !isList {
+			return nil, fmt.Errorf("itemsPath %q resolves to %T, not an array", itemsPath, raw)
+		}
+		return list, nil
+	}
+
+	// Case 2: the body is an envelope carrying the collection in a property.
+	//
+	// This used to be "the first value that is a list" while ranging bodyMap -- and Go RANDOMISES map
+	// iteration order, so an envelope with two arrays ({"data": [...], "included": [...]} is plain
+	// JSON:API) searched a different one on different reconciles. It read as a sensible default and
+	// behaved as a coin flip, and losing the toss means findby reports not-found, which the reconciler
+	// acts on by CREATING a duplicate. One array is unambiguous; more than one is a question only the
+	// author can answer (#110).
+	var names []string
+	for k, v := range bodyMap {
+		if _, isList := v.([]interface{}); isList {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names) // stable message; map order is not an ordering
+	switch len(names) {
+	case 0:
+		// Case 3: no list inside the object, so the object itself is the single item -- e.g. `{"id": 1}`.
+		return []interface{}{bodyMap}, nil
+	case 1:
+		return bodyMap[names[0]].([]interface{}), nil
+	default:
+		return nil, fmt.Errorf(
+			"findby response is an envelope with %d array properties (%s), so which one holds the collection "+
+				"cannot be determined; declare itemsPath on the findby verb to say which",
+			len(names), strings.Join(names, ", "))
+	}
+}
+
+// valueAtPath resolves a dotted path in a decoded JSON object, using the same dialect as
+// async.poll.statusPath, fieldMapping and the pagination body paths.
+func valueAtPath(body map[string]interface{}, path string) (interface{}, bool, error) {
+	segs, err := pathparsing.ParsePath(path)
+	if err != nil || len(segs) == 0 {
+		return nil, false, fmt.Errorf("not a valid path: %v", err)
+	}
+	raw, found, err := unstructured.NestedFieldNoCopy(body, segs...)
+	if err != nil {
+		return nil, false, err
+	}
+	return raw, found, nil
 }
 
 // findItemInList iterates through a slice of items and checks if any of them

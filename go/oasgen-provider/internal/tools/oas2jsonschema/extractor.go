@@ -127,9 +127,16 @@ func ExtractSchemaForAction(doc OASDocument, verbs []Verb, targetAction string, 
 					continue
 				}
 
-				// For 'findby' action, we expect an array of items, so we return the items schema
-				if strings.EqualFold(targetAction, ActionFindBy) && schema.Items != nil {
-					return schema.Items.deepCopy(), nil
+				// For 'findby' we want ONE ITEM of the collection, not the response envelope.
+				//
+				// This used to unwrap only when the 200 schema was itself an array, so an envelope --
+				// {total, values:[...]}, which is what most real APIs return -- left the envelope as the
+				// base schema. Everything downstream then looked for identifiers that were a level deeper
+				// than it was searching: their types degraded to string, and the not-resolvable warning
+				// fired identically whether the identifier was valid or genuinely absent, which made it
+				// useless for the one job it exists to do (#110).
+				if strings.EqualFold(targetAction, ActionFindBy) {
+					return unwrapFindByItems(schema, verb.ItemsPath)
 				}
 				// For other actions, we return the schema as is
 				return schema.deepCopy(), nil

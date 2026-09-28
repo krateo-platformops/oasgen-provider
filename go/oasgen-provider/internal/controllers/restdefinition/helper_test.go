@@ -94,7 +94,7 @@ func (s *stubOASDoc) FindPath(p string) (oas2jsonschema.PathItem, bool) {
 	return nil, false
 }
 func (s *stubOASDoc) SecuritySchemes() []oas2jsonschema.SecuritySchemeInfo { return nil }
-func (s *stubOASDoc) Version() string                                     { return "1.0" }
+func (s *stubOASDoc) Version() string                                      { return "1.0" }
 
 // TestValidateAsyncPollPaths is the regression for #46: both spellings of an async poll path used to be
 // accepted at admission and fail only at poll time, after a create had already fired.
