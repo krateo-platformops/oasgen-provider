@@ -183,11 +183,19 @@ type SecretRefResolver struct {
 	KeyFromCustomResource string `json:"keyFromCustomResource"`
 }
 
-// ValueMapping is the runtime mirror of a value transform. Support depends on the tier and the DIRECTION:
-// 'alias' applies both ways; 'jq' applies on the response direction only — a request entry carrying a jq
-// mapping is skipped outright, so the field never reaches the body. Inline and ref: are equivalent here:
-// resolveJQRefs materializes Ref into Inline before anything executes. See the fieldmapping package doc for
-// the full matrix, including requestTransform, which is materialized and then never run.
+// ValueMapping is the runtime mirror of a value transform. BOTH tiers now apply in BOTH directions:
+// 'alias' always did; 'jq' gained the request direction in #117, which removed the one part of the request
+// surface with no transformation hook -- path and query parameters -- and with it the plugins that existed
+// to do string surgery on them.
+//
+// A request-direction jq entry that cannot be honoured (does not compile, fails, or returns a value with
+// no URL form) now sets RequestConfiguration.BuildErr and the call is refused. It used to be skipped, which
+// meant the field was simply absent: a URL that still parses, a 404, and a reconciler that creates on 404.
+//
+// Inline and ref: are equivalent here: resolveJQRefs materializes Ref into Inline before anything executes.
+// See the fieldmapping package doc for the full matrix. Note that requestTransform IS run -- from
+// Create/Update/Delete in restResources.go, after the body is assembled -- for those three verbs only;
+// declaring one on get or findby does nothing, since those send no body.
 type ValueMapping struct {
 	Type    string       `json:"type"`
 	Aliases []ValueAlias `json:"aliases,omitempty"`

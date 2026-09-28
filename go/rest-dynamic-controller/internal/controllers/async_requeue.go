@@ -134,7 +134,7 @@ func (h *handler) clearAsyncOperation(ctx context.Context, mg *unstructured.Unst
 
 // pollBaseFromRecord reconstructs the poll's shared inputs: the trigger's persisted params/query if present
 // (faithful), otherwise the get verb's resolved config (best-effort fallback), otherwise nil.
-func pollBaseFromRecord(cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured) *restclient.RequestConfiguration {
+func pollBaseFromRecord(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured) *restclient.RequestConfiguration {
 	if ann := mg.GetAnnotations(); ann != nil {
 		if raw, ok := ann[annotationAsyncOperationParams]; ok && raw != "" {
 			var in pollInputs
@@ -144,7 +144,7 @@ func pollBaseFromRecord(cli restclient.UnstructuredClientInterface, clientInfo *
 		}
 	}
 	if getCall, getInfo, gerr := builder.APICallBuilder(cli, clientInfo, apiaction.Get); gerr == nil && getCall != nil && getInfo != nil {
-		return builder.BuildCallConfig(getInfo, mg, clientInfo.ConfigurationSpec, nil)
+		return builder.BuildCallConfig(ctx, getInfo, mg, clientInfo.ConfigurationSpec, nil)
 	}
 	return nil
 }
@@ -152,7 +152,7 @@ func pollBaseFromRecord(cli restclient.UnstructuredClientInterface, clientInfo *
 // pollAsyncOnce issues a single poll of the operations endpoint for a requeue-based operation and classifies
 // the observed status, binding the recorded shared inputs plus the extracted {operationId}.
 func pollAsyncOnce(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured, cfg *getter.AsyncConfig, operationID string) (async.PollOutcome, string, error) {
-	base := pollBaseFromRecord(cli, clientInfo, mg)
+	base := pollBaseFromRecord(ctx, cli, clientInfo, mg)
 	pollReq := buildPollRequest(cfg.Poll.Method, cfg.Poll.HandleParam, operationID, base)
 	resp, err := cli.Call(ctx, &http.Client{Timeout: async.RequestTimeout}, cfg.Poll.Path, pollReq)
 	if err != nil {
@@ -178,7 +178,7 @@ func (h *handler) reReadStatusOnAsyncSuccess(ctx context.Context, cli restclient
 	if gerr != nil || getCall == nil || getInfo == nil {
 		return nil
 	}
-	getReq := builder.BuildCallConfig(getInfo, mg, clientInfo.ConfigurationSpec, nil)
+	getReq := builder.BuildCallConfig(ctx, getInfo, mg, clientInfo.ConfigurationSpec, nil)
 	resp, err := getCall(ctx, &http.Client{Timeout: async.RequestTimeout}, getInfo.Path, getReq)
 	if err != nil {
 		return err

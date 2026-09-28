@@ -32,7 +32,7 @@ type CallInfo struct {
 	ReqParams           *RequestedParams
 	IdentifierFields    []string
 	RequestFieldMapping []getter.RequestFieldMappingItem // Deprecated: mirrored for backward compatibility; prefer FieldMapping.
-	FieldMapping        []getter.FieldMappingItem         // FieldMapping is the unified request/response mapping; only request-direction entries (inPath/inQuery/inBody) apply here.
+	FieldMapping        []getter.FieldMappingItem        // FieldMapping is the unified request/response mapping; only request-direction entries (inPath/inQuery/inBody) apply here.
 	Method              string
 	Action              apiaction.APIAction
 	SuccessCodes        []int               // extra status codes accepted as success for this verb (merged with OAS 2xx)
@@ -144,7 +144,7 @@ func UnresolvedPathParams(path string, params map[string]string) []string {
 //
 // It does NOT apply callInfo.RequestTransform: running jq needs a context this function does not take.
 // Callers that send a body apply it afterwards via fieldmapping.ApplyRequestTransform.
-func BuildCallConfig(callInfo *CallInfo, mg *unstructured.Unstructured, configSpec map[string]interface{}, resolved map[string]interface{}) *restclient.RequestConfiguration {
+func BuildCallConfig(ctx context.Context, callInfo *CallInfo, mg *unstructured.Unstructured, configSpec map[string]interface{}, resolved map[string]interface{}) *restclient.RequestConfiguration {
 	if callInfo == nil || mg == nil {
 		return nil
 	}
@@ -209,7 +209,7 @@ func BuildCallConfig(callInfo *CallInfo, mg *unstructured.Unstructured, configSp
 	// removes the need to merge, since a later write simply overwrites the specific path it targets and
 	// leaves every sibling that processFields put there untouched.
 	applyRequestFieldMapping(callInfo, mg, reqConfiguration, mapBody) // deprecated RequestFieldMapping
-	applyFieldMapping(callInfo, mg, reqConfiguration, mapBody, resolved)
+	applyFieldMapping(ctx, callInfo, mg, reqConfiguration, mapBody, resolved)
 
 	// 6. Drop the CR-side source of every Resolver entry from the body. A resolver's
 	// inCustomResource is a POINTER the controller dereferences (a secretRef's {name,key}, an
@@ -307,15 +307,34 @@ func applyRequestFieldMapping(callInfo *CallInfo, mg *unstructured.Unstructured,
 	}
 }
 
+// describeMapping names a mapping entry the way an operator would recognise it, for error messages.
+func describeMapping(m getter.FieldMappingItem) string {
+	switch {
+	case m.InPath != "":
+		return fmt.Sprintf("path parameter %q", m.InPath)
+	case m.InQuery != "":
+		return fmt.Sprintf("query parameter %q", m.InQuery)
+	case m.InBody != "":
+		return fmt.Sprintf("body field %q", m.InBody)
+	default:
+		return "field mapping entry"
+	}
+}
+
 // applyFieldMapping populates the request configuration from the unified FieldMapping's request-direction
 // entries (inPath/inQuery/inBody set; inResponse-only entries are for the response side and are ignored
 // here). It mirrors applyRequestFieldMapping's write targets and validation exactly, adding the Tier-1
-// alias value transform and (when resolved is populated) Resolver (secretRef) values. Tier-2 jq
-// is not applied here yet: an entry requesting it is skipped (left unwritten) rather than sent
-// untransformed, matching the response side's precedent for an entry it cannot yet fully honor (a
-// deferred module-ref jq program). A Resolver entry with no matching resolved value (resolved is nil, or
-// the caller's resolve pass didn't cover this entry) is skipped the same way.
-func applyFieldMapping(callInfo *CallInfo, mg *unstructured.Unstructured, reqConfiguration *restclient.RequestConfiguration, mapBody map[string]interface{}, resolved map[string]interface{}) {
+// alias value transform, Tier-2 jq, and (when resolved is populated) Resolver (secretRef) values.
+//
+// A jq program that fails to compile, fails to run, or returns a value that cannot address a URL sets
+// reqConfiguration.BuildErr and stops, rather than leaving the field unwritten. Skipping was the previous
+// behaviour and it was wrong in the most expensive way available: a missing path parameter still yields a
+// URL that parses, so the API answers 404, and the reconciler acts on not-found by creating (#117).
+//
+// A Resolver entry with no matching resolved value (resolved is nil, or the caller's resolve pass didn't
+// cover this entry) is still skipped -- that is an ordinary "not applicable here", not a broken
+// declaration.
+func applyFieldMapping(ctx context.Context, callInfo *CallInfo, mg *unstructured.Unstructured, reqConfiguration *restclient.RequestConfiguration, mapBody map[string]interface{}, resolved map[string]interface{}) {
 	for _, mapping := range callInfo.FieldMapping {
 		if mapping.InPath == "" && mapping.InQuery == "" && mapping.InBody == "" {
 			continue // response-direction (inResponse) entry, handled elsewhere
@@ -349,10 +368,25 @@ func applyFieldMapping(callInfo *CallInfo, mg *unstructured.Unstructured, reqCon
 			switch mapping.ValueMapping.Type {
 			case "alias":
 				val = fieldmapping.ApplyAlias(val, mapping.ValueMapping.Aliases, fieldmapping.RequestCRToAPI)
+			case "jq":
+				// Request-direction jq. This used to be skipped outright, which meant a declared transform
+				// silently produced NO field at all: a path parameter simply absent, a URL that still
+				// parses, a 404, and a reconciler that creates on 404. The one part of the request surface
+				// with no transformation hook was path and query parameters, so "strip a prefix before
+				// calling" needed a Go plugin to run strings.TrimPrefix (#117).
+				out, jerr := fieldmapping.ApplyValueJQ(ctx, mapping.ValueMapping.JQ, val, describeMapping(mapping))
+				if jerr != nil {
+					reqConfiguration.BuildErr = jerr
+					return
+				}
+				val = out
 			default:
-				// jq (and any future type) is not wired for the request direction yet; skip rather than
-				// send a value that should have been transformed but wasn't.
-				continue
+				// Unreachable through the CRD (the enum admits alias and jq only), so this is a definition
+				// that bypassed admission. Refuse rather than send a value that should have been
+				// transformed and was not.
+				reqConfiguration.BuildErr = fmt.Errorf("%s declares an unsupported valueMapping type %q",
+					describeMapping(mapping), mapping.ValueMapping.Type)
+				return
 			}
 		}
 
@@ -362,14 +396,24 @@ func applyFieldMapping(callInfo *CallInfo, mg *unstructured.Unstructured, reqCon
 			if err != nil || len(inPathSegments) != 1 {
 				continue
 			}
-			reqConfiguration.Parameters[inPathSegments[0]] = fmt.Sprintf("%v", val)
+			str, serr := fieldmapping.ScalarForURL(val, describeMapping(mapping))
+			if serr != nil {
+				reqConfiguration.BuildErr = serr
+				return
+			}
+			reqConfiguration.Parameters[inPathSegments[0]] = str
 
 		case mapping.InQuery != "":
 			inQuerySegments, err := pathparsing.ParsePath(mapping.InQuery)
 			if err != nil || len(inQuerySegments) != 1 {
 				continue
 			}
-			reqConfiguration.Query[inQuerySegments[0]] = fmt.Sprintf("%v", val)
+			str, serr := fieldmapping.ScalarForURL(val, describeMapping(mapping))
+			if serr != nil {
+				reqConfiguration.BuildErr = serr
+				return
+			}
+			reqConfiguration.Query[inQuerySegments[0]] = str
 
 		case mapping.InBody != "":
 			inBodySegments, err := pathparsing.ParsePath(mapping.InBody)
@@ -413,7 +457,7 @@ func applyConfigSpec(req *restclient.RequestConfiguration, configSpec map[string
 // This function is used during the reconciliation (in the Observe phase) to decide:
 // - if the resource can be retrieved by its unique identifier (usually server-side generated and assigned) (e.g GET /resources/{id})
 // - or if it needs to be found by its "findby" identifiers fields (e.g., unique name within a organization) in a list of resources (e.g GET /resources)
-func IsResourceKnown(cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured) bool {
+func IsResourceKnown(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured) bool {
 	if mg == nil || clientInfo == nil {
 		return false
 	}
@@ -423,8 +467,8 @@ func IsResourceKnown(cli restclient.UnstructuredClientInterface, clientInfo *get
 		return false
 	}
 
-	reqConfiguration := BuildCallConfig(callInfo, mg, clientInfo.ConfigurationSpec, nil)
-	if reqConfiguration == nil {
+	reqConfiguration := BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, nil)
+	if reqConfiguration == nil || reqConfiguration.BuildErr != nil {
 		return false
 	}
 

@@ -107,6 +107,18 @@ type UnstructuredClient struct {
 }
 
 type RequestConfiguration struct {
+	// BuildErr records a failure that occurred while ASSEMBLING this configuration -- e.g. a
+	// request-direction jq valueMapping that did not compile, failed, or returned something that cannot
+	// address a URL.
+	//
+	// It is carried here rather than returned from BuildCallConfig because that function has nine callers,
+	// and an error return is nine chances to ignore it. Every request instead passes through Call /
+	// CallForPagination, which refuse outright when this is set -- one choke point that cannot be
+	// forgotten. Silently sending a request whose path parameter was dropped is the failure mode this
+	// exists to prevent: the URL is still syntactically valid, so the API answers 404, and the reconciler
+	// acts on not-found by CREATING (#117).
+	BuildErr error
+
 	Parameters map[string]string // Path parameters
 	Query      map[string]string
 	Headers    map[string]string

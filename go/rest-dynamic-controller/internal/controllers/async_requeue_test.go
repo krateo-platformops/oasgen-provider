@@ -81,7 +81,7 @@ func TestPollBaseFromRecord_UsesPersistedParams(t *testing.T) {
 		annotationAsyncOperationParams: `{"parameters":{"organization":"acme"},"query":{"api-version":"7.0"}}`,
 	})
 	// With the params annotation present, the base is decoded from it without touching cli/clientInfo.
-	base := pollBaseFromRecord(nil, nil, mg)
+	base := pollBaseFromRecord(context.Background(), nil, nil, mg)
 	require.NotNil(t, base)
 	assert.Equal(t, "acme", base.Parameters["organization"])
 	assert.Equal(t, "7.0", base.Query["api-version"])

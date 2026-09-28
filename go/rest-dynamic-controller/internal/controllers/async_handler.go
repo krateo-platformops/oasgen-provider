@@ -100,7 +100,7 @@ func driveAsync(ctx context.Context, cli restclient.UnstructuredClientInterface,
 	if getCall == nil || getInfo == nil {
 		return triggerResp, fmt.Errorf("async postGet requested but no get action is defined")
 	}
-	getReq := builder.BuildCallConfig(getInfo, mg, clientInfo.ConfigurationSpec, nil)
+	getReq := builder.BuildCallConfig(ctx, getInfo, mg, clientInfo.ConfigurationSpec, nil)
 	getResp, gerr := getCall(ctx, &http.Client{Timeout: async.RequestTimeout}, getInfo.Path, getReq)
 	if gerr != nil {
 		return triggerResp, fmt.Errorf("async postGet: get call: %w", gerr)

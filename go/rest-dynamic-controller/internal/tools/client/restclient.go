@@ -39,6 +39,12 @@ func (r *Response) IsPending() bool {
 }
 
 func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration) (Response, error) {
+	// Refuse a configuration that failed to assemble. See RequestConfiguration.BuildErr: a dropped path
+	// parameter still produces a syntactically valid URL, which answers 404, which the reconciler acts on
+	// by creating.
+	if opts != nil && opts.BuildErr != nil {
+		return Response{}, opts.BuildErr
+	}
 	if u.DocScheme == nil {
 		return Response{}, fmt.Errorf("OpenAPI document scheme not initialized")
 	}
@@ -408,6 +414,12 @@ func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Cli
 // Prerequisite for refactor is to change the Response struct to wrap http.Response directly.
 // Differences with Call are mainly the paginator usage and the removal of debug transport setup (otherwise it would be set incrementally on each paginated call).
 func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration, paginator pagination.Paginator) (Response, *http.Response, error) {
+	// Refuse a configuration that failed to assemble. See RequestConfiguration.BuildErr: a dropped path
+	// parameter still produces a syntactically valid URL, which answers 404, which the reconciler acts on
+	// by creating.
+	if opts != nil && opts.BuildErr != nil {
+		return Response{}, nil, opts.BuildErr
+	}
 	if u.DocScheme == nil {
 		return Response{}, nil, fmt.Errorf("OpenAPI document scheme not initialized")
 	}
