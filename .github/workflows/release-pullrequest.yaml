@@ -1,9 +1,16 @@
 name: release-pullrequest
 
 on:
+  # Deliberately NOT filtered to `branches: [main]`. A stacked PR -- one based on another PR's branch,
+  # which is the normal way to split a dependent change into reviewable pieces -- then ran none of the
+  # jobs below while STILL showing a green tick, because the only workflow without a base filter is
+  # preflight-refs. "1 pass, 0 failures" is what running almost nothing looks like; it is not what
+  # passing looks like, and a reviewer doing the right thing got a confirmation meaning the opposite
+  # of what it appeared to (#149).
+  #
+  # The cost is that a stacked PR runs this matrix twice: once against its stack base, and again once
+  # GitHub retargets it to main. That is real CI time, and it buys a green tick that means the suite ran.
   pull_request:
-    branches:
-      - main
 
 # oasgen-provider is a Go MONOREPO (go/oasgen-provider + go/rest-dynamic-controller), and every job
 # here is the org-shared reusable rather than a local re-implementation:
