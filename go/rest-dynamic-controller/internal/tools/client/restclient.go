@@ -14,6 +14,7 @@ import (
 	"time"
 
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/fieldmapping"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pagination"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pathparsing"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -28,7 +29,16 @@ type Response struct {
 	ResponseBody any
 	// Headers carries the HTTP response headers, so callers (e.g. the async engine) can read an operation
 	// handle from a header such as Operation-Location on a 202 Accepted. May be nil.
-	Headers    http.Header
+	Headers http.Header
+	// Normalized reports that ResponseBody has ALREADY had its verb's responseTransform and response
+	// fieldMapping applied, and must not have them applied again.
+	//
+	// findby has to normalize before it matches -- the match compares against the CR, so it needs the item
+	// in the CR's shape (#145). That makes the body it returns already-normalized, and the observe path
+	// would otherwise normalize it a second time. A second pass is not harmless: whole-document jq is not
+	// guaranteed idempotent, and a per-entry fieldMapping LIFTS a value and then REMOVES its source, so
+	// re-running it finds the source already gone. Silent corruption rather than an error.
+	Normalized bool
 	statusCode int
 }
 
@@ -276,7 +286,7 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 
 	if findByAction == nil || findByAction.Pagination == nil {
 		// No pagination configured, perform a single call.
-		return u.CallFindBySingle(ctx, cli, path, opts, itemsPath)
+		return u.CallFindBySingle(ctx, cli, path, opts, itemsPath, findByAction)
 	}
 
 	// Set up debug transport once, before pagination starts
@@ -298,7 +308,7 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 	}
 	if paginator == nil {
 		// Paginator factory returned nil, treat as no pagination.
-		return u.CallFindBySingle(ctx, cli, path, opts, itemsPath)
+		return u.CallFindBySingle(ctx, cli, path, opts, itemsPath, findByAction)
 	}
 
 	paginator.Init()
@@ -339,12 +349,19 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 			return Response{}, err
 		}
 
+		// Put every item into the CR's shape BEFORE comparing against the CR (#145).
+		normalized, nerr := normalizeItems(ctx, findByAction, itemList)
+		if nerr != nil {
+			return Response{}, nerr
+		}
+
 		// Search for a matching item in the current page's results.
-		if matchedItem, found := u.findItemInList(itemList); found {
+		if matchedItem, found := u.findItemInList(normalized); found {
 			// Found a match, return it immediately.
 			// We do not continue pagination once a match is found.
 			return Response{
 				ResponseBody: matchedItem,
+				Normalized:   findByAction != nil,
 				statusCode:   response.statusCode,
 			}, nil
 		}
@@ -386,11 +403,82 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 	}
 }
 
+// normalizeItems puts each raw list item into the CR's shape, by applying the findby verb's own
+// responseTransform and response fieldMapping to it.
+//
+// This has to happen BEFORE matching, and that ordering is the whole fix. The match compares an
+// identifier's value against spec.<field> / status.<field> with DeepEqual, so it is comparing API-domain
+// data against CR-domain data -- and normalization is precisely the thing that bridges those two domains.
+// Running it afterwards, on the already-matched item, meant a kind could not key a findby on any field
+// whose shape differs between the list response and the spec: GitHub returns head/base as objects while
+// spec.head is a branch string, so DeepEqual(string, object) was false for every item (#145).
+//
+// The consequence was not simply "findby does not work". A no-match returns not-found, and the reconciler
+// acts on not-found by CREATING -- so a findby written against a shape-mismatched key does not fail, it
+// re-creates a resource that already exists.
+//
+// This is a no-op for verbs with no declared transforms, so kinds that do not need it pay nothing.
+func normalizeItems(ctx context.Context, findByAction *getter.VerbsDescription, items []interface{}) ([]interface{}, error) {
+	if findByAction == nil || len(items) == 0 {
+		return items, nil
+	}
+	verbs := []getter.VerbsDescription{*findByAction}
+	if !fieldmapping.HasResponseTransforms(verbs, []string{findByAction.Action}) {
+		// Nothing declared: return the items untouched rather than deep-copying every one of them.
+		return items, nil
+	}
+
+	out := make([]interface{}, 0, len(items))
+	for i, it := range items {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			// Not an object -- findItemInList skips these anyway. Carry it through unchanged rather than
+			// failing the whole search over an element nobody will look at.
+			out = append(out, it)
+			continue
+		}
+		// Copy before transforming: the transforms mutate in place, and the caller's slice is also the
+		// paginator's view of the page.
+		cp := deepCopyMap(m)
+		if err := fieldmapping.NormalizeResponseBody(ctx, verbs, []string{findByAction.Action}, cp); err != nil {
+			return nil, fmt.Errorf("normalizing findby item %d before matching: %w", i, err)
+		}
+		out = append(out, cp)
+	}
+	return out, nil
+}
+
+// deepCopyMap copies a decoded-JSON map. runtime.DeepCopyJSON would panic on a value type it does not
+// expect, and a findby item is whatever the API sent, so this tolerates anything by leaving it shared --
+// transforms only write to paths they resolve, and those are always JSON-typed.
+func deepCopyMap(in map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		switch t := v.(type) {
+		case map[string]interface{}:
+			out[k] = deepCopyMap(t)
+		case []interface{}:
+			cp := make([]interface{}, len(t))
+			for i, e := range t {
+				if m, ok := e.(map[string]interface{}); ok {
+					cp[i] = deepCopyMap(m)
+				} else {
+					cp[i] = e
+				}
+			}
+			out[k] = cp
+		default:
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // CallFindBySingle executes a non-paginated FindBy operation.
 // itemsPath names the envelope property holding the collection; empty means infer, which succeeds only
 // when the inference is unambiguous. It is threaded in rather than re-derived because the GENERATOR used
 // the same value to decide the item schema, and the two must agree (#110).
-func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration, itemsPath string) (Response, error) {
+func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration, itemsPath string, findByAction *getter.VerbsDescription) (Response, error) {
 	response, err := u.Call(ctx, cli, path, opts)
 	if err != nil {
 		return Response{}, err
@@ -405,9 +493,15 @@ func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Cli
 		return Response{}, err
 	}
 
+	// Put every item into the CR's shape BEFORE comparing against the CR (#145).
+	normalized, nerr := normalizeItems(ctx, findByAction, itemList)
+	if nerr != nil {
+		return Response{}, nerr
+	}
+
 	// Delegate the search logic to a dedicated helper function.
-	if matchedItem, found := u.findItemInList(itemList); found {
-		return Response{ResponseBody: matchedItem, statusCode: response.statusCode}, nil
+	if matchedItem, found := u.findItemInList(normalized); found {
+		return Response{ResponseBody: matchedItem, Normalized: findByAction != nil, statusCode: response.statusCode}, nil
 	}
 
 	// If no match is found after checking all items, return a Not Found error.

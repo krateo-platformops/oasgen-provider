@@ -343,7 +343,16 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	}
 	// Normalize the observed body into the CR-domain shape (response fieldMapping) before it feeds both
 	// status population and drift comparison, so those keep working unchanged.
-	if err := fieldmapping.NormalizeResponseBody(ctx, clientInfo.Resource.VerbsDescription, []string{observeAction}, b); err != nil {
+	//
+	// UNLESS findby already did it. findby must normalize before it matches, because the match compares
+	// the item against the CR and therefore needs it in the CR's shape (#145) -- so the body it returns is
+	// already normalized. Running the transforms again is not a harmless repeat: whole-document jq is not
+	// guaranteed idempotent, and a per-entry fieldMapping lifts a value and then REMOVES its source, so a
+	// second pass looks for a source that is no longer there.
+	if response.Normalized {
+		log.Debug("Response already normalized by findby; skipping the observe-path normalization",
+			"action", observeAction)
+	} else if err := fieldmapping.NormalizeResponseBody(ctx, clientInfo.Resource.VerbsDescription, []string{observeAction}, b); err != nil {
 		log.Error(err, "Normalizing response body (fieldMapping)")
 		return controller.ExternalObservation{}, err
 	}
