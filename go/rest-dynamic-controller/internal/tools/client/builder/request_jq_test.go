@@ -9,6 +9,7 @@ import (
 
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/fieldmapping"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -167,4 +168,85 @@ func TestRequestJQOnBodyFieldAcceptsNonScalars(t *testing.T) {
 
 	require.NoError(t, cfg.BuildErr, "an object is a perfectly good body field, unlike a URL segment")
 	assert.Equal(t, map[string]interface{}{"name": "refs/heads/x", "kind": "branch"}, body["ref"])
+}
+
+// TestTransformedSecretIsStillRedacted guards a leak that request-direction jq newly made reachable.
+//
+// A secretRef resolver registers the resolved value in SensitiveValues so request logging redacts it.
+// But a valueMapping then transforms that value, and it is the TRANSFORMED value that goes on the wire.
+// Registering only the pre-transform one redacts the raw credential while printing its encoding —
+// redaction that looks like it is working and is not.
+//
+// Before #117 this combination could not execute: a request-direction jq entry was skipped outright. So
+// the leak is not pre-existing, it is one the fix opened, and encoding a credential the API wants wrapped
+// is precisely what someone reaches for a transform to do.
+func TestTransformedSecretIsStillRedacted(t *testing.T) {
+	const raw = "s3cr3t-value"
+
+	ci := &CallInfo{FieldMapping: []getter.FieldMappingItem{{
+		InBody: "password",
+		Resolver: &getter.FieldResolver{
+			Type: "secretRef",
+			SecretRef: &getter.SecretRefResolver{
+				NameFromCustomResource: "metadata.name",
+				KeyFromCustomResource:  "spec.username",
+			},
+		},
+		ValueMapping: &getter.ValueMapping{
+			Type: "jq",
+			JQ:   &getter.JQProgram{Inline: `"wrapped:" + .`},
+		},
+	}}}
+
+	resolved := map[string]interface{}{
+		fieldmapping.ResolverKey(ci.FieldMapping[0]): raw,
+	}
+
+	body := map[string]interface{}{}
+	cfg := emptyConfig()
+	applyFieldMapping(context.Background(), ci, crWithRef("unused"), cfg, body, resolved)
+
+	require.NoError(t, cfg.BuildErr)
+	require.Equal(t, "wrapped:"+raw, body["password"], "the transform must actually have run")
+
+	assert.Contains(t, cfg.SensitiveValues, raw,
+		"the raw secret must stay redacted")
+	assert.Contains(t, cfg.SensitiveValues, "wrapped:"+raw,
+		"the TRANSFORMED secret is what goes on the wire, so it must be redacted too — otherwise logging "+
+			"hides the credential and prints its encoding, which is worse than not redacting at all")
+}
+
+// The same applies to an alias transform of a resolved secret.
+func TestAliasTransformedSecretIsStillRedacted(t *testing.T) {
+	const raw = "plain"
+
+	ci := &CallInfo{FieldMapping: []getter.FieldMappingItem{{
+		InBody:   "token",
+		Resolver: &getter.FieldResolver{Type: "secretRef", SecretRef: &getter.SecretRefResolver{}},
+		ValueMapping: &getter.ValueMapping{
+			Type:    "alias",
+			Aliases: []getter.ValueAlias{{CustomResourceValue: raw, APIValue: "mapped-secret"}},
+		},
+	}}}
+
+	resolved := map[string]interface{}{fieldmapping.ResolverKey(ci.FieldMapping[0]): raw}
+	body := map[string]interface{}{}
+	cfg := emptyConfig()
+	applyFieldMapping(context.Background(), ci, crWithRef("unused"), cfg, body, resolved)
+
+	require.NoError(t, cfg.BuildErr)
+	assert.Contains(t, cfg.SensitiveValues, "mapped-secret",
+		"an aliased secret goes on the wire as the alias, so the alias must be redacted")
+}
+
+// A non-secret value transformed by jq must NOT be registered — over-redacting would blank ordinary
+// request values out of the logs that exist to debug them.
+func TestNonSecretTransformIsNotRedacted(t *testing.T) {
+	cfg := emptyConfig()
+	applyFieldMapping(context.Background(), pathEntry(`sub("^refs/"; "")`), crWithRef("refs/heads/x"),
+		cfg, map[string]interface{}{}, nil)
+
+	require.NoError(t, cfg.BuildErr)
+	assert.Empty(t, cfg.SensitiveValues,
+		"only values sourced from a secretRef are secrets; redacting everything would gut request logging")
 }

@@ -341,13 +341,16 @@ func applyFieldMapping(ctx context.Context, callInfo *CallInfo, mg *unstructured
 		}
 
 		var val interface{}
+		// fromSecret drives redaction of the value AFTER any transform, not only before it. See the
+		// note below the valueMapping switch.
+		fromSecret := mapping.Resolver != nil && mapping.Resolver.Type == "secretRef"
 		if mapping.Resolver != nil {
 			v, ok := resolved[fieldmapping.ResolverKey(mapping)]
 			if !ok {
 				continue
 			}
 			val = v
-			if mapping.Resolver.Type == "secretRef" {
+			if fromSecret {
 				if s, ok := val.(string); ok {
 					reqConfiguration.SensitiveValues = append(reqConfiguration.SensitiveValues, s)
 				}
@@ -387,6 +390,24 @@ func applyFieldMapping(ctx context.Context, callInfo *CallInfo, mg *unstructured
 				reqConfiguration.BuildErr = fmt.Errorf("%s declares an unsupported valueMapping type %q",
 					describeMapping(mapping), mapping.ValueMapping.Type)
 				return
+			}
+
+			// A transform of a secret produces ANOTHER secret, and it is the transformed value that goes
+			// on the wire. Registering only the pre-transform value would redact the raw credential from
+			// request logging while printing, say, its base64 encoding -- redaction that looks like it is
+			// working and is not.
+			//
+			// This became reachable only when request-direction jq started running (#117): before that a
+			// resolver+valueMapping entry was skipped entirely, so the combination never executed. The
+			// transform is exactly what someone reaches for to encode a credential the API wants wrapped,
+			// so it is the likely use rather than an exotic one.
+			//
+			// Appending both is deliberate: redaction matches by value, the pre-transform secret may still
+			// appear elsewhere, and a duplicate costs nothing.
+			if fromSecret {
+				if s, ok := val.(string); ok && s != "" {
+					reqConfiguration.SensitiveValues = append(reqConfiguration.SensitiveValues, s)
+				}
 			}
 		}
 
