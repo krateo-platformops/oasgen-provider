@@ -58,6 +58,9 @@ type Verb struct {
 	Action string
 	Method string
 	Path   string
+	// ItemsPath names the envelope property holding the collection, for a findby whose response is not a
+	// bare array. Empty means "infer", which succeeds only when the inference is unambiguous.
+	ItemsPath string
 	// FieldMapping carries the unified request/response field mappings declared for this verb.
 	// The generation layer consumes the response-direction entries (InResponse set) to resolve the type
 	// of relocated status fields against the response schema; request-direction entries are carried for

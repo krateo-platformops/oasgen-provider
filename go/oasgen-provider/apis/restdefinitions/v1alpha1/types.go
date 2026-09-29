@@ -435,6 +435,25 @@ type VerbsDescription struct {
 	// If not set, no pagination will be used.
 	// +optional
 	Pagination *Pagination `json:"pagination,omitempty"`
+	// ItemsPath names the property holding the collection, for a 'findby' whose response is an ENVELOPE
+	// rather than a bare array -- e.g. ".values" for {"total": 12, "values": [...]}. To be set only for
+	// 'findby' actions.
+	//
+	// It resolves ONE question that is asked in two places and must get the same answer in both: the
+	// generator reads it to find the schema of an item (so identifiers get their real types instead of
+	// degrading to string), and the controller reads it at runtime to find the items themselves. When
+	// those two disagree, the generated CRD describes a shape the controller never looks at.
+	//
+	// Optional, because the overwhelmingly common envelope has exactly one array property and that one is
+	// unambiguous. Declare it when there is more than one: an envelope like {"data": [...],
+	// "included": [...]} (plain JSON:API) has no single obvious collection, and rather than pick one,
+	// both sides refuse -- generation fails with the candidates named. Guessing here is not a smaller
+	// version of being right; it silently searches the wrong list and reports not-found, which the
+	// reconciler acts on by creating a duplicate.
+	//
+	// Uses the same path dialect as async.poll.statusPath, fieldMapping and pagination body paths.
+	// +optional
+	ItemsPath string `json:"itemsPath,omitempty"`
 	// SuccessCodes lists additional HTTP status codes to treat as success for this verb, beyond the 2xx
 	// codes declared for the operation in the OAS document. Use it when an API returns a non-standard
 	// success code the OAS does not document (e.g. a 201 or 202 that the reconciler would otherwise reject

@@ -913,10 +913,11 @@ func TestResponse_IsPending(t *testing.T) {
 func TestExtractItemsFromResponse(t *testing.T) {
 	singleItem := map[string]interface{}{"id": 1}
 	tests := []struct {
-		name    string
-		body    interface{}
-		want    []interface{}
-		wantErr bool
+		name      string
+		body      interface{}
+		itemsPath string
+		want      []interface{}
+		wantErr   bool
 	}{
 		{
 			name: "standard list response",
@@ -953,11 +954,52 @@ func TestExtractItemsFromResponse(t *testing.T) {
 			body:    "a string",
 			wantErr: true,
 		},
+		{
+			// The bug this rewrite exists for. Two arrays used to resolve by Go map iteration order, which
+			// is RANDOMISED -- so this row would have passed or failed depending on the run, and in
+			// production searched a different list on different reconciles. Losing the toss means findby
+			// reports not-found, and the reconciler CREATES on not-found (#110).
+			name:    "envelope with two arrays is ambiguous, never a guess",
+			body:    map[string]interface{}{"data": []interface{}{singleItem}, "included": []interface{}{}},
+			wantErr: true,
+		},
+		{
+			name:      "two arrays are fine once itemsPath says which",
+			body:      map[string]interface{}{"data": []interface{}{singleItem}, "included": []interface{}{}},
+			itemsPath: "data",
+			want:      []interface{}{singleItem},
+		},
+		{
+			name:      "itemsPath picks the other one just as readily",
+			body:      map[string]interface{}{"data": []interface{}{}, "included": []interface{}{singleItem}},
+			itemsPath: "included",
+			want:      []interface{}{singleItem},
+		},
+		{
+			name:      "nested itemsPath, same dialect as async.poll.statusPath",
+			body:      map[string]interface{}{"result": map[string]interface{}{"values": []interface{}{singleItem}}},
+			itemsPath: "result.values",
+			want:      []interface{}{singleItem},
+		},
+		{
+			// A declared path that is wrong must fail, not silently fall back to inference: the author
+			// stated where the collection is, and searching elsewhere would hide the wrong statement.
+			name:      "declared itemsPath that is absent is an error, not a fallback",
+			body:      map[string]interface{}{"items": []interface{}{singleItem}},
+			itemsPath: "values",
+			wantErr:   true,
+		},
+		{
+			name:      "declared itemsPath pointing at a non-array is an error",
+			body:      map[string]interface{}{"total": 3, "items": []interface{}{singleItem}},
+			itemsPath: "total",
+			wantErr:   true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ExtractItemsFromResponse(tt.body)
+			got, err := ExtractItemsFromResponse(tt.body, tt.itemsPath)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ExtractItemsFromResponse() error = %v, wantErr %v", err, tt.wantErr)
 				return

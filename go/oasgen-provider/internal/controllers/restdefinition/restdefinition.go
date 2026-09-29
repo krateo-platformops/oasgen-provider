@@ -692,6 +692,7 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 			Action:       v.Action,
 			Method:       v.Method,
 			Path:         v.Path,
+			ItemsPath:    v.ItemsPath,
 			FieldMapping: toDomainFieldMapping(v),
 		}
 	}
