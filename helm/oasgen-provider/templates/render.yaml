@@ -1,0 +1,90 @@
+{{- if .Values.render.enabled }}
+# oasgen-render: POST /render previews the CRDs a set of RestDefinitions would generate, without applying
+# anything. It reads nothing from the cluster (the OAS documents arrive in the request), so the pod runs with
+# no ServiceAccount token.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oasgen-provider.render.fullname" . }}
+  labels:
+    {{- include "oasgen-provider.render.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.render.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "oasgen-provider.render.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.render.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "oasgen-provider.render.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: oasgen-render
+          image: {{ include "krateo.image" (dict "img" .Values.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/oasgen-render"]
+          args:
+            - --addr=:{{ .Values.render.containerPort }}
+          {{- with .Values.render.env }}
+          env:
+            {{- range $k, $v := . }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.render.containerPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.render.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oasgen-provider.render.fullname" . }}
+  labels:
+    {{- include "oasgen-provider.render.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "oasgen-provider.render.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.render.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

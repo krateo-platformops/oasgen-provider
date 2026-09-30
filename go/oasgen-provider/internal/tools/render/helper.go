@@ -1,4 +1,4 @@
-package restdefinition
+package render
 
 import (
 	"fmt"
@@ -97,7 +97,7 @@ func validateAsyncPollPaths(cr *definitionv1alpha1.RestDefinition, doc oas2jsons
 	if cr == nil || doc == nil {
 		return nil
 	}
-	for _, v := range cr.Spec.Resource.VerbsDescription {
+	for i, v := range cr.Spec.Resource.VerbsDescription {
 		if v.Async == nil {
 			continue
 		}
@@ -110,15 +110,16 @@ func validateAsyncPollPaths(cr *definitionv1alpha1.RestDefinition, doc oas2jsons
 			handleParam = defaultHandleParam
 		}
 		token := "{" + handleParam + "}"
+		field := fmt.Sprintf("spec.resource.verbsDescription[%d].async.poll.path", i)
 		if !strings.Contains(pollPath, token) {
-			return fmt.Errorf(
+			return fieldErrorf(field,
 				"verb %q: async.poll.path %q does not contain the %s token, so the extracted operation handle "+
 					"has nothing to bind to and every poll would fail; either use the parameter name the OAS "+
 					"document declares for the poll endpoint, or set async.poll.handleParam to it",
 				v.Action, pollPath, token)
 		}
 		if _, ok := doc.FindPath(pollPath); !ok {
-			return fmt.Errorf(
+			return fieldErrorf(field,
 				"verb %q: async.poll.path %q is not a path declared in the OAS document (paths are matched by "+
 					"exact string, so a differing parameter name is a miss); write the path exactly as the "+
 					"document declares it and set async.poll.handleParam to its handle parameter's name",

@@ -221,3 +221,17 @@ rdc:
 env:
   OASGEN_PROVIDER_DEBUG: "false"
   OASGEN_PROVIDER_MAX_RECONCILE_RATE: 1
+
+# oasgen-render: an in-cluster preview service. POST /render {restDefinitions, oas} returns the CRDs those
+# RestDefinitions would generate (same generator as the manager, same image), plus validation findings and
+# skipped security schemes, without applying anything. ClusterIP only; it needs no Kubernetes API access.
+render:
+  enabled: false
+  replicaCount: 1
+  containerPort: 8081
+  service:
+    port: 80
+  podAnnotations: {}
+  resources: {}
+  # Extra environment, e.g. OASGEN_RENDER_MAX_BODY_BYTES (default 33554432) or OASGEN_RENDER_DEBUG.
+  env: {}
