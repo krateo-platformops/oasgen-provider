@@ -39,6 +39,11 @@ import (
 // 4 MiB covers every real document we have seen (GitHub's full public OAS is the largest at a few MB) and
 // sits at ~116 MiB live heap, comfortably inside the chart's 512Mi default limit.
 //
+// The known consumer confirms the headroom is real rather than hopeful. The Controller Builder posts a
+// draft.json built from a draft tree its frontend caps at 512 KiB -- oversized specs are trimmed to the
+// mapped paths before being held -- so a live render body is about 0.6 MiB at most, roughly a sixth of
+// this. (Its 8 MiB limit applies to the raw spec at import, before trimming, and never reaches /render.)
+//
 // THESE TWO NUMBERS ARE COUPLED. Raising this cap without raising helm/oasgen-provider/values.yaml's
 // render.resources.limits.memory re-creates exactly the inconsistency it was lowered to remove.
 const DefaultMaxBodyBytes int64 = 4 << 20
