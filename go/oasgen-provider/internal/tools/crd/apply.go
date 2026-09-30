@@ -139,9 +139,7 @@ func ApplyOrUpdateCRD(ctx context.Context, kubecli client.Client, newcrd *apiext
 		Version:  newcrd.Spec.Versions[0].Name,
 		Resource: newcrd.Spec.Names.Plural,
 	}
-	ensureCRDTypeMeta(newcrd)
-	generation.AddVersionColumn(newcrd)
-	setOwner(newcrd, owner)
+	PrepareForApply(newcrd, owner)
 
 	out := ApplyOutcome{GVR: gvr}
 
@@ -210,6 +208,15 @@ func ApplyOrUpdateCRD(ctx context.Context, kubecli client.Client, newcrd *apiext
 		return out, fmt.Errorf("merging version %s into CRD %s: %w", gvr.Version, gvr.GroupResource().String(), err)
 	}
 	return out, nil
+}
+
+// PrepareForApply stamps a freshly generated CRD with what ApplyOrUpdateCRD adds before writing it: the CRD
+// TypeMeta, the VERSION printer column and the owner annotation. On a cluster where the CRD does not exist yet,
+// the prepared object is exactly what gets created, which is what lets oasgen-render show it without applying.
+func PrepareForApply(newcrd *apiextensionsv1.CustomResourceDefinition, owner string) {
+	ensureCRDTypeMeta(newcrd)
+	generation.AddVersionColumn(newcrd)
+	setOwner(newcrd, owner)
 }
 
 // setOwner stamps the OwnerAnnotation (no-op for an empty owner, e.g. tests that don't exercise ownership).

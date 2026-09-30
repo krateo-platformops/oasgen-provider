@@ -75,3 +75,26 @@ preserved). Canonical helper — identical across all Krateo charts.
 {{- printf "%s:%s" .img.repository $tag -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+oasgen-render names and labels. The app name differs from the manager's so neither Deployment's selector
+matches the other's pods.
+*/}}
+{{- define "oasgen-provider.render.fullname" -}}
+{{- printf "%s-render" (include "oasgen-provider.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "oasgen-provider.render.selectorLabels" -}}
+app.kubernetes.io/name: {{ printf "%s-render" (include "oasgen-provider.name" .) | trunc 63 | trimSuffix "-" }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{- define "oasgen-provider.render.labels" -}}
+helm.sh/chart: {{ include "oasgen-provider.chart" . }}
+{{ include "oasgen-provider.render.selectorLabels" . }}
+app.kubernetes.io/component: render
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}

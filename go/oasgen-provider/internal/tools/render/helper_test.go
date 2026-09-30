@@ -1,4 +1,4 @@
-package restdefinition
+package render
 
 import (
 	"testing"

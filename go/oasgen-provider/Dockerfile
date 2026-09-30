@@ -21,6 +21,7 @@ RUN go mod download
 
 COPY main.go main.go
 COPY apis/ apis/
+COPY cmd/ cmd/
 COPY internal/ internal/
 
 # Build
@@ -30,6 +31,10 @@ COPY internal/ internal/
 ARG BUILD_VERSION
 RUN CGO_ENABLED=0 GO111MODULE=on go build -a -ldflags="-X 'main.Build=${BUILD_VERSION}'" -o /bin/manager main.go && \
     strip /bin/manager
+# oasgen-render ships in the same image so it is always the exact generator the manager next to it runs; the
+# chart starts it by overriding the command (render.enabled).
+RUN CGO_ENABLED=0 GO111MODULE=on go build -ldflags="-X 'main.Build=${BUILD_VERSION}'" -o /bin/oasgen-render ./cmd/oasgen-render && \
+    strip /bin/oasgen-render
 
 # Deployment environment
 # ----------------------
@@ -40,6 +45,7 @@ RUN mkdir -p "$GOCACHE/go-build" && chmod -R 1777 "$GOCACHE"
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /bin/manager /bin/manager
+COPY --from=builder /bin/oasgen-render /bin/oasgen-render
 
 # Run as a non-root user (DS-0002)
 USER 65532:65532

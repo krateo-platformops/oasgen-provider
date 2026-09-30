@@ -1,7 +1,6 @@
 package restdefinition
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -46,12 +45,12 @@ import (
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/oas2jsonschema"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/objects"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/plurals"
+	"github.com/krateo-platformops/oasgen-provider/internal/tools/render"
 	"github.com/krateo-platformops/provider-runtime/pkg/reconciler"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 
 	oteltelemetry "github.com/krateo-platformops/oasgen-provider/internal/tools/telemetry"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/text"
-	"github.com/krateo-platformops/plumbing/crdgen"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -62,7 +61,7 @@ const (
 
 const (
 	errNotRestDefinition = "managed resource is not a RestDefinition"
-	resourceVersion      = "v1alpha1"
+	resourceVersion      = render.DefaultVersion
 
 	restresourcesStillExistFinalizer = "composition.krateo.io/restresources-still-exist-finalizer"
 )
@@ -237,12 +236,7 @@ func enqueueRestDefinitionForConfiguration(kube client.Client) handler.MapFunc {
 // k8s version name via crdgen), falling back to resourceVersion ("v1alpha1") when the OAS is unavailable or
 // declares no version. Used by Create/Update/Delete, which have the parsed OAS in hand.
 func targetVersion(doc oas2jsonschema.OASDocument) string {
-	if doc != nil {
-		if v := crdgen.NormalizeVersionName(doc.Version()); v != "" {
-			return v
-		}
-	}
-	return resourceVersion
+	return render.TargetVersion(doc)
 }
 
 // observedVersion is the currently-deployed CRD API version, read from status (set at the last Create/Update),
@@ -567,7 +561,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	}
 
 	// check if doc has authentication defined, if so log it
-	hasSecuritySchemes := doc.SecuritySchemes() != nil && len(doc.SecuritySchemes()) > 0
+	hasSecuritySchemes := render.HasSecuritySchemes(doc)
 	e.log.Debug("Checking for security schemes in OAS document", "HasSecuritySchemes: ", hasSecuritySchemes)
 	if hasSecuritySchemes {
 		e.log.Debug("Security schemes found in OAS document", "Count", len(doc.SecuritySchemes()))
@@ -673,70 +667,20 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	return err
 }
 
-// generateAndApplyCRDs generates the target CRD (and the Configuration CRD when configuration fields or
-// security schemes are present) from the OAS document, and applies each version-awarely via ApplyOrUpdateCRD
-// (create when absent, or in-place schema replace of the current version). It is shared by Create (first
-// install) and Update (regenerate when the OAS content changed), so an edited OAS is reflected in the CRD.
+// generateAndApplyCRDs renders the target CRD (and the Configuration CRD when configuration fields or
+// security schemes are present) from the OAS document via render.CRDs, and applies each version-awarely via
+// ApplyOrUpdateCRD (create when absent, or in-place schema replace of the current version). It is shared by
+// Create (first install) and Update (regenerate when the OAS content changed), so an edited OAS is reflected
+// in the CRD. The rendering half is the same code the oasgen-render preview service runs.
 func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, doc oas2jsonschema.OASDocument, hasSecuritySchemes bool) (err error) {
-	// Fail here rather than at poll time: an async poll path that breaks rest-dynamic-controller's runtime
-	// contract is otherwise accepted by admission AND by this reconcile, and only surfaces once a create has
-	// already fired (issue #46).
-	if verr := validateAsyncPollPaths(cr, doc); verr != nil {
-		return verr
-	}
-
-	// Shim VerbsDescription -> oas2jsonschema.Verb (decoupled from the RestDefinition CRD types).
-	verbs := make([]oas2jsonschema.Verb, len(cr.Spec.Resource.VerbsDescription))
-	for i, v := range cr.Spec.Resource.VerbsDescription {
-		verbs[i] = oas2jsonschema.Verb{
-			Action:       v.Action,
-			Method:       v.Method,
-			Path:         v.Path,
-			ItemsPath:    v.ItemsPath,
-			FieldMapping: toDomainFieldMapping(v),
-		}
-	}
-
-	configurationFields := make([]oas2jsonschema.ConfigurationField, 0, len(cr.Spec.Resource.ConfigurationFields))
-	for _, v := range cr.Spec.Resource.ConfigurationFields {
-		actions, aerr := expandWildcardActions(v.FromRestDefinition.Actions, cr.Spec.Resource.VerbsDescription)
-		if aerr != nil {
-			return fmt.Errorf("expanding wildcard for actions in configurationFields: %w", aerr)
-		}
-		configurationFields = append(configurationFields, oas2jsonschema.ConfigurationField{
-			FromOpenAPI:        oas2jsonschema.FromOpenAPI{Name: v.FromOpenAPI.Name, In: v.FromOpenAPI.In},
-			FromRestDefinition: oas2jsonschema.FromRestDefinition{Actions: actions},
-		})
-	}
-
-	resourceConfig := &oas2jsonschema.ResourceConfig{
-		Verbs:                  verbs,
-		Identifiers:            cr.Spec.Resource.Identifiers,
-		AdditionalStatusFields: cr.Spec.Resource.AdditionalStatusFields,
-		ConfigurationFields:    configurationFields,
-		ExcludedSpecFields:     cr.Spec.Resource.ExcludedSpecFields,
-	}
-	generator := oas2jsonschema.NewOASSchemaGenerator(doc, oas2jsonschema.DefaultGeneratorConfig(), resourceConfig)
-
-	ctx, genSpan := oteltelemetry.Tracer().Start(ctx, "restdefinition.generate_crd")
-	defer genSpan.End()
-	defer func() { oteltelemetry.RecordError(genSpan, err) }()
-	genSpan.SetAttributes(
-		attribute.String("k8s.object.name", cr.Name),
-		attribute.String("k8s.object.namespace", cr.Namespace),
-		attribute.String("crd.group", gvk.Group),
-		attribute.String("crd.kind", gvk.Kind),
-	)
-
-	var result *oas2jsonschema.GenerationResult
-	result, err = generator.Generate()
+	rendered, err := render.CRDs(ctx, cr, gvk, doc, hasSecuritySchemes)
 	if err != nil {
-		return fmt.Errorf("generating schemas: %w", err)
+		return err
 	}
-	for _, w := range result.GenerationWarnings {
+	for _, w := range rendered.GenerationWarnings {
 		e.log.Debug("Schema generation warning", "Warning", w)
 	}
-	for _, w := range result.ValidationWarnings {
+	for _, w := range rendered.ValidationWarnings {
 		e.log.Debug("Schema validation warning", "Warning", w)
 	}
 
@@ -749,9 +693,9 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	// here — this is the vendor's document — and we cannot know whether the endpoint actually enforces the
 	// scheme it advertises. Failing generation would break anyone running an oauth2-declaring document
 	// against an endpoint that does not enforce it.
-	if len(result.SkippedSecuritySchemes) > 0 {
-		schemes := strings.Join(result.SkippedSecuritySchemes, "; ")
-		if len(result.ConfigurationSchema) > 0 && bytes.Contains(result.ConfigurationSchema, []byte(`"authentication"`)) {
+	if len(rendered.SkippedSecuritySchemes) > 0 {
+		schemes := strings.Join(rendered.SkippedSecuritySchemes, "; ")
+		if rendered.AuthenticationGenerated {
 			e.log.Warn("Unsupported security schemes skipped; other authentication methods are still available",
 				"schemes", schemes)
 			e.rec.Eventf(cr, corev1.EventTypeWarning, "UnsupportedSecuritySchemes",
@@ -764,52 +708,16 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 		}
 	}
 
-	res, err := crdgen.Generate(crdgen.Options{
-		Group:        gvk.Group,
-		Version:      gvk.Version,
-		Kind:         gvk.Kind,
-		Categories:   []string{strings.ToLower(cr.Spec.Resource.Kind), "restresources", "rr"},
-		SpecSchema:   result.SpecSchema,
-		StatusSchema: result.StatusSchema,
-		Managed:      true,
-	})
-	if err != nil {
-		return fmt.Errorf("generating CRD: %w", err)
-	}
-	crdu, err := crd.Unmarshal(res)
-	if err != nil {
-		return fmt.Errorf("unmarshalling CRD: %w", err)
-	}
 	e.log.Debug("Applying CRD", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)
 	owner := cr.Namespace + "/" + cr.Name
-	outcome, err := crd.ApplyOrUpdateCRD(ctx, e.kube, crdu, owner)
+	outcome, err := crd.ApplyOrUpdateCRD(ctx, e.kube, rendered.CRD, owner)
 	if err != nil {
 		return fmt.Errorf("installing CRD: %w", err)
 	}
-	e.noteAdoption(cr, crdu.Name, outcome)
+	e.noteAdoption(cr, rendered.CRD.Name, outcome)
 
-	if len(configurationFields) > 0 || hasSecuritySchemes {
-		cfgGVK := schema.GroupVersionKind{
-			Group:   cr.Spec.ResourceGroup,
-			Version: resourceVersion,
-			Kind:    text.CapitaliseFirstLetter(cr.Spec.Resource.Kind) + "Configuration",
-		}
-		cfgRes, cerr := crdgen.Generate(crdgen.Options{
-			Group:      cfgGVK.Group,
-			Version:    cfgGVK.Version,
-			Kind:       cfgGVK.Kind,
-			Categories: []string{strings.ToLower(cr.Spec.Resource.Kind), "restconfigs", "rc"},
-			SpecSchema: result.ConfigurationSchema,
-			Managed:    false,
-		})
-		if cerr != nil {
-			return fmt.Errorf("generating configuration CRD: %w", cerr)
-		}
-		cfgCRDU, cerr := crd.Unmarshal(cfgRes)
-		if cerr != nil {
-			return fmt.Errorf("unmarshalling configuration CRD: %w", cerr)
-		}
-		e.log.Debug("Applying Configuration CRD", "Kind", cfgGVK.Kind, "Group", cfgGVK.Group)
+	if cfgCRDU := rendered.ConfigurationCRD; cfgCRDU != nil {
+		e.log.Debug("Applying Configuration CRD", "Kind", cfgCRDU.Spec.Names.Kind, "Group", cfgCRDU.Spec.Group)
 		cfgOutcome, cerr := crd.ApplyOrUpdateCRD(ctx, e.kube, cfgCRDU, owner)
 		if cerr != nil {
 			return fmt.Errorf("installing configuration CRD: %w", cerr)
@@ -839,7 +747,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 		return fmt.Errorf("getting document model from CR: %w", err)
 	}
 
-	hasSecuritySchemes := doc.SecuritySchemes() != nil && len(doc.SecuritySchemes()) > 0
+	hasSecuritySchemes := render.HasSecuritySchemes(doc)
 
 	if !meta.IsActionAllowed(cr, meta.ActionUpdate) {
 		e.log.Debug("External resource should not be updated by provider, skip updating.")
