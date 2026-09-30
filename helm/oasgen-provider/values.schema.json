@@ -513,6 +513,11 @@
           "type": "boolean",
           "title": "Deploy oasgen-render"
         },
+        "fullnameOverride": {
+          "type": "string",
+          "title": "Render fullname override",
+          "description": "Names the render Deployment, Service and selector labels. Empty keeps the generated name. Changing it on a release that already runs the render pod fails the upgrade, because a Deployment's selector is immutable."
+        },
         "replicaCount": {
           "type": "integer",
           "title": "Replica count",
@@ -554,6 +559,22 @@
               "number",
               "boolean"
             ]
+          }
+        },
+        "snowplowEndpoint": {
+          "type": "object",
+          "title": "Snowplow endpoint Secret",
+          "description": "Creates a Secret whose server-url points at this render Service. Rendered only when render.enabled is true.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "title": "Create the endpoint Secret"
+            },
+            "name": {
+              "type": "string",
+              "title": "Secret name"
+            }
           }
         }
       }
