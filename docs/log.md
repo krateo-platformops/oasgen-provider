@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-09-25T00:00:00Z
+timestamp: 2026-09-30T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,72 @@ timestamp: 2026-09-25T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-09-30 — 0.25.0
+
+A minor: one new service, one findby correctness fix that changes generated status types, and a
+**Kubernetes floor that will refuse the upgrade below 1.33**. Read that last one before rolling.
+
+- **The chart now requires Kubernetes >= 1.33** (#152). This is the change most likely to affect an
+  upgrade, and it is unrelated to everything else here: `helm upgrade` will now be REFUSED on an older
+  cluster rather than proceeding.
+
+  It is a correctness requirement, not a compatibility bound. The Observe path merges into whatever
+  status is already stored and never clears it, so a stored value that violates a tightened CRD schema
+  is rewritten unchanged on every reconcile. That is harmless only because CRD validation ratcheting
+  makes the API server skip validating a field a write leaves unchanged. 1.33 is where that gate became
+  GA *and* `LockToDefault: true` — the first version where a cluster operator cannot turn it off. Below
+  it, a tightened status schema can wedge existing resources rather than rewrite them.
+
+  Costs nothing real: the modules build against client-go 1.35, so the supported skew already implied
+  ~1.34-1.36, and everything excluded is end-of-life upstream.
+
+- **`findby` returned the wrong schema for an envelope response** (#110). `ExtractSchemaForAction`
+  unwrapped only when the 200 schema was itself an array, so for `{total, values:[...]}` — what most real
+  APIs return — the base schema was the envelope. Identifiers were looked for a level above where they
+  live: their types degraded to `string`, and the not-resolvable warning fired identically for a valid
+  identifier and a genuinely absent one.
+
+  **This changes generated status types**, but far more narrowly than it sounds: only for a resource whose
+  status is built from the findby envelope, i.e. one with **no `get` verb**. Anything with a `get` was
+  already correct. Verified on a 34-resource live provider where 33 had a `get` and were unaffected.
+
+  Found while fixing it: the runtime picked the collection with "the first value that is a list" over a Go
+  map, and map iteration order is randomised — so an envelope with two arrays searched a different one on
+  different reconciles. Both sides now follow one rule and **refuse** when two or more arrays leave it
+  ambiguous, rather than guessing. A findby that guesses wrong reports not-found, and the reconciler
+  creates on not-found, so the cost of a wrong guess was a duplicated external resource.
+
+- **`findby` matched raw list items, so it could not key on a normalized field** (#145). The match compares
+  against the CR with `DeepEqual` — API-domain data against CR-domain data — while `responseTransform` and
+  response `fieldMapping`, the things that bridge those domains, ran only afterwards. A kind therefore could
+  not key a findby on any field whose shape differs between the list response and the spec, even when the
+  same field normalized correctly for `get`. Items are now normalized before matching.
+
+- **A deleted RestDefinition could block CRD regeneration forever** (#137). The ownership annotation names a
+  RestDefinition; the check compared that name and never asked whether it still resolved to anything. A
+  composition recreation leaves such annotations behind, and they sit inert until some unrelated OAS change
+  needs a regeneration — which is then refused permanently, arbitrarily far from the event that armed it.
+  On a live cluster: a 1h40m outage from an ordinary chart version bump, silent four levels up. A confirmed
+  dangling owner is now adopted and the displaced husk reported as an Event; an *unverifiable* one is
+  neither adopted nor rejected.
+
+- **`oasgen-render`, a preview service** (#157). `POST /render` turns RestDefinitions plus inline OAS
+  documents into the CRDs they would generate, without fetching or applying anything. Second binary in the
+  same image; chart Deployment and Service behind `render.enabled`, **off by default**, ClusterIP, no
+  service-account token. The generation half of the controller's path was lifted into a shared package so
+  the preview runs the same code — verified byte-identical against the pre-refactor controller output.
+
+  One behaviour change on an error path: if the Configuration CRD fails to generate, nothing is applied.
+  Previously the resource CRD was applied and then the reconcile errored, leaving a half-installed pair.
+
+- **Published images now carry a real `service.version`** (#127). Both were built with no `build_args`, so
+  the stamp was empty and the collector fell back to the chart label — which cannot distinguish two images
+  built from different commits at the same release.
+
+- **Generation warnings no longer render `generation error at :`** with an empty location. Most emitters set
+  no path, so most warnings read as a broken format string — a poor way to introduce a warning whose job is
+  to be believed.
 
 ## 2026-09-25 — 0.24.0
 
