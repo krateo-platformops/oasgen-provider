@@ -8,7 +8,7 @@
     "global": {
       "type": "object",
       "title": "Global overrides",
-      "additionalProperties": false,
+      "description": "Helm global values. Deliberately PERMISSIVE — additionalProperties is NOT false here. The Krateo composition engine injects compositionId, compositionName, compositionNamespace, compositionGroup, compositionResource, compositionApiVersion, compositionKind, compositionInstalledVersion, krateoNamespace and gracefullyPaused into global at install time; forbidding extras makes helm reject the install with \"additional properties ... not allowed\". blueprint-render-service omits it for the same reason.",
       "properties": {
         "imageRegistry": {
           "type": "string",
