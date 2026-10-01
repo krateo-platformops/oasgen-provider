@@ -657,7 +657,7 @@ func TestIsResourceKnown(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := IsResourceKnown(context.Background(), tc.client, tc.info, tc.mg)
+			result, _ := IsResourceKnown(context.Background(), tc.client, tc.info, tc.mg)
 			assert.Equal(t, tc.expect, result)
 		})
 	}

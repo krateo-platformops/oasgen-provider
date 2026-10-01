@@ -478,22 +478,41 @@ func applyConfigSpec(req *restclient.RequestConfiguration, configSpec map[string
 // This function is used during the reconciliation (in the Observe phase) to decide:
 // - if the resource can be retrieved by its unique identifier (usually server-side generated and assigned) (e.g GET /resources/{id})
 // - or if it needs to be found by its "findby" identifiers fields (e.g., unique name within a organization) in a list of resources (e.g GET /resources)
-func IsResourceKnown(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured) bool {
+// IsResourceKnown reports whether the CR carries enough identity to issue the get verb.
+//
+// The error return is not decoration. "false" here means "the identity is not known yet", which routes
+// observe to findby and, with no findby declared, to assume-needs-creating -- i.e. a CREATE. So anything
+// that returns false had better actually mean the identity is absent.
+//
+// A BROKEN DECLARATION is not that. A request-direction jq that does not compile, fails, or returns a
+// value with no URL form sets RequestConfiguration.BuildErr; reporting that as "not known" hands it to
+// the same create path, which is precisely the silent-drop-then-create failure #117 set out to remove --
+// relocated from the Call to this routing gate, where the Call's own guard never runs. Found on a live
+// cluster: a get verb with a deliberately broken jq silently attempted a create instead of reporting the
+// jq error.
+//
+// So the two answers are separated. err != nil means "this definition is wrong, surface it"; (false, nil)
+// means "no identity yet", which is the only one that may lead to a create.
+func IsResourceKnown(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured) (bool, error) {
 	if mg == nil || clientInfo == nil {
-		return false
+		return false, nil
 	}
 
 	apiCall, callInfo, err := APICallBuilder(cli, clientInfo, apiaction.Get)
 	if apiCall == nil || err != nil {
-		return false
+		return false, nil
 	}
 
 	reqConfiguration := BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, nil)
-	if reqConfiguration == nil || reqConfiguration.BuildErr != nil {
-		return false
+	if reqConfiguration == nil {
+		return false, nil
+	}
+	if reqConfiguration.BuildErr != nil {
+		// A declaration that cannot produce a request. Never "not known".
+		return false, reqConfiguration.BuildErr
 	}
 
-	return cli.ValidateRequest(callInfo.Method, callInfo.Path, reqConfiguration.Parameters, reqConfiguration.Query, reqConfiguration.Headers, reqConfiguration.Cookies) == nil
+	return cli.ValidateRequest(callInfo.Method, callInfo.Path, reqConfiguration.Parameters, reqConfiguration.Query, reqConfiguration.Headers, reqConfiguration.Cookies) == nil, nil
 }
 
 // processFields processes the given fields map (spec or status fields) and populates the request configuration accordingly.

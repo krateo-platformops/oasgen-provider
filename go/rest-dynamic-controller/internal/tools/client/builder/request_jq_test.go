@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/text"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/fieldmapping"
@@ -249,4 +250,42 @@ func TestNonSecretTransformIsNotRedacted(t *testing.T) {
 	require.NoError(t, cfg.BuildErr)
 	assert.Empty(t, cfg.SensitiveValues,
 		"only values sourced from a secretRef are secrets; redacting everything would gut request logging")
+}
+
+// TestIsResourceKnownSeparatesBrokenFromUnknown is the fix for a gap found by live validation of #117.
+//
+// IsResourceKnown returning false means "the identity is not known yet", which routes observe to findby
+// and, with no findby declared, to assume-needs-creating — a CREATE. So false must mean exactly that.
+//
+// It did not. A request-direction jq that cannot produce a value sets RequestConfiguration.BuildErr, and
+// this function reported that as false — handing a broken declaration to the create path. That is the
+// silent-drop-then-create failure #117 set out to remove, relocated from the Call (where the guard runs)
+// to the routing gate (where it did not). On a live cluster a get verb with a deliberately broken jq
+// silently attempted a create instead of reporting the error; it 422'd only because that API also wanted
+// a field the CR lacked. A kind whose create body is satisfiable would have created a duplicate.
+func TestIsResourceKnownSeparatesBrokenFromUnknown(t *testing.T) {
+	brokenJQ := &getter.Info{
+		Resource: getter.Resource{
+			Kind: "GitRef",
+			VerbsDescription: []getter.VerbsDescription{{
+				Action: "get", Method: "GET", Path: "/repos/{owner}/{repo}/git/ref/{ref}",
+				FieldMapping: []getter.FieldMappingItem{{
+					InPath:           "ref",
+					InCustomResource: "spec.ref",
+					// Returns an array: no URL form, so BuildErr is set.
+					ValueMapping: &getter.ValueMapping{Type: "jq", JQ: &getter.JQProgram{Inline: `split("/")`}},
+				}},
+			}},
+		},
+	}
+
+	cli := &mockUnstructuredClient{
+		requestedParams: map[string]text.StringSet{"/repos/{owner}/{repo}/git/ref/{ref}": text.NewStringSet("ref")},
+	}
+	known, err := IsResourceKnown(context.Background(), cli, brokenJQ, crWithRef("refs/heads/x"))
+	require.Error(t, err,
+		"a declaration that cannot produce a request must be reported as broken, not as 'identity unknown' "+
+			"— the latter routes observe to create")
+	assert.False(t, known)
+	assert.Contains(t, err.Error(), `path parameter "ref"`, "the error must name the offending entry")
 }
