@@ -1,0 +1,43 @@
+apiVersion: v2
+name: controller-render-service
+description: Controller renderer for the Krateo self-service program — stateless HTTP service
+  previewing the CRDs a set of RestDefinitions would generate (POST /render), without applying
+  anything and without reading the cluster
+annotations:
+  krateo.io/display-name: Controller Render Service
+  krateo.io/category: generator
+  krateo.io/maturity: stable
+type: application
+
+# This chart ships the `oasgen-render` binary out of the oasgen-provider image. It used to be a
+# conditional sub-deployment of the oasgen-provider chart (templates/render.yaml, gated on
+# `render.enabled`), which made it the only Krateo render service needing install-time
+# configuration: six componentValues keys had to be set by hand or the Controller Builder's
+# Preview and Publish were simply off, while its sibling `blueprint-render-service` is a
+# first-class component that works with none. This chart removes that asymmetry — the two
+# render services are now discovered, installed and configured the same way.
+#
+# Deliberately NOT changed while repackaging, so this is a move rather than a rewrite:
+# podSecurityContext/securityContext stay values defaulting to {} exactly as the sub-deployment
+# had them. Hardening them to match blueprint-render-service's hardcoded distroless-nonroot
+# profile is a separate change that needs the image verified against it first.
+#
+# No kubeVersion bound: unlike the oasgen-provider chart, this one ships no CRDs and no
+# controller, so the CRD-validation-ratcheting requirement that pins those charts to >=1.33
+# does not apply here.
+
+# Versioned with the SAME release tag as the oasgen-provider and oasgen-provider-crds charts:
+# release-oci.yaml substitutes CHART_VERSION from the git tag, so one tag publishes all three at
+# one version. That makes this a co-versioned TRIPLE in the installer's pins — see
+# krateo-platformops/installer#432, which proposes CI enforcement of exactly that invariant.
+version: CHART_VERSION
+appVersion: APP_VERSION
+home: https://krateo.io
+icon: https://raw.githubusercontent.com/krateo-platformops/.github/main/brand/logo.svg
+keywords:
+  - krateo
+  - platformops
+  - oasgen-provider
+  - render
+sources:
+  - https://github.com/krateo-platformops/oasgen-provider/tree/APP_VERSION

@@ -1,0 +1,82 @@
+# oasgen-render: POST /render previews the CRDs a set of RestDefinitions would generate, without
+# applying anything. It reads nothing from the cluster (the OAS documents arrive in the request),
+# so the pod runs with no ServiceAccount token.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "controller-render-service.fullname" . }}
+  labels:
+    {{- include "controller-render-service.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "controller-render-service.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "controller-render-service.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # No Kubernetes client in the service: never mount a token.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: oasgen-render
+          image: {{ include "krateo.image" (dict "img" .Values.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/oasgen-render"]
+          args:
+            - --addr=:{{ .Values.containerPort }}
+          {{- with .Values.env }}
+          env:
+            {{- range $k, $v := . }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          # Kubernetes probe defaults (timeoutSeconds: 1, failureThreshold: 3) kill HEALTHY pods
+          # under CPU contention: a loaded node delays /healthz past 1s and three misses restart
+          # the pod, and the restart storm worsens the contention. Liveness is lenient (only a
+          # truly dead process gets killed); readiness still removes the endpoint promptly, but
+          # load alone must not flap it. Matches blueprint-render-service.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -13,6 +13,32 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-10-01 — 0.26.0
+
+`oasgen-render` becomes its own chart. A **breaking chart change**: `render.*` is removed from the
+provider chart's values, and `render.enabled=true` is now rejected rather than ignored.
+
+- **Why.** The render service was a conditional sub-deployment of the provider chart, so it was the
+  only Krateo render service that needed install-time configuration: six `componentValues` keys set
+  by hand (`render.enabled`, `fullnameOverride`, `service.port`, `resources`,
+  `snowplowEndpoint.{enabled,name}`) or the portal's Controller Builder Preview and Publish were
+  off. Its sibling `blueprint-render-service` is a first-class chart whose defaults are already
+  correct, so it needs none. A fresh install therefore got a working Blueprint Builder and a dead
+  Controller Builder, for no reason visible at the call site.
+- **What.** New chart `helm/controller-render-service`, modelled on `blueprint-render-service`:
+  Deployment, Service, and the snowplow endpoint Secret. Defaults are correct for composition use
+  (`snowplowEndpoint.enabled: true`, name `controller-render-endpoint`, port 8080 on both the
+  container and the Service, matching the sibling), so installing it as a Krateo component needs no
+  configuration. Published from this repo, so it carries the SAME version as the provider and CRD
+  charts — a co-versioned triple.
+- **Deliberately not changed,** to keep this a move rather than a rewrite: `podSecurityContext` and
+  `securityContext` remain values defaulting to `{}`, exactly as the sub-deployment had them.
+  Hardening them to the sibling's distroless-nonroot profile needs the image verified against it
+  first.
+- **Migrating.** The new chart produces the same object names the sub-deployment produced once
+  `render.fullnameOverride` was set, so the two cannot coexist: drop the provider chart's render
+  objects first, then install the new component. Nothing in the controller changes.
+
 ## 2026-10-01 — 0.25.1
 
 A patch: chart knobs for placing `oasgen-render` behind a platform naming convention, and the
