@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "controller-render-service",
+  "description": "Stateless HTTP service previewing the CRDs a set of RestDefinitions would generate (POST /render). Required by the portal's Controller Builder Preview; the defaults here are correct for composition use, so installing it as a Krateo component needs no componentValues.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "global": {
+      "type": "object",
+      "title": "Global overrides",
+      "additionalProperties": false,
+      "properties": {
+        "imageRegistry": {
+          "type": "string",
+          "title": "Image registry override",
+          "description": "Overrides the registry HOST of the image (the repository path is preserved), for mirror / air-gapped installs.",
+          "default": ""
+        }
+      }
+    },
+    "replicaCount": {
+      "type": "integer",
+      "title": "Replica count",
+      "minimum": 0,
+      "default": 1
+    },
+    "image": {
+      "type": "object",
+      "title": "Image",
+      "description": "The oasgen-provider image; this chart runs its oasgen-render entrypoint rather than the controller, so the renderer cannot drift from the generator whose output it previews.",
+      "additionalProperties": false,
+      "properties": {
+        "registry": { "type": "string", "title": "Registry", "default": "ghcr.io" },
+        "repository": { "type": "string", "title": "Repository", "default": "krateo-platformops/oasgen-provider" },
+        "pullPolicy": { "type": "string", "title": "Pull policy", "enum": ["Always", "IfNotPresent", "Never"], "default": "IfNotPresent" },
+        "tag": { "type": "string", "title": "Tag", "description": "Overrides the image tag, whose default is the chart appVersion.", "default": "" }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "title": "Image pull secrets",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "name": { "type": "string" } }
+      },
+      "default": []
+    },
+    "nameOverride": { "type": "string", "title": "Name override", "default": "" },
+    "fullnameOverride": {
+      "type": "string",
+      "title": "Fullname override",
+      "description": "Names the Deployment, Service and selector labels, and is what the endpoint Secret's server-url is built from. Empty keeps the generated name, which as a Krateo component is exactly `controller-render-service`. Changing it on a running release fails the upgrade, because a Deployment's selector is immutable.",
+      "default": ""
+    },
+    "containerPort": {
+      "type": "integer",
+      "title": "Container port",
+      "description": "Port the binary listens on, passed as --addr. Matches service.port and blueprint-render-service.",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 8080
+    },
+    "service": {
+      "type": "object",
+      "title": "Service",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "title": "Service type", "enum": ["ClusterIP", "NodePort", "LoadBalancer"], "default": "ClusterIP" },
+        "port": { "type": "integer", "title": "Service port", "minimum": 1, "maximum": 65535, "default": 8080 }
+      }
+    },
+    "podAnnotations": { "type": "object", "title": "Pod annotations", "default": {} },
+    "podSecurityContext": {
+      "type": "object",
+      "title": "Pod security context",
+      "description": "Left empty by default, matching the oasgen-provider sub-deployment this chart replaces. Hardening it is a separate change that needs the image verified against a nonroot profile first.",
+      "default": {}
+    },
+    "securityContext": {
+      "type": "object",
+      "title": "Container security context",
+      "description": "Left empty by default; see podSecurityContext.",
+      "default": {}
+    },
+    "resources": {
+      "type": "object",
+      "title": "Resources",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": { "type": ["string", "number"] },
+            "memory": { "type": ["string", "number"] }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": { "type": ["string", "number"] },
+            "memory": { "type": ["string", "number"] }
+          }
+        }
+      }
+    },
+    "nodeSelector": { "type": "object", "title": "Node selector", "additionalProperties": { "type": "string" }, "default": {} },
+    "affinity": { "type": "object", "title": "Affinity", "default": {} },
+    "tolerations": { "type": "array", "title": "Tolerations", "items": { "type": "object" }, "default": [] },
+    "env": {
+      "type": "object",
+      "title": "Extra environment variables",
+      "additionalProperties": { "type": ["string", "number", "boolean"] },
+      "default": {}
+    },
+    "snowplowEndpoint": {
+      "type": "object",
+      "title": "Snowplow endpoint Secret",
+      "description": "Publishes this Service's address as a Secret keyed by server-url, which snowplow RESTActions resolve via endpointRef. Default ON, like blueprint-render-service: the portal's controller-render-draft RESTAction always needs it.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "title": "Create the endpoint Secret", "default": true },
+        "name": { "type": "string", "title": "Secret name", "default": "controller-render-endpoint" }
+      }
+    }
+  }
+}

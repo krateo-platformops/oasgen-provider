@@ -1,0 +1,67 @@
+# Default values for controller-render-service.
+#
+# These defaults are CORRECT FOR COMPOSITION USE as they stand: installing this chart as a Krateo
+# component needs no componentValues at all. That is the point of the chart existing — see the note
+# in Chart.yaml.
+
+# global.imageRegistry, when set, overrides the registry HOST of the image below (the repository
+# path is preserved) — for mirror / air-gapped installs.
+global:
+  imageRegistry: ""
+
+replicaCount: 1
+
+# The oasgen-provider image: this chart runs its `oasgen-render` entrypoint rather than the
+# controller. Same image, same tag, different command — so the renderer can never drift from the
+# generator whose output it previews.
+image:
+  registry: ghcr.io
+  repository: krateo-platformops/oasgen-provider
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Port the binary listens on (passed as --addr). Matches service.port and
+# blueprint-render-service, so the two renderers are identical on the wire.
+containerPort: 8080
+
+service:
+  type: ClusterIP
+  port: 8080
+
+podAnnotations: {}
+
+# Left as {} to match the sub-deployment this chart replaces. See Chart.yaml: hardening is a
+# separate change.
+podSecurityContext: {}
+securityContext: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# Extra environment variables, as a flat name/value map.
+env: {}
+
+# The render Service's address, published as a Secret so consumers read it from ONE place instead
+# of spelling the same host out in two charts. snowplow's RESTAction `endpointRef` resolves an
+# Endpoint from a Secret keyed by `server-url`.
+#
+# Default ON, like blueprint-render-service: this is the Krateo controller renderer, and the
+# endpoint Secret the portal RESTActions resolve (controller-render-draft) is always needed.
+# Deploying as a Krateo Composition component therefore needs no extra componentValues.
+snowplowEndpoint:
+  enabled: true
+  name: controller-render-endpoint

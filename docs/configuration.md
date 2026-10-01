@@ -26,7 +26,7 @@ default — `nodeSelector`, `tolerations`, `affinity`), plus:
 | `global.imageRegistry` | `""` | When set, overrides the registry for **both** the provider and RDC images (mirror / air-gapped installs). |
 | `env.*` | `OASGEN_PROVIDER_DEBUG: "false"`, `OASGEN_PROVIDER_MAX_RECONCILE_RATE: 1` | Rendered verbatim into the provider's ConfigMap and injected via `envFrom` — any `OASGEN_PROVIDER_*` / `OTEL_*` variable below can be set here. |
 | `rdc.*` | see below | Everything about the generated rest-dynamic-controller instances. |
-| `render.enabled` | `false` | Deploys oasgen-render (same image, `/bin/oasgen-render`) as a ClusterIP Service; see [api.md](./api.md#preview-oasgen-render). Also `render.replicaCount`, `render.containerPort` (8081), `render.service.port` (80), `render.resources`, `render.podAnnotations`, `render.env` (`OASGEN_RENDER_*`). |
+| _(removed)_ | — | The `render.*` block is gone. `oasgen-render` now ships as its own chart, **`controller-render-service`**, published from this repo at the same version; it needs no configuration. See [api.md](./api.md#preview-oasgen-render). |
 
 The pod template carries a `checksum/configmap` annotation over the provider ConfigMap
 **and** all three RDC template ConfigMaps, so any config or template change rolls the

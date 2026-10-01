@@ -250,8 +250,16 @@ the generated schema). This list may not be exhaustive.
 `oasgen-render` renders RestDefinitions to the CRDs the controller would apply, **without
 applying anything and without reading the cluster**. It runs the controller's own generation
 code (`internal/tools/render`), ships in the provider image as `/bin/oasgen-render`, and is
-deployed as a ClusterIP Service by the provider chart when `render.enabled=true`. The pod
-mounts no ServiceAccount token.
+deployed as a ClusterIP Service by its own chart, **`controller-render-service`** (published
+from this repo at the same version as the provider chart). The pod mounts no ServiceAccount
+token.
+
+It used to be a conditional sub-deployment of the provider chart, behind `render.enabled`.
+That made it the only Krateo render service needing install-time configuration — six values
+had to be set by hand or the portal's Controller Builder Preview was simply off — while the
+sibling `blueprint-render-service` is a first-class chart that works with none. The separate
+chart removes that asymmetry; its defaults are correct for composition use, so it needs no
+configuration at all. `render.*` no longer exists in the provider chart's values.
 
 `POST /render`:
 
