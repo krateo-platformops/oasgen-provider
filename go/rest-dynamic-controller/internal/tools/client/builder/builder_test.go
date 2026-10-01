@@ -491,7 +491,7 @@ func TestBuildCallConfig(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			config := BuildCallConfig(tc.callInfo, tc.mg, tc.configSpec, nil)
+			config := BuildCallConfig(context.Background(), tc.callInfo, tc.mg, tc.configSpec, nil)
 
 			if tc.expectNil {
 				assert.Nil(t, config)
@@ -574,7 +574,7 @@ func TestBuildCallConfig_WithMerge(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			config := BuildCallConfig(tc.callInfo, tc.mg, tc.configSpec, nil)
+			config := BuildCallConfig(context.Background(), tc.callInfo, tc.mg, tc.configSpec, nil)
 
 			assert.NotNil(t, config, "config should not be nil")
 			assert.Equal(t, tc.expectedQuery, config.Query)
@@ -657,7 +657,7 @@ func TestIsResourceKnown(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := IsResourceKnown(tc.client, tc.info, tc.mg)
+			result, _ := IsResourceKnown(context.Background(), tc.client, tc.info, tc.mg)
 			assert.Equal(t, tc.expect, result)
 		})
 	}
@@ -1253,7 +1253,9 @@ func TestApplyFieldMapping(t *testing.T) {
 			expectedMapBody: make(map[string]interface{}),
 		},
 		{
-			name: "jq value transform is not yet wired for request direction: entry is skipped",
+			// Was "jq ... is not yet wired for request direction: entry is skipped". It is wired now, and
+			// the skip it asserted was the bug: a declared transform produced NO field at all (#117).
+			name: "jq value transform applies in the request direction",
 			callInfo: &CallInfo{
 				FieldMapping: []getter.FieldMappingItem{
 					{
@@ -1278,7 +1280,7 @@ func TestApplyFieldMapping(t *testing.T) {
 			initialMapBody: make(map[string]interface{}),
 			expectedReqConfig: &restclient.RequestConfiguration{
 				Parameters: make(map[string]string),
-				Query:      make(map[string]string),
+				Query:      map[string]string{"role": "owner"},
 			},
 			expectedMapBody: make(map[string]interface{}),
 		},
@@ -1353,7 +1355,7 @@ func TestApplyFieldMapping(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			applyFieldMapping(tc.callInfo, tc.mg, tc.initialReqConfig, tc.initialMapBody, nil)
+			applyFieldMapping(context.Background(), tc.callInfo, tc.mg, tc.initialReqConfig, tc.initialMapBody, nil)
 
 			if diff := cmp.Diff(tc.expectedReqConfig.Parameters, tc.initialReqConfig.Parameters); diff != "" {
 				t.Errorf("mismatch in parameters (-want +got):\n%s", diff)
@@ -1397,7 +1399,7 @@ func TestApplyFieldMapping_ResolverUsesResolvedValue(t *testing.T) {
 	reqConfig := &restclient.RequestConfiguration{Parameters: map[string]string{}, Query: map[string]string{}}
 	mapBody := map[string]interface{}{}
 
-	applyFieldMapping(callInfo, mg, reqConfig, mapBody, resolved)
+	applyFieldMapping(context.Background(), callInfo, mg, reqConfig, mapBody, resolved)
 
 	if mapBody["token"] != "hunter2" {
 		t.Fatalf("expected resolved value %q in body, got %v", "hunter2", mapBody["token"])
@@ -1440,7 +1442,7 @@ func TestApplyFieldMapping_ResolverArrayInBody(t *testing.T) {
 	reqConfig := &restclient.RequestConfiguration{Parameters: map[string]string{}, Query: map[string]string{}}
 	mapBody := map[string]interface{}{}
 
-	applyFieldMapping(callInfo, mg, reqConfig, mapBody, resolved)
+	applyFieldMapping(context.Background(), callInfo, mg, reqConfig, mapBody, resolved)
 
 	creds, ok := mapBody["credentials"].([]interface{})
 	if !ok || len(creds) != 1 {
@@ -1471,7 +1473,7 @@ func TestApplyFieldMapping_ResolverMissingFromResolvedIsSkipped(t *testing.T) {
 	reqConfig := &restclient.RequestConfiguration{Parameters: map[string]string{}, Query: map[string]string{}}
 	mapBody := map[string]interface{}{}
 
-	applyFieldMapping(callInfo, mg, reqConfig, mapBody, nil)
+	applyFieldMapping(context.Background(), callInfo, mg, reqConfig, mapBody, nil)
 
 	if _, ok := mapBody["token"]; ok {
 		t.Fatalf("expected an unresolved resolver entry to be skipped, got body %v", mapBody)
@@ -1505,7 +1507,7 @@ func TestBuildCallConfig_FieldMappingPrecedesAutoPopulation(t *testing.T) {
 		},
 	}
 
-	got := BuildCallConfig(ci, mg, nil, nil)
+	got := BuildCallConfig(context.Background(), ci, mg, nil, nil)
 
 	if got.Parameters["id"] != "explicit-id" {
 		t.Fatalf("expected the explicit FieldMapping entry to win, got %q", got.Parameters["id"])
@@ -1550,7 +1552,7 @@ func TestBuildCallConfig_ResolverSourceStrippedFromBody(t *testing.T) {
 	}
 	resolved := map[string]interface{}{fieldmapping.ResolverKey(resolverEntry): "hunter2"}
 
-	body := BuildCallConfig(ci, mg, nil, resolved).Body.(map[string]interface{})
+	body := BuildCallConfig(context.Background(), ci, mg, nil, resolved).Body.(map[string]interface{})
 	c0 := body["credentials"].([]interface{})[0].(map[string]interface{})
 
 	if _, leaked := c0["valueSecretRef"]; leaked {
@@ -1599,7 +1601,7 @@ func TestBuildCallConfig_FieldMappingKeepsUnmappedSiblings(t *testing.T) {
 		},
 	}
 
-	got := BuildCallConfig(ci, mg, nil, nil)
+	got := BuildCallConfig(context.Background(), ci, mg, nil, nil)
 
 	creds, ok := got.Body.(map[string]interface{})["credentials"].([]interface{})
 	if !ok || len(creds) != 2 {
@@ -1661,7 +1663,7 @@ func TestBuildCallConfig_PredicateMappingIsOrderIndependent(t *testing.T) {
 		{"otp first", []interface{}{otp, password}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := BuildCallConfig(newCI(), mgWith(tc.creds...), nil, nil)
+			got := BuildCallConfig(context.Background(), newCI(), mgWith(tc.creds...), nil, nil)
 
 			creds, ok := got.Body.(map[string]interface{})["credentials"].([]interface{})
 			if !ok || len(creds) != 2 {
@@ -1728,7 +1730,7 @@ func TestBuildCallConfig_PredicateResolverWritesResolvedSecret(t *testing.T) {
 	}}
 	resolved := map[string]interface{}{fieldmapping.ResolverKey(mapping): "hunter2"}
 
-	got := BuildCallConfig(ci, mg, nil, resolved)
+	got := BuildCallConfig(context.Background(), ci, mg, nil, resolved)
 
 	creds := got.Body.(map[string]interface{})["credentials"].([]interface{})
 	pw := creds[1].(map[string]interface{})
@@ -1755,7 +1757,7 @@ func TestBuildCallConfig_SuccessCodesPropagated(t *testing.T) {
 	}
 	mg := &unstructured.Unstructured{Object: map[string]interface{}{"spec": map[string]interface{}{}, "status": map[string]interface{}{}}}
 
-	rc := BuildCallConfig(ci, mg, nil, nil)
+	rc := BuildCallConfig(context.Background(), ci, mg, nil, nil)
 	if assert.NotNil(t, rc) {
 		assert.Equal(t, []int{201, 202}, rc.SuccessCodes, "per-verb successCodes must reach the request configuration")
 	}
@@ -1773,7 +1775,7 @@ func TestBuildCallConfig_HeadersInjected(t *testing.T) {
 	}
 	mg := &unstructured.Unstructured{Object: map[string]interface{}{"spec": map[string]interface{}{}, "status": map[string]interface{}{}}}
 
-	rc := BuildCallConfig(ci, mg, nil, nil)
+	rc := BuildCallConfig(context.Background(), ci, mg, nil, nil)
 	if assert.NotNil(t, rc) {
 		assert.Equal(t, "application/vnd.github.v3.repository+json", rc.Headers["Accept"])
 		assert.Equal(t, "application/json", rc.Headers["Content-Type"])
@@ -1789,7 +1791,7 @@ func TestBuildCallConfig_QueriesInjected(t *testing.T) {
 	}
 	mg := &unstructured.Unstructured{Object: map[string]interface{}{"spec": map[string]interface{}{}, "status": map[string]interface{}{}}}
 
-	rc := BuildCallConfig(ci, mg, nil, nil)
+	rc := BuildCallConfig(context.Background(), ci, mg, nil, nil)
 	if assert.NotNil(t, rc) {
 		assert.Equal(t, "7.2-preview.7", rc.Query["api-version"], "per-verb static query must reach the request configuration")
 	}

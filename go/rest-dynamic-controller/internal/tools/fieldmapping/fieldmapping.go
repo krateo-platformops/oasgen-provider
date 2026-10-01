@@ -36,9 +36,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/async"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/jqengine"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pathparsing"
+	"strconv"
 )
 
 // Direction indicates which way a value transform is applied.
@@ -330,6 +332,58 @@ func ApplyRequestTransform(ctx context.Context, prog *getter.JQProgram, body int
 		return nil, fmt.Errorf("running requestTransform: %w", err)
 	}
 	return out, nil
+}
+
+// ApplyValueJQ runs a per-field jq program over a single value and returns the canonical result.
+//
+// It is the REQUEST-direction counterpart of what resolveResponseEntry does inbound, and it exists so a
+// path or query parameter can be transformed on its way out. That was the one part of the request surface
+// with no transformation hook at all: alias needs the value set enumerated up front (branch names are
+// unbounded), requestTransform operates on the request BODY and a path parameter is not in it, and a
+// resolver sources a value rather than transforming one. So "strip a prefix from this path parameter
+// before calling" required a Go plugin -- a deployment, service, image and release pipeline to run
+// strings.TrimPrefix (#117).
+//
+// Module-referenced (ref:) programs are already materialized into Inline by resolveJQRefs before anything
+// executes, so only Inline is read here.
+func ApplyValueJQ(ctx context.Context, jq *getter.JQProgram, val interface{}, what string) (interface{}, error) {
+	if jq == nil || jq.Inline == "" {
+		return nil, fmt.Errorf("%s declares a jq valueMapping with no program", what)
+	}
+	prog, err := jqengine.Compile(jq.Inline)
+	if err != nil {
+		return nil, fmt.Errorf("compiling jq for %s: %w", what, err)
+	}
+	out, err := prog.Run(ctx, val)
+	if err != nil {
+		return nil, fmt.Errorf("running jq for %s: %w", what, err)
+	}
+	return jqengine.Canonical(out)
+}
+
+// ScalarForURL renders a transformed value for use as a path or query parameter, and REFUSES anything
+// that is not a scalar.
+//
+// A URL component has no sensible non-scalar form. Rendering an object or array with %v would produce
+// something like map[ref:heads/x], which is not an error anywhere -- it is a syntactically fine URL
+// segment that addresses the wrong thing, and the API answers 404. Since the reconciler acts on not-found
+// by CREATING, a jq program that returns the wrong SHAPE would quietly create a duplicate rather than
+// fail. Null is refused for the same reason: it renders as "<nil>" or empty and silently corrupts the path.
+func ScalarForURL(val interface{}, what string) (string, error) {
+	switch v := val.(type) {
+	case string:
+		return v, nil
+	case bool:
+		return strconv.FormatBool(v), nil
+	case int, int32, int64, float32, float64, json.Number:
+		return async.RenderScalar(v), nil
+	case nil:
+		return "", fmt.Errorf("%s produced null, which cannot address anything; "+
+			"a jq program feeding a URL must return a scalar", what)
+	default:
+		return "", fmt.Errorf("%s produced %T, which has no meaningful form in a URL; "+
+			"a jq program feeding a path or query parameter must return a scalar", what, val)
+	}
 }
 
 // HasResponseTransforms reports whether any of the named actions declares a whole-document

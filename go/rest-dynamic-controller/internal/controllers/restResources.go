@@ -175,7 +175,14 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	var response restclient.Response
 	// Tries to tries to build the `get` action API Call, with the given statusFields and specFields values.
 	// If it is able to validate the `get` action request, returns true
-	isKnown := builder.IsResourceKnown(cli, clientInfo, mg)
+	// A broken request-direction declaration must NOT read as "identity not known". That routes to findby
+	// and, with no findby declared, to assume-needs-creating -- a create issued because a jq program was
+	// wrong (#117). Surface it instead; the reconcile retries once the RestDefinition is corrected.
+	isKnown, knownErr := builder.IsResourceKnown(ctx, cli, clientInfo, mg)
+	if knownErr != nil {
+		log.Error(knownErr, "Building the get request from the RestDefinition")
+		return controller.ExternalObservation{}, fmt.Errorf("building the get request: %w", knownErr)
+	}
 	// The observed body comes from exactly one verb (get XOR findby); response normalization must use only
 	// that verb's fieldMapping, never both, or the other verb's transforms would be misapplied to it.
 	observeAction := "get"
@@ -190,7 +197,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			log.Error(err, "Building API call")
 			return controller.ExternalObservation{}, err
 		}
-		reqConfiguration := builder.BuildCallConfig(callInfo, mg, clientInfo.ConfigurationSpec, nil)
+		reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, nil)
 		if reqConfiguration == nil {
 			return controller.ExternalObservation{}, fmt.Errorf("error building call configuration")
 		}
@@ -255,7 +262,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			log.Error(err, "Building API call")
 			return controller.ExternalObservation{}, err
 		}
-		reqConfiguration := builder.BuildCallConfig(callInfo, mg, clientInfo.ConfigurationSpec, nil)
+		reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, nil)
 		if reqConfiguration == nil {
 			log.Error(fmt.Errorf("error building call configuration"), "Building call configuration")
 			return controller.ExternalObservation{}, fmt.Errorf("error building call configuration")
@@ -506,7 +513,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		return err
 	}
 
-	reqConfiguration := builder.BuildCallConfig(callInfo, mg, clientInfo.ConfigurationSpec, resolved)
+	reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
 	// Whole-document requestTransform, applied to the assembled body immediately before the call — after the
 	// per-field mappings have composed it, so the program sees the finished article. A failure fails the
 	// reconcile rather than sending a partially transformed body.
@@ -674,7 +681,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		return err
 	}
 
-	reqConfiguration := builder.BuildCallConfig(callInfo, mg, clientInfo.ConfigurationSpec, resolved)
+	reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
 	// Whole-document requestTransform, applied to the assembled body immediately before the call — after the
 	// per-field mappings have composed it, so the program sees the finished article. A failure fails the
 	// reconcile rather than sending a partially transformed body.
@@ -874,7 +881,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		resolved = nil
 	}
 
-	reqConfiguration := builder.BuildCallConfig(callInfo, mg, clientInfo.ConfigurationSpec, resolved)
+	reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
 	if reqConfiguration == nil {
 		log.Error(fmt.Errorf("error building call configuration"), "Building call configuration")
 		return fmt.Errorf("building call configuration")
