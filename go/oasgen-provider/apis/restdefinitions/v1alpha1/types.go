@@ -636,7 +636,34 @@ type Resource struct {
 	// +optional
 	Identifiers []string `json:"identifiers,omitempty"`
 	// AdditionalStatusFields: the list of fields to use as additional status fields - used to populate the status of the resource
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="AdditionalStatusFields are immutable, you cannot change them once the CRD has been generated"
+	//
+	// APPEND-ONLY, not immutable. Entries may be added at the end; the existing ones must stay in place,
+	// in order, unchanged.
+	//
+	// Fully immutable was too strong and blocked an ordinary upgrade: a KOG chart that adds a status field
+	// -- github-provider-kog 0.3.2 adding `merged` and `merged_at` to PullRequest -- could not be applied
+	// over an existing install at all, and the only way through was deleting the RestDefinition and its
+	// CRs. On the cluster that hit it those CRs were 24 publish records, so that was not an option.
+	//
+	// Appending is safe: the generated CRD gains optional status properties (and any printer columns), and
+	// stored objects simply do not carry them yet. The operations still refused are the ones that break
+	// stored objects or columns -- removing, renaming, reordering, or changing an existing entry.
+	//
+	// The rule is a prefix comparison. `oldSelf.all(i, v, self[i] == v)` is a TWO-VARIABLE comprehension,
+	// available in the apiserver's CEL from Kubernetes 1.32, which is below this chart's 1.33 floor. The
+	// obvious alternative, `self.slice(0, size(oldSelf)) == oldSelf`, needs ext.Lists, which the apiserver
+	// only enables from 1.34 -- and a CRD whose CEL does not compile is rejected outright, so that would
+	// have broken installs on 1.33 rather than merely failing to validate.
+	//
+	// MaxItems and MaxLength are REQUIRED for the rule above, not stylistic. Kubernetes costs a CEL rule
+	// statically, and a comprehension over an unbounded list of unbounded strings estimates as effectively
+	// infinite: the apiserver refused the whole CRD with "estimated rule cost exceeds budget by factor of
+	// more than 100x", which rejects the install rather than the RestDefinition. The bounds make the
+	// estimate finite. They are generous -- a resource with more than 64 additional status fields, or a
+	// field path longer than 253 characters, is not a thing we have seen.
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="size(self) >= size(oldSelf) && oldSelf.all(i, v, self[i] == v)",message="AdditionalStatusFields is append-only: you may add new entries at the end, but existing entries cannot be removed, renamed, reordered or changed once the CRD has been generated"
 	// +optional
 	AdditionalStatusFields []string `json:"additionalStatusFields,omitempty"`
 	// CompareScope selects which fields the drift comparison (Observe) considers when deciding whether the
@@ -800,6 +827,17 @@ type RestDefinitionStatus struct {
 	// (e.g. the referenced ConfigMap) is picked up even when oasPath itself is unchanged.
 	// +optional
 	OASHash string `json:"oasHash,omitempty"`
+
+	// ResourceHash: a content hash of spec.resource at the last successful Create/Update.
+	//
+	// The CRD is regenerated when the OAS content changes, which was sufficient while every input to
+	// generation was immutable. additionalStatusFields is append-only rather than immutable (a KOG chart
+	// adding a status field must be upgradable in place), so a RestDefinition can now change in a way that
+	// alters the generated schema while the OAS is byte-identical. Without this the apply would be accepted
+	// and then do nothing -- the CRD keeping its old status schema, looking for all the world like it had
+	// worked.
+	// +optional
+	ResourceHash string `json:"resourceHash,omitempty"`
 
 	// AuthSecretDigest: a hash of the Secret names (grouped by namespace) currently referenced, across every
 	// Configuration CR instance of this RestDefinition's Configuration Kind, by usernameRef/passwordRef/

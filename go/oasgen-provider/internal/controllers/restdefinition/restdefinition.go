@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -656,6 +657,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	cr.Status.Digest = dig
 	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
 	cr.Status.OASHash = oasHash
+	cr.Status.ResourceHash = resourceHash(cr)
 
 	err = e.kube.Status().Update(ctx, cr)
 	if err != nil {
@@ -673,6 +675,24 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 // ApplyOrUpdateCRD (create when absent, or in-place schema replace of the current version). It is shared by
 // Create (first install) and Update (regenerate when the OAS content changed), so an edited OAS is reflected
 // in the CRD. The rendering half is the same code the oasgen-render preview service runs.
+// resourceHash is a content hash of spec.resource, used to notice a change that alters the generated CRD
+// while the OAS document is byte-identical.
+//
+// Needed because additionalStatusFields is append-only rather than immutable: it is the one input to
+// generation a user can still change. Gating regeneration on the OAS hash alone would accept such an
+// apply and silently not regenerate, which is worse than refusing it -- the upgrade would report success
+// and the new status fields would simply never appear.
+func resourceHash(cr *definitionv1alpha1.RestDefinition) string {
+	b, err := json.Marshal(cr.Spec.Resource)
+	if err != nil {
+		// A spec that cannot be marshalled cannot be hashed; returning a constant would make every
+		// reconcile look unchanged, so return something that never matches instead.
+		return "unhashable"
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, doc oas2jsonschema.OASDocument, hasSecuritySchemes bool) (err error) {
 	rendered, err := render.CRDs(ctx, cr, gvk, doc, hasSecuritySchemes)
 	if err != nil {
@@ -779,11 +799,15 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	// replace, breaking allowed). This is what makes an edited OAS ConfigMap reach the CRD — previously Update
 	// only redeployed the RDC. Gated on the OAS content hash so a drift triggered by anything else (e.g. the
 	// deployment digest) does not needlessly re-run the crd generator.
-	if oasHash != cr.Status.OASHash {
-		e.log.Debug("OAS content changed, regenerating CRD", "oldHash", cr.Status.OASHash, "newHash", oasHash)
+	resHash := resourceHash(cr)
+	if oasHash != cr.Status.OASHash || resHash != cr.Status.ResourceHash {
+		e.log.Debug("Regenerating CRD",
+			"oasChanged", oasHash != cr.Status.OASHash,
+			"resourceChanged", resHash != cr.Status.ResourceHash)
 		if gerr := e.generateAndApplyCRDs(ctx, cr, gvk, doc, hasSecuritySchemes); gerr != nil {
-			return fmt.Errorf("regenerating CRD from changed OAS: %w", gerr)
+			return fmt.Errorf("regenerating CRD: %w", gerr)
 		}
+		cr.Status.ResourceHash = resHash
 	}
 
 	configurationGVR := getConfigurationGVR(cr, hasSecuritySchemes)
