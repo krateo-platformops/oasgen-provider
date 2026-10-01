@@ -1364,7 +1364,10 @@ func TestCall_NotFoundCodes(t *testing.T) {
 
 func TestRedact(t *testing.T) {
 	t.Run("replaces every occurrence of every value", func(t *testing.T) {
-		in := []byte(`Authorization: Bearer hunter2\nbody: {"token":"hunter2","other":"fine"}`)
+		// A REAL newline, not the literal \n this used to carry. The fixture models an HTTP dump, and
+		// credential headers are now redacted per LINE -- with everything on one line the Authorization
+		// rule necessarily consumes the body too. The assertions below are unchanged.
+		in := []byte("Authorization: Bearer hunter2\r\nbody: {\"token\":\"hunter2\",\"other\":\"fine\"}")
 		out := redact(in, []string{"hunter2"})
 		assert.NotContains(t, string(out), "hunter2")
 		assert.Contains(t, string(out), "***REDACTED***")
