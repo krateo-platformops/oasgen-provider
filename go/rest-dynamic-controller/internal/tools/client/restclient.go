@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1012,6 +1013,31 @@ func (d *debuggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 // redact replaces every occurrence of each non-empty value in values with a fixed-width placeholder, so a
 // redacted dump never leaks the original length. Used to keep secretRef-resolved values out of
 // verbose/debug request dumps even though they are legitimately sent to the external API.
+// credentialHeaders are redacted from a verbose dump BY NAME, whatever their value.
+//
+// Value-based redaction can only hide values it was told about, and RedactValues is populated solely
+// from secretRef-resolved fields. A bearer token supplied through the resource's own Configuration is
+// applied straight to the request by SetAuth and never registered, so `Authorization: Bearer <token>`
+// was written to pod logs in cleartext whenever krateo.io/connector-verbose was on -- handing the
+// configuration's credential to anyone who can read logs. Reported from a live cluster.
+//
+// A header whose job is to carry a credential does not need to be recognised by value to be known
+// dangerous. Redact it structurally, so a credential nobody registered is still covered.
+var credentialHeaders = []string{
+	"Authorization",
+	"Proxy-Authorization",
+	"Cookie",
+	"Set-Cookie",
+	"X-Api-Key",
+	"Api-Key",
+	"X-Auth-Token",
+	"X-Amz-Security-Token",
+	"Private-Token",
+}
+
+// credentialHeaderRe matches "<Header-Name>: <rest of line>", case-insensitively and per line.
+var credentialHeaderRe = regexp.MustCompile(`(?im)^(` + strings.Join(credentialHeaders, "|") + `):[ \t]*.*$`)
+
 func redact(b []byte, values []string) []byte {
 	for _, v := range values {
 		if v == "" {
@@ -1019,6 +1045,9 @@ func redact(b []byte, values []string) []byte {
 		}
 		b = bytes.ReplaceAll(b, []byte(v), []byte("***REDACTED***"))
 	}
+	// Then by header name. Value-based redaction above still matters: it reaches secrets in a BODY,
+	// which no header rule can.
+	b = credentialHeaderRe.ReplaceAll(b, []byte("$1: ***REDACTED***"))
 	return b
 }
 
