@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-09-30T00:00:00Z
+timestamp: 2026-10-01T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,46 @@ timestamp: 2026-09-30T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-01 — 0.25.1
+
+A patch: chart knobs for placing `oasgen-render` behind a platform naming convention, and the
+memory ceiling that asking for them exposed. Nothing in the controller changes.
+
+- **The render service had no memory ceiling and accepted 32 MiB of untrusted OpenAPI** — a
+  combination that could not work. Asked to size a limit for a 32 MiB document, we measured what
+  rendering costs rather than guessing: parsing and rendering holds roughly **29x the document size
+  as live heap** at peak (35 KiB → 8 MiB, 1.3 MiB → 46 MiB, 3.1 MiB → 90 MiB).
+
+  At 32 MiB that is ~930 MiB for a single request. So the cap and any sane container limit were
+  mutually inconsistent: the service accepted bodies it could not render without being OOM-killed,
+  and on a shared node a pathological document could take neighbours with it. Adding a limit alone
+  would have converted unbounded growth into a hard kill rather than fixing anything.
+
+  Both ends moved. `OASGEN_RENDER_MAX_BODY_BYTES` defaults to **4 MiB** instead of 32 MiB, and
+  `render.resources` now ships 100m/128Mi requests and 500m/512Mi limits. 4 MiB covers every real
+  document we have seen and sits at ~116 MiB live heap; the one known consumer sends ~0.6 MiB. The
+  two numbers are documented as coupled, because raising the cap alone restores the inconsistency.
+
+  The asymmetry with the manager's `resources: {}` is deliberate: the manager parses documents the
+  platform put in a ConfigMap, while `/render` parses whatever any caller in the cluster sends it.
+
+- **`render.fullnameOverride`** names the render Deployment, Service and selector labels, so a
+  platform can impose its own naming without forking the chart. Unset, every existing name is
+  unchanged. Note that a Deployment's `spec.selector` is immutable: setting or changing this on a
+  release that is ALREADY running the render pod fails the upgrade and the Deployment must be
+  deleted first.
+
+- **`render.snowplowEndpoint.{enabled,name}`** creates a Secret whose `server-url` points at the
+  render Service, so a consumer reads the address from one place rather than having the same host
+  spelled out in two charts. The URL is built from the same helpers the Service uses, so a rename
+  or a port change moves both together.
+
+- **`render.CRDs` is now pinned by a golden file.** It had no guard: the existing parity test
+  compares the `/render` surface against the controller's apply path, but both call `render.CRDs`,
+  so a change to it moved both sides identically and the test stayed green. That function is the
+  generation half of every RestDefinition reconcile, so a silent change to it changes the CRDs
+  served to users.
 
 ## 2026-09-30 — 0.25.0
 
