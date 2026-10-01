@@ -22,7 +22,31 @@ import (
 
 // DefaultMaxBodyBytes bounds a /render request. Real OAS documents range from a few KB (KOG specs) to a
 // few MB (a vendor's full API description); the bound is there to refuse a runaway body, not to ration.
-const DefaultMaxBodyBytes int64 = 32 << 20
+//
+// 4 MiB, not the 32 MiB this started at, and the two numbers that matter are MEASURED rather than guessed.
+// Parsing and rendering allocates ~97x the document size and holds ~29x of it live at peak:
+//
+//	input      allocated   live heap
+//	  35 KiB     9.6 MiB     8.3 MiB
+//	 349 KiB      37 MiB      15 MiB
+//	 1.3 MiB     124 MiB      46 MiB
+//	 3.1 MiB     300 MiB      90 MiB
+//
+// At 32 MiB that extrapolates to roughly 930 MiB of live heap for a SINGLE request -- so the old cap and
+// any sane container memory limit were mutually inconsistent: the service accepted bodies it could not
+// render without being OOM-killed, and on a shared node a pathological spec could take neighbours with it.
+//
+// 4 MiB covers every real document we have seen (GitHub's full public OAS is the largest at a few MB) and
+// sits at ~116 MiB live heap, comfortably inside the chart's 512Mi default limit.
+//
+// The known consumer confirms the headroom is real rather than hopeful. The Controller Builder posts a
+// draft.json built from a draft tree its frontend caps at 512 KiB -- oversized specs are trimmed to the
+// mapped paths before being held -- so a live render body is about 0.6 MiB at most, roughly a sixth of
+// this. (Its 8 MiB limit applies to the raw spec at import, before trimming, and never reaches /render.)
+//
+// THESE TWO NUMBERS ARE COUPLED. Raising this cap without raising helm/oasgen-provider/values.yaml's
+// render.resources.limits.memory re-creates exactly the inconsistency it was lowered to remove.
+const DefaultMaxBodyBytes int64 = 4 << 20
 
 // Severities of a Problem. An "error" is something the controller refuses on: it would apply nothing for
 // that RestDefinition. A "warning" is something it logs and applies anyway, surfaced here because an author

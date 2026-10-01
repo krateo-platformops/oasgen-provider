@@ -88,3 +88,22 @@ spec:
       targetPort: http
       protocol: TCP
 {{- end }}
+{{- if and .Values.render.enabled .Values.render.snowplowEndpoint.enabled }}
+---
+# The render Service's address, published as a Secret so a consumer reads it from one place rather than
+# having the same host spelled out in two charts. Mirrors what helm-render-service does for the blueprint
+# renderer, so both renderers are discovered the same way.
+#
+# The URL is built from the SAME helpers the Service above uses, so a render.fullnameOverride or a changed
+# render.service.port moves both together. That is the whole point: the failure this prevents is a Secret
+# that keeps pointing at the old name after someone renames the Service.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.render.snowplowEndpoint.name }}
+  labels:
+    {{- include "oasgen-provider.render.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  server-url: {{ printf "http://%s.%s.svc:%v" (include "oasgen-provider.render.fullname" .) .Release.Namespace .Values.render.service.port | quote }}
+{{- end }}
