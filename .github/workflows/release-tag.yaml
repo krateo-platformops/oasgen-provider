@@ -41,3 +41,8 @@ jobs:
       packages: write
     with:
       modules: '[{"mod":"oasgen-provider","context":"go/oasgen-provider"},{"mod":"rest-dynamic-controller","context":"go/rest-dynamic-controller"}]'
+      # Stamp the build into the binary. Without this every published image reports an empty
+      # service.version, the collector falls back to the chart label, and an incident cannot be
+      # attributed to a commit (#127). Both Dockerfiles consume BUILD_VERSION via -ldflags.
+      build_args: |
+        BUILD_VERSION=${{ github.ref_name }}-${{ github.sha }}

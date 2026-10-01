@@ -3,8 +3,9 @@ name: security
 on:
   push:
     branches: [main]
+  # No base filter: a PR stacked on another branch used to run no scans at all while showing green.
+  # See the note in release-pullrequest.yaml and #149.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read

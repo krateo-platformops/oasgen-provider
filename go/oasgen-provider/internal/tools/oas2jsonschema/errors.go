@@ -73,6 +73,17 @@ type SchemaGenerationError struct {
 }
 
 func (e SchemaGenerationError) Error() string {
+	// Path is optional and, as it happens, usually absent: eleven of the thirteen emitters in this package
+	// set only Code and Message. The old unconditional format rendered those as
+	//
+	//	generation error at : status field 'metadata.tags' not found in response, defaulting to string
+	//
+	// which reads as a missing format argument -- a reader's first thought is that the warning itself is
+	// broken, which is a poor way to introduce a warning whose whole job is to be believed. Omit the
+	// clause instead of printing an empty location.
+	if e.Path == "" {
+		return fmt.Sprintf("generation error: %s", e.Message)
+	}
 	return fmt.Sprintf("generation error at %s: %s", e.Path, e.Message)
 }
 

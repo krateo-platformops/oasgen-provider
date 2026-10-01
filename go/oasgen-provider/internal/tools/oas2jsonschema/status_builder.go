@@ -56,7 +56,7 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 	for _, fieldName := range allStatusFields {
 		pathSegments, err := pathparsing.ParsePath(fieldName)
 		if err != nil {
-			warnings = append(warnings, SchemaGenerationError{Code: CodeFieldNotFound, Message: fmt.Sprintf("invalid path format for status field '%s': %v", fieldName, err)})
+			warnings = append(warnings, SchemaGenerationError{Path: statusFieldPath(fieldName), Code: CodeFieldNotFound, Message: fmt.Sprintf("invalid path format for status field '%s': %v", fieldName, err)})
 			continue
 		}
 		leaf := pathSegments[len(pathSegments)-1]
@@ -66,7 +66,7 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 		if m, ok := respMappings[fieldName]; ok {
 			if m.ValueMappingType == "jq" {
 				// A jq transform's output type is not statically analyzable: default to string.
-				warnings = append(warnings, SchemaGenerationError{Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' is produced by a jq value transform (inResponse '%s'); type is not statically known, defaulting to string", fieldName, m.InResponse)})
+				warnings = append(warnings, SchemaGenerationError{Path: statusFieldPath(fieldName), Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' is produced by a jq value transform (inResponse '%s'); type is not statically known, defaulting to string", fieldName, m.InResponse)})
 				g.addPropertyByPath(statusSchema, pathSegments, Property{Name: leaf, Schema: &Schema{Type: []string{"string"}}})
 				continue
 			}
@@ -84,7 +84,7 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 				}
 			}
 			// Mapping declared but its source path is unresolvable: warn and fall back to string.
-			warnings = append(warnings, SchemaGenerationError{Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' maps from response path '%s' which was not found, defaulting to string", fieldName, m.InResponse)})
+			warnings = append(warnings, SchemaGenerationError{Path: statusFieldPath(fieldName), Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' maps from response path '%s' which was not found, defaulting to string", fieldName, m.InResponse)})
 			g.addPropertyByPath(statusSchema, pathSegments, Property{Name: leaf, Schema: &Schema{Type: []string{"string"}}})
 			continue
 		}
@@ -96,7 +96,7 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 			g.addPropertyByPath(statusSchema, pathSegments, foundProp)
 		} else {
 			// Fallback for fields not found in the response schema.
-			warnings = append(warnings, SchemaGenerationError{Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' not found in response, defaulting to string", fieldName)})
+			warnings = append(warnings, SchemaGenerationError{Path: statusFieldPath(fieldName), Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' not found in response, defaulting to string", fieldName)})
 			fallbackProp := Property{Name: leaf, Schema: &Schema{Type: []string{"string"}}} // Fallback to string type
 			g.addPropertyByPath(statusSchema, pathSegments, fallbackProp)
 		}
@@ -233,4 +233,11 @@ func (g *OASSchemaGenerator) addPropertyByPathRec(ctx context.Context, schema *S
 
 	// Recurse into the next level.
 	g.addPropertyByPathRec(ctx, nextSchema, remainingPath, propToAdd, guard, depth+1)
+}
+
+// statusFieldPath names where a status-field warning came from, so the rendered message locates itself.
+// These warnings are read by someone holding a RestDefinition, and "identifiers or additionalStatusFields,
+// entry <name>" is the coordinate they can act on.
+func statusFieldPath(fieldName string) string {
+	return "additionalStatusFields." + fieldName
 }

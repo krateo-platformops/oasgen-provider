@@ -242,6 +242,12 @@ type VerbsDescription struct {
 	// Pagination defines the pagination strategy for 'findby' actions. To be set only for 'findby' actions.
 	// If not set, no pagination will be used.
 	Pagination *Pagination `json:"pagination,omitempty"`
+	// ItemsPath names the property holding the collection for an ENVELOPE findby response, e.g. ".values".
+	//
+	// MIRRORS oasgen-provider's types.go. The generator uses it to find the item SCHEMA; this side uses it
+	// to find the item DATA. A field present in only one of the two is silently dropped rather than
+	// rejected, and here that would mean the CRD describes one list while the controller searches another.
+	ItemsPath string `json:"itemsPath,omitempty"`
 	// SuccessCodes lists additional HTTP status codes treated as success for this verb, merged with the
 	// OAS-declared 2xx codes.
 	SuccessCodes []int `json:"successCodes,omitempty"`

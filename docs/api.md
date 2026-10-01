@@ -9,7 +9,8 @@ timestamp: 2026-09-22T00:00:00Z
 
 # API
 
-oasgen-provider exposes no HTTP API. Its contract is the **`RestDefinition` CRD**
+The controller exposes no HTTP API (the optional preview service, oasgen-render, is described
+at the end of this page). Its contract is the **`RestDefinition` CRD**
 (`ogen.krateo.io/v1alpha1`, namespaced, categories `krateo`/`restdefinition`/`core`) plus
 the CRDs it generates from it. Sources of truth:
 
@@ -243,3 +244,47 @@ attributable per dynamic CR type.
 `additionalProperties` is supported in **both** the boolean form and the object form
 (typed free-form maps like `additionalProperties: {type: string}` are carried through to
 the generated schema). This list may not be exhaustive.
+
+## Preview: oasgen-render
+
+`oasgen-render` renders RestDefinitions to the CRDs the controller would apply, **without
+applying anything and without reading the cluster**. It runs the controller's own generation
+code (`internal/tools/render`), ships in the provider image as `/bin/oasgen-render`, and is
+deployed as a ClusterIP Service by the provider chart when `render.enabled=true`. The pod
+mounts no ServiceAccount token.
+
+`POST /render`:
+
+```json
+{
+  "restDefinitions": [ { "apiVersion": "ogen.krateo.io/v1alpha1", "kind": "RestDefinition", "metadata": {"name": "gh-repo", "namespace": "gh-system"}, "spec": { "oasPath": "configmap://gh-system/repo/repo.yaml", "...": "..." } } ],
+  "oas": { "configmap://gh-system/repo/repo.yaml": "<the OAS document text>" }
+}
+```
+
+`oas` is keyed by `spec.oasPath` spelled exactly as the RestDefinition spells it; nothing
+is fetched. The reply (HTTP 200 whenever the request itself is well-formed):
+
+```json
+{
+  "crds": [ <CustomResourceDefinition> ],
+  "configurationCrds": [ <CustomResourceDefinition> ],
+  "errors": [ { "restDefinition": "gh-system/gh-repo", "field": "spec.resource.verbsDescription[0].async.poll.path", "message": "...", "severity": "error" } ],
+  "skippedSecuritySchemes": [ { "restDefinition": "gh-system/gh-repo", "scheme": "oauth (type: oauth2, in: )" } ]
+}
+```
+
+- Each CRD is what the controller creates on a cluster where it does not exist yet (owner
+  annotation and `VERSION` column included). Against an existing CRD the controller merges
+  versions instead; the preview does not model that.
+- `severity: "error"` means the controller would apply nothing for that RestDefinition
+  (a missing or unparseable document, an async poll path violating the RDC contract, a
+  mixed `*` wildcard, a fatal generation error, two RestDefinitions generating one CRD);
+  it contributes no CRDs. `severity: "warning"` is what the controller logs and applies
+  anyway: `ValidateSchemas` and generator findings, and a document whose only security
+  schemes are unsupported.
+- `restDefinition` is `<namespace>/<name>`, or `restDefinitions[<i>]` when unnamed.
+- RestDefinition admission (the CRD's OpenAPI and CEL rules) is not evaluated.
+
+`GET /healthz` returns `ok`. Limits: request body `OASGEN_RENDER_MAX_BODY_BYTES` (default
+32 MiB, 413 beyond); listen address `OASGEN_RENDER_ADDR` (default `:8081`).

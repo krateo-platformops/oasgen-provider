@@ -399,12 +399,29 @@ func (u *UnstructuredClient) RequestedParams(httpMethod string, path string) (pa
 
 // BuildClient is a function that builds partial client from a swagger file.
 func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath string) (*UnstructuredClient, error) {
-	basePath := "/tmp/rest-dynamic-controller"
-	err := os.MkdirAll(basePath, 0755)
-	defer os.RemoveAll(basePath)
+	// A PRIVATE directory per call. This used to be the fixed, shared path
+	// "/tmp/rest-dynamic-controller", created here and removed by `defer os.RemoveAll(basePath)` -- which
+	// deletes the WHOLE directory, including files other in-flight calls are still using.
+	//
+	// BuildClient runs once per reconcile, from four sites in restResources.go, and the controller runs
+	// REST_CONTROLLER_WORKERS (default 5) of them concurrently. So worker A returning deleted the directory
+	// out from under worker B between its MkdirAll and its write, and B failed with
+	//
+	//	failed to download file: creating destination file:
+	//	open /tmp/rest-dynamic-controller/<doc>.yaml: no such file or directory
+	//
+	// Being a race, its rate tracked concurrency rather than correctness: staggered by the 3-minute resync
+	// it almost never fired, and after a pod restart -- when every CR of the kind reconciles at once -- it
+	// fired constantly. That is how it survived unnoticed and then looked like a regression in a release
+	// that had not touched this module at all.
+	//
+	// MkdirTemp gives each call its own directory, so a concurrent call has nothing to delete that is ours.
+	// Keep it that way: any shared parent that gets RemoveAll'd reintroduces exactly this.
+	basePath, err := os.MkdirTemp("", "rest-dynamic-controller-")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
+	defer os.RemoveAll(basePath)
 
 	fgetter := &fgetter.Filegetter{
 		Client:     &http.Client{},

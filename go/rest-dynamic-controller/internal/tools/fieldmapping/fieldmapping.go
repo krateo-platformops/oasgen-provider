@@ -385,3 +385,13 @@ func ScalarForURL(val interface{}, what string) (string, error) {
 			"a jq program feeding a path or query parameter must return a scalar", what, val)
 	}
 }
+
+// HasResponseTransforms reports whether any of the named actions declares a whole-document
+// responseTransform or a response-direction fieldMapping entry.
+//
+// It exists so a caller can skip work that NormalizeResponseBody would treat as a no-op anyway. That
+// matters for findby, which normalizes EVERY item of a page before matching (#145): without this check
+// each item would be deep-copied for a transform that was never declared, on kinds that need none of it.
+func HasResponseTransforms(verbs []getter.VerbsDescription, actions []string) bool {
+	return len(documentResponseTransforms(verbs, actions)) > 0 || len(responseEntries(verbs, actions)) > 0
+}
