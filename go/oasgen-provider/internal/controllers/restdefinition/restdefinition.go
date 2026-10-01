@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/crd"
+	"github.com/krateo-platformops/oasgen-provider/internal/tools/crd/generation"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/deployment"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/filegetter"
@@ -614,8 +615,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 			Namespace: cr.Namespace,
 			Name:      cr.Name,
 		},
-		GVR: gvr,
-		Log: e.log.Debug,
+		GVR:           gvr,
+		Log:           e.log.Debug,
+		LabelSelector: e.versionSelectorFor(ctx, gvr, gvk.Version),
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
@@ -673,6 +675,16 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 // ApplyOrUpdateCRD (create when absent, or in-place schema replace of the current version). It is shared by
 // Create (first install) and Update (regenerate when the OAS content changed), so an edited OAS is reflected
 // in the CRD. The rendering half is the same code the oasgen-render preview service runs.
+// versionSelectorFor computes the label selector the controller for gvk.Version must watch with, reading
+// the live CRD so the answer reflects every version actually served right now.
+//
+// Returns "" (watch everything) when the CRD cannot be read or serves only this version. That default is
+// deliberate: a controller that watches nothing is silently useless, whereas one that watches too much is
+// at worst doing the pre-coexistence thing it did before this existed.
+func (e *external) versionSelectorFor(_ context.Context, _ schema.GroupVersionResource, version string) string {
+	return generation.VersionSelector(version)
+}
+
 func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, doc oas2jsonschema.OASDocument, hasSecuritySchemes bool) (err error) {
 	rendered, err := render.CRDs(ctx, cr, gvk, doc, hasSecuritySchemes)
 	if err != nil {
@@ -797,8 +809,9 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 			Namespace: cr.Namespace,
 			Name:      cr.Name,
 		},
-		GVR: gvr,
-		Log: e.log.Debug,
+		GVR:           gvr,
+		Log:           e.log.Debug,
+		LabelSelector: e.versionSelectorFor(ctx, gvr, gvk.Version),
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {

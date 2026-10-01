@@ -222,3 +222,46 @@ func GVKExists(crd *apiextensionsv1.CustomResourceDefinition, gvk schema.GroupVe
 	}
 	return false
 }
+
+// ServedVersions returns the served version names of crd, excluding the non-served vacuum store.
+func ServedVersions(crd *apiextensionsv1.CustomResourceDefinition) []string {
+	if crd == nil {
+		return nil
+	}
+	out := make([]string, 0, len(crd.Spec.Versions))
+	for _, v := range crd.Spec.Versions {
+		if v.Name == VacuumVersionName || !v.Served {
+			continue
+		}
+		out = append(out, v.Name)
+	}
+	return out
+}
+
+// VersionSelector is the label selector the controller for `version` watches with.
+//
+// EXACT equality, for every version including the newest -- symmetric with composition-dynamic-controller,
+// which builds the same requirement with selection.Equals and has no notion of a "current" version at all.
+//
+// The symmetry is load-bearing, not cosmetic. An exact selector is a constant function of the controller's
+// OWN version, so it can never go stale: whatever else happens to the CRD, a controller deployed for v27
+// watches v27's instances and nothing else. An earlier attempt here gave the newest version a set-based
+// `notin (every other served version)` so it would also pick up unlabelled instances -- and that selector
+// silently went WRONG the moment another version was appended, because the older Deployment kept the
+// selector it was created with and started claiming the newer version's instances too. Measured:
+//
+//	v27 deployed with "notin (v26)"; v28 appended; a v28-labelled instance then matched BOTH controllers.
+//
+// Exactly the double-reconciliation the per-version model exists to prevent, reintroduced by the thing
+// meant to improve it.
+//
+// Instances that carry no label are not this function's problem. They are labelled by the oas-version
+// MutatingAdmissionPolicy at admission, and swept by the provider for anything that predates it -- the
+// same division of labour core-provider uses, where the manager stamps and the per-version controller
+// only ever selects.
+func VersionSelector(version string) string {
+	if version == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s=%s", VersionLabel, version)
+}
