@@ -22,6 +22,8 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
@@ -38,7 +40,7 @@ const (
 	reasonDeleted event.Reason = "ResourceDeleted"
 )
 
-func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool) controller.ExternalClient {
+func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool, version string) controller.ExternalClient {
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		log.Error(err, "Creating dynamic client.")
@@ -62,6 +64,7 @@ func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, plurali
 		// when an API-backed recorder is not wired in (e.g. in tests). main.go
 		// injects the real recorder via SetEventRecorder.
 		eventRecorder: event.NewNopRecorder(),
+		version:       version,
 	}
 }
 
@@ -80,6 +83,9 @@ type handler struct {
 	// self-provisioning secretRef RBAC (issue #31). main.go hard-fails at startup if it is unset, so by
 	// the time Create/Update/Delete run it is always populated.
 	selfServiceAccount types.NamespacedName
+	// version is the served CRD version this controller was started for (-version). It is stamped onto
+	// instances that reach it without a krateo.io/oas-version label.
+	version string
 }
 
 // SetEventRecorder wires a Kubernetes Event recorder used to emit Events on the
@@ -102,6 +108,91 @@ func (h *handler) SetSnowplowClient(c *snowplow.Client) {
 // subject when self-provisioning secretRef RBAC (issue #31).
 func (h *handler) SetSelfServiceAccount(sa types.NamespacedName) {
 	h.selfServiceAccount = sa
+}
+
+// VersionLabel records which served CRD version an instance belongs to.
+//
+// MIRRORS oasgen-provider's crd/generation.VersionLabel, and the two must stay identical: that module
+// generates the CRD whose printer column reads this label and whose pruning decides what to retire by it,
+// while this module stamps and (from the per-version watch) selects on it. A rename on one side alone
+// would silently stop both from meaning the same thing.
+const VersionLabel = "krateo.io/oas-version"
+
+// needsVersionLabel reports whether mg is missing the version label this controller would stamp.
+//
+// Only an ABSENCE is filled. An instance that already names a version is left alone: the label says which
+// version owns the object, and a controller rewriting it would be migrating the instance, which is a
+// deliberate act (core-provider gates the equivalent behind upgradePolicy) and not something to do as a
+// side effect of observing.
+func (h *handler) needsVersionLabel(mg *unstructured.Unstructured) bool {
+	if mg == nil || h.version == "" {
+		return false
+	}
+	return mg.GetLabels()[VersionLabel] == ""
+}
+
+// ensureVersionLabel stamps VersionLabel when the instance carries none.
+//
+// It issues a MERGE PATCH on just that label rather than writing the whole object, and that is the whole
+// design. The first attempt set the label on mg and let the existing tools.Update persist it -- no extra
+// API call, which seemed economical. But a full-object Update carries the read's resourceVersion as a
+// precondition, so adding a write where there had been none made every first reconcile race anything else
+// touching the object:
+//
+//	Operation cannot be fulfilled on samples.sample.krateo.io "sample-async-1":
+//	the object has been modified; please apply your changes to the latest version
+//
+// A merge patch names only the path it sets and carries no resourceVersion, so it cannot conflict -- the
+// same reason the admission policy that normally does this uses a JSON Patch rather than a structured
+// merge.
+//
+// A failure here does NOT fail the reconcile. The label records which version owns the instance; it is not
+// a precondition for observing one. It is logged rather than swallowed, because an instance that never
+// gets labelled is invisible to per-version listing, and the next reconcile retries.
+// It writes the new resourceVersion and labels back THROUGH THE POINTER rather than returning a new
+// object, and that detail is the whole of what took three attempts to get right. A server-side patch bumps
+// resourceVersion, so every copy of the object held anywhere becomes stale the instant this succeeds. The
+// symptom is always the same line --
+//
+//	Operation cannot be fulfilled on ...: the object has been modified
+//
+// -- but it moved each time the mechanism was "fixed":
+//
+//  1. piggy-backing the label onto the existing whole-object Update: that write carries a resourceVersion
+//     precondition, so it raced anything else touching the object;
+//  2. patching and discarding the result: the patch itself cannot conflict, but Observe's own later
+//     UpdateStatus calls were then working from a stale mg;
+//  3. patching and REBINDING a local variable: fixed Observe's later writes, but the CALLER still held the
+//     object it passed in, so its next write conflicted instead.
+//
+// The caller's object is replaced WHOLESALE with the patch response, not merely given the new
+// resourceVersion and labels. Copying those two fields back was tried and was not enough: the subsequent
+// tools.Update then still sent something the apiserver treated as a change, bumping the version again
+// behind the caller's back. Taking the server's own representation leaves nothing to diverge.
+//
+// Safe here specifically because this runs at the TOP of Observe, where mg is the object the caller just
+// fetched and has not yet modified. It would not be safe later in the reconcile.
+func (h *handler) ensureVersionLabel(ctx context.Context, mg *unstructured.Unstructured, log logging.Logger) {
+	if !h.needsVersionLabel(mg) {
+		return
+	}
+	gvr, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
+	if err != nil {
+		log.Error(err, "Resolving GVR to stamp the oas-version label", "version", h.version)
+		return
+	}
+	patch := []byte(fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, VersionLabel, h.version))
+	patched, perr := h.dynamicClient.Resource(gvr).Namespace(mg.GetNamespace()).
+		Patch(ctx, mg.GetName(), types.MergePatchType, patch, metav1.PatchOptions{})
+	if perr != nil {
+		if apierrors.IsNotFound(perr) {
+			return // the instance went away mid-reconcile; nothing to label
+		}
+		log.Error(perr, "Stamping the oas-version label", "version", h.version)
+		return
+	}
+	*mg = *patched
+	log.Debug("Stamped the oas-version label", "version", h.version)
 }
 
 func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (controller.ExternalObservation, error) {
@@ -127,6 +218,14 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		log.Error(fmt.Errorf("swagger info is nil"), "Getting REST client info")
 		return controller.ExternalObservation{}, fmt.Errorf("swagger info is nil")
 	}
+	// Record which served version this instance belongs to, if nothing has yet.
+	//
+	// BEFORE the Update below, and that ordering is load-bearing: tools.Update REBINDS mg to the object it
+	// returns, so anything done after it writes into a local copy and never reaches the caller's object.
+	// The caller goes on using what it passed in -- the integration test does Get -> Observe -> Create on
+	// one object -- so a resourceVersion bump it never sees makes its next write fail.
+	h.ensureVersionLabel(ctx, mg, log)
+
 	mg, err = tools.Update(ctx, mg, tools.UpdateOptions{
 		Pluralizer:    h.pluralizer,
 		DynamicClient: h.dynamicClient,

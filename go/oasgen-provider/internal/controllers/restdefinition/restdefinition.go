@@ -45,6 +45,7 @@ import (
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/oas2jsonschema"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/objects"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/plurals"
+	"github.com/krateo-platformops/oasgen-provider/internal/tools/policy"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/render"
 	"github.com/krateo-platformops/provider-runtime/pkg/reconciler"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
@@ -706,6 +707,17 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 			e.rec.Eventf(cr, corev1.EventTypeWarning, "NoAuthenticationGenerated",
 				"the OAS document declares only unsupported security scheme(s) (%s), so the generated Configuration CRD has no authentication field and every request will be unauthenticated", schemes)
 		}
+	}
+
+	// Ensure the version-stamping policy BEFORE the CRD exists, because the CRD is what makes instances
+	// writable: once it is served, an instance can be created, and one admitted without the
+	// krateo.io/oas-version label is invisible to its version's controller. Ordering this after the apply
+	// would leave a window where that is possible.
+	//
+	// Not fatal on a cluster without the MutatingAdmissionPolicy API (< 1.36, which the chart's 1.33 floor
+	// permits): rest-dynamic-controller stamps the label itself on first reconcile.
+	if perr := policy.EnsureVersionPolicy(ctx, e.kube, cr.Spec.ResourceGroup); perr != nil {
+		return fmt.Errorf("ensuring the oas-version policy for group %q: %w", cr.Spec.ResourceGroup, perr)
 	}
 
 	e.log.Debug("Applying CRD", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)

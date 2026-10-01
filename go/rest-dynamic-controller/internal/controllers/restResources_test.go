@@ -359,7 +359,7 @@ func TestController(t *testing.T) {
 				log.Debug("Creating chart url info getter.", "error", err)
 			}
 
-			handler = NewHandler(cfg.Client().RESTConfig(), log, swg, pluralizer, true)
+			handler = NewHandler(cfg.Client().RESTConfig(), log, swg, pluralizer, true, "v1alpha1")
 
 			return ctx
 		}).

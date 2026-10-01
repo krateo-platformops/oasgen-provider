@@ -10,6 +10,25 @@ rules:
   - restdefinitions/status
   verbs:
   - '*'
+# The oas-version MutatingAdmissionPolicy. oasgen-provider hosts no admission webhooks: the
+# krateo.io/oas-version label that multi-version coexistence depends on is stamped in the apiserver,
+# and the provider creates one policy per generated API group.
+#
+# create+get only: the policy is a per-group singleton, created if absent and never rewritten, so it
+# cannot fight another field manager (e.g. a chart that ships its own).
+#
+# Absent on clusters below Kubernetes 1.36, where the API does not exist. That is tolerated rather than
+# required -- rest-dynamic-controller stamps the label itself on first reconcile.
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - mutatingadmissionpolicies
+  - mutatingadmissionpolicybindings
+  verbs:
+  - create
+  - get
+  - list
+  - watch
 - apiGroups:
   - apiextensions.k8s.io
   resources:
