@@ -66,7 +66,8 @@ const (
 	// build predating SpecHashAnnotation. It still stamps, so it is not an error -- but it is not what
 	// this build would write, and it will never be updated in place.
 	OutcomeStale
-	// OutcomeUnsupported means the cluster does not serve the MutatingAdmissionPolicy API (< 1.36).
+	// OutcomeUnsupported is retained so the String() switch stays total, but EnsureVersionPolicy no
+	// longer returns it: an absent API is now ErrPolicyAPIUnsupported. See that type.
 	OutcomeUnsupported
 )
 
@@ -107,6 +108,33 @@ func (e *ErrPolicyGroupMismatch) Error() string {
 		"policy %q already exists for API group(s) %v, not %q: these groups differ only by characters the policy name collapses, so they cannot both be stamped; rename one group",
 		e.Policy, e.Got, e.Want)
 }
+
+// ErrPolicyAPIUnsupported is returned when the cluster does not serve MutatingAdmissionPolicy.
+//
+// This USED to be tolerated: the chart's floor was 1.33, the API arrives in 1.36, and
+// rest-dynamic-controller stamped the label itself on first reconcile, so an absent API only meant the
+// label arrived later than admission.
+//
+// Version-scoped watching removes that fallback. A controller watching with exact equality on
+// krateo.io/oas-version never observes an unlabelled instance, so it never stamps one either -- the
+// instance is created, looks healthy, and is reconciled by nobody. There is no longer any mechanism that
+// covers an absent policy, which is why this is an error rather than a tolerated state, and why the chart
+// floor moved to 1.36 in the same change.
+//
+// Symmetric with core-provider, which states the same requirement outright: the composition-version label
+// is stamped by a MutatingAdmissionPolicy that must exist in every cluster a composition CRD lives in.
+type ErrPolicyAPIUnsupported struct {
+	Group string
+	Err   error
+}
+
+func (e *ErrPolicyAPIUnsupported) Error() string {
+	return fmt.Sprintf(
+		"this cluster does not serve MutatingAdmissionPolicy, which Kubernetes 1.36+ provides and version-scoped watching requires: instances in API group %q would be admitted without the %s label and then matched by no controller's watch (%v)",
+		e.Group, VersionLabel, e.Err)
+}
+
+func (e *ErrPolicyAPIUnsupported) Unwrap() error { return e.Err }
 
 // nonAlphaNum matches every run of characters a Kubernetes object name may not contain.
 var nonAlphaNum = regexp.MustCompile(`[^a-z0-9]+`)
@@ -257,8 +285,7 @@ func EnsureVersionPolicy(ctx context.Context, kube client.Client, group string) 
 	case err == nil:
 		created = true
 	case IsUnsupported(err):
-		// Pre-1.36 cluster. RDC's own stamping covers it.
-		return OutcomeUnsupported, nil
+		return OutcomeUnknown, &ErrPolicyAPIUnsupported{Group: group, Err: err}
 	case !apierrors.IsAlreadyExists(err):
 		return OutcomeUnknown, fmt.Errorf("creating %s %q: %w", p.GetKind(), p.GetName(), err)
 	}
@@ -274,7 +301,7 @@ func EnsureVersionPolicy(ctx context.Context, kube client.Client, group string) 
 		cur.SetKind("MutatingAdmissionPolicy")
 		if err := kube.Get(ctx, client.ObjectKey{Name: p.GetName()}, cur); err != nil {
 			if IsUnsupported(err) {
-				return OutcomeUnsupported, nil
+				return OutcomeUnknown, &ErrPolicyAPIUnsupported{Group: group, Err: err}
 			}
 			return OutcomeUnknown, fmt.Errorf("reading the existing policy %q: %w", p.GetName(), err)
 		}
@@ -294,7 +321,7 @@ func EnsureVersionPolicy(ctx context.Context, kube client.Client, group string) 
 	// nothing while looking present.
 	if err := kube.Create(ctx, b); err != nil {
 		if IsUnsupported(err) {
-			return OutcomeUnsupported, nil
+			return OutcomeUnknown, &ErrPolicyAPIUnsupported{Group: group, Err: err}
 		}
 		if !apierrors.IsAlreadyExists(err) {
 			return OutcomeUnknown, fmt.Errorf("creating %s %q: %w", b.GetKind(), b.GetName(), err)

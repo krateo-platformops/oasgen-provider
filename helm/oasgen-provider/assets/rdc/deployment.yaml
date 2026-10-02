@@ -40,6 +40,12 @@ spec:
             - -group={{ "{{" }} .apiGroup {{ "}}" }}
             - -version={{ "{{" }} .apiVersion {{ "}}" }}
             - -resource={{ "{{" }} .resource {{ "}}" }} 
+            {{ "{{" }}- if .labelSelector {{ "}}" }}
+            # Scopes this controller to the instances its version owns. Every served version runs its own
+            # controller and every served endpoint returns every object, so the apiVersion cannot separate
+            # them -- the krateo.io/oas-version label does.
+            - -label-selector={{ "{{" }} .labelSelector {{ "}}" }}
+            {{ "{{" }}- end {{ "}}" }}
             {{/* - -namespace={{ "{{" }} .namespace {{ "}}" }} # Leave empty to watch all namespaces */}}
           ports:
             - name: http

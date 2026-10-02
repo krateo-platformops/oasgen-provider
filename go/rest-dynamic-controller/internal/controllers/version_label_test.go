@@ -21,52 +21,43 @@ func instance(labels map[string]string) *unstructured.Unstructured {
 	return u
 }
 
-// TestNeedsVersionLabelFillsOnlyAnAbsence pins the stamping rule.
+// This file used to test needsVersionLabel/ensureVersionLabel, the fallback that stamped the version
+// label at the top of Observe when an instance carried none. Both are gone, so the tests that pinned
+// their behaviour are gone with them.
 //
-// The label records which served CRD version an instance belongs to. It is normally written in the
-// apiserver by the oas-version MutatingAdmissionPolicy, which is GA only from Kubernetes 1.36 while the
-// chart's floor is 1.33 — so on 1.33–1.35 nothing would ever write it, and per-version reconciliation and
-// version pruning both read it.
+// They were removed rather than kept-and-skipped because the behaviour they protected is now impossible
+// to reach, not merely unused: under version-scoped watching the selector is exact equality on
+// VersionLabel, so an unlabelled instance matches no watch and is never delivered to Observe. A test
+// asserting "an unlabelled instance gets stamped here" would pass against code that can never run.
 //
-// The rule is deliberately narrow: fill an absence, never move an existing value. Rewriting it would be
-// migrating the instance onto another version, which is a deliberate act (core-provider gates the
-// equivalent behind upgradePolicy) and must not happen as a side effect of observing.
-func TestNeedsVersionLabelFillsOnlyAnAbsence(t *testing.T) {
-	t.Run("no labels at all", func(t *testing.T) {
-		h := &handler{version: "v1-0-28"}
-		mg := instance(nil)
-		assert.True(t, h.needsVersionLabel(mg))
-	})
+// What covers that case now, and where it is tested:
+//
+//   - the MutatingAdmissionPolicy stamps at admission -- oasgen-provider, internal/tools/policy
+//   - oasgen-provider backfills instances predating the policy before deploying the version-scoped
+//     controller -- internal/controllers/restdefinition, backfillVersionLabel
+//
+// What remains testable here is the constant itself, which is load-bearing across two repositories.
 
-	t.Run("labels present but no version", func(t *testing.T) {
-		h := &handler{version: "v1-0-28"}
-		mg := instance(map[string]string{"app": "demo"})
-		assert.True(t, h.needsVersionLabel(mg))
-		assert.Equal(t, "demo", mg.GetLabels()["app"], "existing labels must survive")
-	})
+// TestVersionLabelMatchesTheProviderConstant pins the one thing this module still owns.
+//
+// VersionLabel mirrors oasgen-provider's crd/generation.VersionLabel. The provider generates the CRD
+// whose printer column reads this label, backfills it, and renders the selector this controller is
+// started with; this module selects on it. A rename on either side alone would not fail to compile --
+// it would silently produce a controller that watches a label nobody writes, which is a controller that
+// reconciles nothing while reporting healthy.
+func TestVersionLabelMatchesTheProviderConstant(t *testing.T) {
+	assert.Equal(t, "krateo.io/oas-version", VersionLabel,
+		"must stay identical to oasgen-provider's crd/generation.VersionLabel")
+}
 
-	t.Run("an existing version is NEVER moved", func(t *testing.T) {
-		h := &handler{version: "v1-0-28"}
-		mg := instance(map[string]string{VersionLabel: "v1-0-27"})
-		assert.False(t, h.needsVersionLabel(mg),
-			"rewriting this would migrate the instance onto another version as a side effect of observing")
-	})
+// An instance carrying the label is unremarkable; one carrying none is now simply never delivered here.
+// This records that expectation so the helper above keeps a user and the assumption stays written down.
+func TestAnInstanceCarriesTheLabelItWasAdmittedWith(t *testing.T) {
+	mg := instance(map[string]string{VersionLabel: "v1-0-27"})
+	assert.Equal(t, "v1-0-27", mg.GetLabels()[VersionLabel])
 
-	t.Run("empty string counts as absent", func(t *testing.T) {
-		h := &handler{version: "v1-0-28"}
-		mg := instance(map[string]string{VersionLabel: ""})
-		assert.True(t, h.needsVersionLabel(mg))
-	})
-
-	t.Run("a controller with no version of its own stamps nothing", func(t *testing.T) {
-		h := &handler{version: ""}
-		mg := instance(nil)
-		assert.False(t, h.needsVersionLabel(mg),
-			"a controller with no version must stamp nothing: an empty label would read as a version named \"\"")
-	})
-
-	t.Run("nil instance", func(t *testing.T) {
-		h := &handler{version: "v1-0-28"}
-		assert.False(t, h.needsVersionLabel(nil))
-	})
+	// Not stamped here any more: nothing in this package writes the label, by design.
+	unlabelled := instance(nil)
+	assert.Empty(t, unlabelled.GetLabels()[VersionLabel],
+		"this controller no longer stamps; an unlabelled instance never reaches it under an exact selector")
 }
