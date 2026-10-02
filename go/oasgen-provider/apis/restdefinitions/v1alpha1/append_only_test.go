@@ -43,7 +43,7 @@ func TestAdditionalStatusFieldsIsAppendOnly(t *testing.T) {
 	env, err := cel.NewEnv(
 		cel.Variable("self", cel.ListType(cel.StringType)),
 		cel.Variable("oldSelf", cel.ListType(cel.StringType)),
-		// Available in the apiserver's CEL from Kubernetes 1.32, below this chart's 1.33 floor.
+		// Available in the apiserver's CEL from Kubernetes 1.32, below this chart's 1.36 floor.
 		ext.TwoVarComprehensions(),
 	)
 	require.NoError(t, err)

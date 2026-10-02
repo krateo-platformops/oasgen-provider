@@ -650,7 +650,7 @@ type Resource struct {
 	// stored objects or columns -- removing, renaming, reordering, or changing an existing entry.
 	//
 	// The rule is a prefix comparison. `oldSelf.all(i, v, self[i] == v)` is a TWO-VARIABLE comprehension,
-	// available in the apiserver's CEL from Kubernetes 1.32, which is below this chart's 1.33 floor. The
+	// available in the apiserver's CEL from Kubernetes 1.32, which is below this chart's 1.36 floor. The
 	// obvious alternative, `self.slice(0, size(oldSelf)) == oldSelf`, needs ext.Lists, which the apiserver
 	// only enables from 1.34 -- and a CRD whose CEL does not compile is rejected outright, so that would
 	// have broken installs on 1.33 rather than merely failing to validate.

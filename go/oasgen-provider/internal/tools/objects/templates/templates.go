@@ -14,6 +14,10 @@ type Renderoptions struct {
 	Resource  string
 	Namespace string
 	Name      string
+	// LabelSelector scopes the generated controller's watch to the instances THIS version owns. Empty
+	// means watch everything, which is correct when only one version is served. See
+	// crd/generation.VersionSelector for why the current version and the older ones use different rules.
+	LabelSelector string
 }
 
 func Values(opts Renderoptions) map[string]any {
@@ -26,11 +30,12 @@ func Values(opts Renderoptions) map[string]any {
 	}
 
 	values := map[string]any{
-		"apiGroup":   opts.Group,
-		"apiVersion": opts.Version,
-		"resource":   opts.Resource,
-		"name":       opts.Name,
-		"namespace":  opts.Namespace,
+		"apiGroup":      opts.Group,
+		"apiVersion":    opts.Version,
+		"resource":      opts.Resource,
+		"name":          opts.Name,
+		"namespace":     opts.Namespace,
+		"labelSelector": opts.LabelSelector,
 	}
 
 	return values

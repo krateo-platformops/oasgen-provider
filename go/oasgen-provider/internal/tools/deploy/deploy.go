@@ -58,6 +58,11 @@ type DeployOptions struct {
 	DeploymentTemplatePath string
 	ConfigmapTemplatePath  string
 	Log                    func(msg string, keysAndValues ...any)
+	// LabelSelector scopes the generated controller's watch to the instances THIS version owns. Every
+	// served version runs its own controller and every served endpoint returns every object, so the
+	// apiVersion cannot separate them -- krateo.io/oas-version does. Empty means watch everything, which
+	// is correct when only one version is served. Computed by crd/generation.VersionSelector.
+	LabelSelector string
 	// DryRunServer is used to determine if the deployment should be applied in dry-run mode. This is ignored in lookup mode
 	DryRunServer bool
 }
@@ -344,7 +349,8 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		opts.GVR,
 		deploymentNSName,
 		opts.DeploymentTemplatePath,
-		"serviceAccountName", sa.Name)
+		"serviceAccountName", sa.Name,
+		"labelSelector", opts.LabelSelector)
 	if err != nil {
 		opts.Log("Error creating deployment object", "error", err)
 		return "", err
@@ -363,7 +369,8 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			opts.GVR,
 			deploymentNSName,
 			opts.DeploymentTemplatePath,
-			"serviceAccountName", sa.Name)
+			"serviceAccountName", sa.Name,
+			"labelSelector", opts.LabelSelector)
 		if err != nil {
 			opts.Log("Error creating deployment object", "error", err)
 			return "", err

@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/crd"
+	"github.com/krateo-platformops/oasgen-provider/internal/tools/crd/generation"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/deployment"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/filegetter"
@@ -482,6 +483,13 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		}
 	}
 
+	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
+	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
+	// working resource over a migration concern, and the next pass retries.
+	if bferr := e.backfillVersionLabel(ctx, gvk, gvk.Version); bferr != nil {
+		e.log.Debug("Backfilling the oas-version label", "error", bferr)
+	}
+
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
 		return reconciler.ExternalObservation{}, err
@@ -620,9 +628,17 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 			Namespace: cr.Namespace,
 			Name:      cr.Name,
 		},
-		GVR: gvr,
-		Log: e.log.Debug,
+		GVR:           gvr,
+		Log:           e.log.Debug,
+		LabelSelector: e.versionSelectorFor(gvk.Version),
 	}
+	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
+	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
+	// working resource over a migration concern, and the next pass retries.
+	if bferr := e.backfillVersionLabel(ctx, gvk, gvk.Version); bferr != nil {
+		e.log.Debug("Backfilling the oas-version label", "error", bferr)
+	}
+
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
 		return fmt.Errorf("installing controller: %w", err)
@@ -696,6 +712,22 @@ func resourceHash(cr *definitionv1alpha1.RestDefinition) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// versionSelectorFor is the label selector the rest-dynamic-controller for this CRD version must watch
+// with: exact equality on krateo.io/oas-version, matching composition-dynamic-controller's
+// selection.Equals.
+//
+// Exact rather than "everything except the other versions". An exact selector is a constant function of
+// the controller's OWN version, so it cannot go stale. The notin scheme it replaces did: a controller
+// deployed with notin (v26) claims v28-labelled instances the moment a v28 appears, because the set it
+// excludes was fixed when it was rendered. That held under one snapshot and not across time, which is
+// the failure mode a label selector must not have.
+//
+// Returning "" would mean "watch everything", which is the pre-coexistence behaviour and is why the
+// version must never be empty here. Callers pass gvk.Version, which generation.VersionSelector guards.
+func (e *external) versionSelectorFor(version string) string {
+	return generation.VersionSelector(version)
 }
 
 // ensureVersionPolicyBestEffort keeps the group's oas-version policy present on every reconcile.
@@ -792,8 +824,10 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	// first serving the CRD. Failing closed on this path refuses to open that window; failing closed in
 	// Observe would merely stop reconciling a group whose CRD is already served. Hence the asymmetry.
 	//
-	// Not fatal on a cluster without the MutatingAdmissionPolicy API (< 1.36, which the chart's 1.33 floor
-	// permits): rest-dynamic-controller stamps the label itself on first reconcile.
+	// An absent MutatingAdmissionPolicy API is now fatal too, where it used to be tolerated. The chart's
+	// floor moved to 1.36 in the same change that made watching version-scoped: with an exact selector
+	// there is no longer anything that covers a missing policy, because rest-dynamic-controller's own
+	// fallback stamping could never be reached by an instance that matches no watch.
 	// A stale policy is NOT fatal even here: it still stamps, and refusing to generate the CRD over a spec
 	// difference would turn a reportable condition into an outage. Observe reports it. A collision is
 	// fatal, because the colliding group's instances would never be stamped at all.
@@ -882,9 +916,17 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 			Namespace: cr.Namespace,
 			Name:      cr.Name,
 		},
-		GVR: gvr,
-		Log: e.log.Debug,
+		GVR:           gvr,
+		Log:           e.log.Debug,
+		LabelSelector: e.versionSelectorFor(gvk.Version),
 	}
+	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
+	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
+	// working resource over a migration concern, and the next pass retries.
+	if bferr := e.backfillVersionLabel(ctx, gvk, gvk.Version); bferr != nil {
+		e.log.Debug("Backfilling the oas-version label", "error", bferr)
+	}
+
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
 		return fmt.Errorf("installing controller: %w", err)

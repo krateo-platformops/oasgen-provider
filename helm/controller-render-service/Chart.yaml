@@ -22,9 +22,11 @@ type: application
 # had them. Hardening them to match blueprint-render-service's hardcoded distroless-nonroot
 # profile is a separate change that needs the image verified against it first.
 #
-# No kubeVersion bound: unlike the oasgen-provider chart, this one ships no CRDs and no
-# controller, so the CRD-validation-ratcheting requirement that pins those charts to >=1.33
-# does not apply here.
+# No kubeVersion bound: unlike the oasgen-provider chart, this one ships no CRDs and no controller, so
+# neither of the requirements pinning those charts to >=1.36 applies here -- not CRD validation
+# ratcheting (no CRDs) and not MutatingAdmissionPolicy (nothing to stamp, nothing watching a label).
+# This chart stays installable on clusters the other two now refuse, which is correct: it renders
+# previews and owns no state.
 
 # Versioned with the SAME release tag as the oasgen-provider and oasgen-provider-crds charts:
 # release-oci.yaml substitutes CHART_VERSION from the git tag, so one tag publishes all three at

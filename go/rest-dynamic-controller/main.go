@@ -27,6 +27,7 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/workqueue"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -77,6 +78,18 @@ func main() {
 	resourceGroup := flag.String("group",
 		env.String("REST_CONTROLLER_GROUP", ""),
 		"resource api group")
+	// labelSelector scopes this controller's watch to the instances its version owns.
+	//
+	// Every served CRD version runs its own controller, and selecting by served apiVersion cannot separate
+	// them: every served endpoint returns every object. The krateo.io/oas-version label is the contract
+	// instead, and oasgen-provider computes the selector because it is the side that knows the whole
+	// version topology (crd/generation.VersionSelector).
+	//
+	// Empty means watch everything, which is correct when only one version is served -- every instance is
+	// then either unlabelled or labelled with it.
+	labelSelector := flag.String("label-selector",
+		env.String("REST_CONTROLLER_LABEL_SELECTOR", ""),
+		"Label selector scoping this controller to the instances its CRD version owns.")
 	resourceVersion := flag.String("version",
 		env.String("REST_CONTROLLER_VERSION", ""),
 		"resource api version")
@@ -307,6 +320,17 @@ func main() {
 		}))
 	} else {
 		log.Info("Metrics server disabled")
+	}
+
+	if *labelSelector != "" {
+		if _, perr := labels.Parse(*labelSelector); perr != nil {
+			log.Error(perr, "Parsing label selector.", "selector", *labelSelector)
+			os.Exit(1)
+		}
+		opts = append(opts, builder.WithListWatcher(controller.ListWatcherConfiguration{
+			LabelSelector: labelSelector,
+		}))
+		log.Info("Watching only the instances this version owns", "labelSelector", *labelSelector)
 	}
 
 	controller, err := builder.Build(ctx, builder.Configuration{
