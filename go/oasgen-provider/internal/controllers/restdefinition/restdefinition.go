@@ -287,6 +287,11 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		}, e.Delete(ctx, cr)
 	}
 
+	// Keep the group's oas-version policy present for as long as its CRDs are served, not merely at the
+	// moment they are generated. Placed after the WasDeleted branch above so a RestDefinition on its way
+	// out does not recreate what Delete may be tearing down.
+	e.ensureVersionPolicyBestEffort(ctx, cr)
+
 	// Read hasSecuritySchemes from status (saved by Create/Update) to avoid
 	// re-fetching and parsing the OAS document on every Observe cycle.
 	// If the status field is not yet set (nil), fetch the OAS document once to
@@ -693,6 +698,39 @@ func resourceHash(cr *definitionv1alpha1.RestDefinition) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ensureVersionPolicyBestEffort keeps the group's oas-version policy present on every reconcile.
+//
+// Until #173 this was reachable only from generateAndApplyCRDs, whose two callers are gated: Create runs
+// it when the CRD is absent, Update when the OAS or resource hash changed. On a stable install neither
+// fires, so a policy deleted out of band — by a cleanup script, by policy tooling, or by an operator
+// trying to force a refresh — was never restored, and nothing reported its absence.
+//
+// Observe runs unconditionally and precedes Create and Update in the reconciler loop, so ensuring here
+// also preserves the ordering the generation path relies on: the policy exists before the CRD that makes
+// instances of this group writable.
+//
+// Deliberately NOT fatal, unlike the call in generateAndApplyCRDs. That one runs immediately before the
+// CRD is applied — before instances can be written at all — so failing closed there prevents the window
+// the policy exists to close. By the time Observe runs the CRD is already served and instances may
+// already be live, so failing the observation would close no window; it would only stop reconciling a
+// resource that is otherwise healthy, and on a cluster whose RBAC lagged the chart it would break every
+// RestDefinition at once. A warning plus an event makes the absence visible without that blast radius.
+//
+// EnsureVersionPolicy already returns nil on a cluster that does not serve the API (< 1.36), so this
+// stays quiet there rather than warning once per reconcile.
+//
+// This is hygiene today, because rest-dynamic-controller stamps the label itself when it observes an
+// instance without one. It becomes load-bearing once watching is version-scoped: an unlabelled instance
+// then matches no controller's watch, so it is never observed, so that fallback never runs.
+func (e *external) ensureVersionPolicyBestEffort(ctx context.Context, cr *definitionv1alpha1.RestDefinition) {
+	if err := policy.EnsureVersionPolicy(ctx, e.kube, cr.Spec.ResourceGroup); err != nil {
+		e.log.Warn("Could not ensure the oas-version policy; instances of this group may be admitted without the version label",
+			"group", cr.Spec.ResourceGroup, "error", err)
+		e.rec.Eventf(cr, corev1.EventTypeWarning, "VersionPolicyNotEnsured",
+			"could not ensure the oas-version MutatingAdmissionPolicy for group %q: %v", cr.Spec.ResourceGroup, err)
+	}
+}
+
 func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, doc oas2jsonschema.OASDocument, hasSecuritySchemes bool) (err error) {
 	rendered, err := render.CRDs(ctx, cr, gvk, doc, hasSecuritySchemes)
 	if err != nil {
@@ -733,6 +771,11 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	// writable: once it is served, an instance can be created, and one admitted without the
 	// krateo.io/oas-version label is invisible to its version's controller. Ordering this after the apply
 	// would leave a window where that is possible.
+	//
+	// Fatal here, and only here. Observe calls ensureVersionPolicyBestEffort on every reconcile, which is
+	// what actually keeps the policy present (#173); this call is what makes the policy a PRECONDITION of
+	// first serving the CRD. Failing closed on this path refuses to open that window; failing closed in
+	// Observe would merely stop reconciling a group whose CRD is already served. Hence the asymmetry.
 	//
 	// Not fatal on a cluster without the MutatingAdmissionPolicy API (< 1.36, which the chart's 1.33 floor
 	// permits): rest-dynamic-controller stamps the label itself on first reconcile.
