@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-01T00:00:00Z
+timestamp: 2026-10-02T00:00:00Z
 ---
 
 # Log
@@ -13,10 +13,14 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
-## 2026-10-01 — 0.26.0
+## 2026-10-02 — 0.26.0
 
-`oasgen-render` becomes its own chart. A **breaking chart change**: `render.*` is removed from the
-provider chart's values, and `render.enabled=true` is now rejected rather than ignored.
+A minor carrying one **breaking chart change** and one **security fix**. Read both before upgrading.
+
+### `oasgen-render` becomes its own chart
+
+A **breaking chart change**: `render.*` is removed from the provider chart's values, and
+`render.enabled=true` is now rejected rather than ignored.
 
 - **Why.** The render service was a conditional sub-deployment of the provider chart, so it was the
   only Krateo render service that needed install-time configuration: six `componentValues` keys set
@@ -38,6 +42,55 @@ provider chart's values, and `render.enabled=true` is now rejected rather than i
 - **Migrating.** The new chart produces the same object names the sub-deployment produced once
   `render.fullnameOverride` was set, so the two cannot coexist: drop the provider chart's render
   objects first, then install the new component. Nothing in the controller changes.
+
+### SECURITY: the verbose request dump leaked credentials to pod logs
+
+With `krateo.io/connector-verbose` on, `Authorization: Bearer <token>` was written in cleartext.
+Anyone able to read the controller's logs could read the resource's credential.
+
+The redactor only replaced values it had been TOLD were sensitive, and that list is populated solely
+from secretRef-resolved fields. A bearer token supplied through the resource's own Configuration is
+applied straight to the request and never registered, so it was never a candidate for replacement.
+The redaction was working exactly as written and still leaking, which is the worst combination: a log
+that looks sanitised.
+
+Credential headers are now redacted BY NAME, whatever their value. **The leak is in logs already
+written** — if you have run a verbose RDC, assume the token is in those logs and rotate it.
+
+### Everything else
+
+- **`additionalStatusFields` is append-only instead of immutable.** A KOG chart that gains a status
+  field could not be upgraded in place: the apply was refused, and the only way through was deleting
+  the RestDefinition and its CRs. Entries may now be added at the end; removing, renaming, reordering
+  or changing an existing entry is still refused, because those break stored objects and printer
+  columns.
+
+  Two new bounds come with it, required to keep the validation rule inside Kubernetes' CEL cost
+  budget: at most 64 entries, each at most 253 characters. A RestDefinition exceeding them would now
+  fail validation.
+
+- **A concurrent `findby` could lose its OAS download.** `BuildClient` used one fixed temp directory
+  and deleted the whole thing on return, so with the default 5 workers one reconcile deleted
+  another's file mid-flight. Its rate tracked concurrency rather than correctness — nearly invisible
+  in steady state, and constant after a pod restart, where it fired 852 times in an hour on a live
+  cluster and looked like a regression in a release that had not touched the module.
+
+- **A path or query parameter can now be transformed on its way out** (`valueMapping: jq` on a
+  request-direction entry). That was the one part of the request surface with no transformation hook,
+  so "strip a prefix from this path parameter" needed a Go plugin to run one `strings.TrimPrefix`.
+
+  It was not inert before, either: a declared request-direction jq was SKIPPED, producing no field at
+  all. A missing path parameter still yields a URL that parses, so the API answers 404, and the
+  reconciler creates on not-found. Anyone who declared one was silently creating duplicates.
+
+- **Instances now record which served CRD version owns them** (`krateo.io/oas-version`), stamped by a
+  per-group MutatingAdmissionPolicy and, below Kubernetes 1.36 where that API does not exist, by the
+  controller. Groundwork for per-version coexistence; nothing changes behaviourally yet.
+
+- The otel log stack moves to 0.22.0 **as a set** — dependabot cannot produce this change, because the
+  modules only exist as a consistent group and bumping one alone does not build.
+
+- `controller-render-service`'s `global` no longer forbids extra properties.
 
 ## 2026-10-01 — 0.25.1
 
