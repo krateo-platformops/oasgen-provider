@@ -44,13 +44,10 @@ func (e *external) backfillVersionLabel(ctx context.Context, gvk schema.GroupVer
 		return nil
 	}
 
-	// DoesNotExist, not Equals-to-empty: an absent label and a label set to "" are different states to
-	// the apiserver, and only the first is what an un-backfilled instance has.
-	req, err := labels.NewRequirement(generation.VersionLabel, selection.DoesNotExist, nil)
+	sel, err := labelAbsence()
 	if err != nil {
-		return fmt.Errorf("building the unlabelled-instance selector: %w", err)
+		return err
 	}
-	sel := labels.NewSelector().Add(*req)
 
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(schema.GroupVersionKind{
@@ -84,4 +81,19 @@ func (e *external) backfillVersionLabel(ctx context.Context, gvk schema.GroupVer
 			"kind", gvk.Kind, "version", version, "count", n)
 	}
 	return nil
+}
+
+// labelAbsence selects instances carrying NO version label.
+//
+// Exported to the package so tests assert against the SAME selector the backfill uses rather than a copy
+// that can drift. A test that builds its own selector proves the test's selector works.
+//
+// DoesNotExist, not Equals-to-empty: an absent label and a label set to "" are different states to the
+// apiserver, and only the first is what an un-backfilled instance has.
+func labelAbsence() (labels.Selector, error) {
+	req, err := labels.NewRequirement(generation.VersionLabel, selection.DoesNotExist, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building the unlabelled-instance selector: %w", err)
+	}
+	return labels.NewSelector().Add(*req), nil
 }
