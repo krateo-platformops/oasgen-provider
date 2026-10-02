@@ -15,6 +15,9 @@ package policy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -37,7 +40,73 @@ const (
 	// onto it so per-version watching and pruning keep working after the vacuum storage version erases
 	// the apiVersion an object was written as.
 	VersionLabel = "krateo.io/oas-version"
+
+	// SpecHashAnnotation records the hash of the spec a policy was created from.
+	//
+	// The policy is created-if-absent and never updated, so without this there is no way to tell that the
+	// policy on a cluster is not the one the running build would write -- no generation to compare, no
+	// event when it diverges, and the divergence grows silently as versions ship. A policy created before
+	// this annotation existed has none, which reads as stale, which is correct: those are exactly the ones
+	// that cannot be corrected except by deleting them.
+	SpecHashAnnotation = "krateo.io/oas-version-policy-hash"
 )
+
+// Outcome is what EnsureVersionPolicy found or did, for a caller that wants to report drift without
+// treating it as a failure.
+type Outcome int
+
+const (
+	// OutcomeUnknown is the zero value, returned alongside an error.
+	OutcomeUnknown Outcome = iota
+	// OutcomeCreated means the policy was absent and has been created.
+	OutcomeCreated
+	// OutcomeCurrent means a policy for this group exists and matches what this build would create.
+	OutcomeCurrent
+	// OutcomeStale means a policy for this group exists but was created from a different spec, or from a
+	// build predating SpecHashAnnotation. It still stamps, so it is not an error -- but it is not what
+	// this build would write, and it will never be updated in place.
+	OutcomeStale
+	// OutcomeUnsupported means the cluster does not serve the MutatingAdmissionPolicy API (< 1.36).
+	OutcomeUnsupported
+)
+
+func (o Outcome) String() string {
+	switch o {
+	case OutcomeCreated:
+		return "created"
+	case OutcomeCurrent:
+		return "current"
+	case OutcomeStale:
+		return "stale"
+	case OutcomeUnsupported:
+		return "unsupported"
+	default:
+		return "unknown"
+	}
+}
+
+// ErrPolicyGroupMismatch is returned when the policy name for this group is already taken by a policy
+// matching a DIFFERENT group.
+//
+// PolicyName slugifies with [^a-z0-9]+ -> "-", so every non-alphanumeric character collapses to the same
+// separator and distinct API groups can share a name: github.krateo.io, github-krateo.io and
+// github.krateo-io all produce krateo-oas-version-github-krateo-io.
+//
+// Treating that collision as success -- which an unexamined AlreadyExists does -- means the second group's
+// instances match no policy and are never stamped. No error, no event, and the RestDefinition reports
+// healthy. That is the silent non-reconcile failurePolicy: Fail was chosen to prevent; Fail only engages
+// when a policy MATCHES the request, and here none does.
+type ErrPolicyGroupMismatch struct {
+	Policy string
+	Want   string
+	Got    []string
+}
+
+func (e *ErrPolicyGroupMismatch) Error() string {
+	return fmt.Sprintf(
+		"policy %q already exists for API group(s) %v, not %q: these groups differ only by characters the policy name collapses, so they cannot both be stamped; rename one group",
+		e.Policy, e.Got, e.Want)
+}
 
 // nonAlphaNum matches every run of characters a Kubernetes object name may not contain.
 var nonAlphaNum = regexp.MustCompile(`[^a-z0-9]+`)
@@ -109,7 +178,57 @@ func objects(group string) (*unstructured.Unstructured, *unstructured.Unstructur
 	b.SetName(name)
 	b.Object["spec"] = map[string]any{"policyName": name}
 
+	// Stamp the spec hash on create, so a later version can TELL that a policy on the cluster is not the
+	// one it would write. This is the only part of #172 that cannot be added retroactively: the policy is
+	// never updated, so a policy created without the annotation can never acquire one.
+	h := specHash(p)
+	p.SetAnnotations(map[string]string{SpecHashAnnotation: h})
+	b.SetAnnotations(map[string]string{SpecHashAnnotation: h})
+
 	return p, b
+}
+
+// specHash is a content hash of the policy spec, used to notice that an existing policy differs from the
+// one this build would create.
+//
+// Hashing the spec rather than stamping a version number means any change to the mutation expression, the
+// match constraints or the failure policy is detectable, without anyone having to remember to bump
+// something. encoding/json sorts map keys, so the encoding is stable across runs.
+func specHash(p *unstructured.Unstructured) string {
+	b, err := json.Marshal(p.Object["spec"])
+	if err != nil {
+		// Cannot happen for a map we just built, but returning a constant would make every policy compare
+		// equal, which is the one answer that hides drift.
+		return "unhashable"
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// policyGroups returns every apiGroup the policy's match constraints name.
+func policyGroups(p *unstructured.Unstructured) []string {
+	rules, found, err := unstructured.NestedSlice(p.Object, "spec", "matchConstraints", "resourceRules")
+	if err != nil || !found {
+		return nil
+	}
+	var out []string
+	for _, r := range rules {
+		m, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		groups, found, err := unstructured.NestedStringSlice(m, "apiGroups")
+		if err != nil || !found {
+			continue
+		}
+		out = append(out, groups...)
+	}
+	return out
+}
+
+// matchesOnly reports whether groups is exactly [group].
+func matchesOnly(groups []string, group string) bool {
+	return len(groups) == 1 && groups[0] == group
 }
 
 // EnsureVersionPolicy guarantees the oas-version policy and its binding exist for group.
@@ -125,26 +244,64 @@ func objects(group string) (*unstructured.Unstructured, *unstructured.Unstructur
 // The policy is a per-group singleton shared by every RestDefinition in that group, so it is
 // intentionally never removed on RestDefinition deletion: another definition in the same group may still
 // depend on it, and an orphaned policy stamps a label nobody reads, which costs nothing.
-func EnsureVersionPolicy(ctx context.Context, kube client.Client, group string) error {
+func EnsureVersionPolicy(ctx context.Context, kube client.Client, group string) (Outcome, error) {
 	if group == "" {
-		return fmt.Errorf("cannot ensure version policy: empty API group")
+		return OutcomeUnknown, fmt.Errorf("cannot ensure version policy: empty API group")
 	}
 
 	p, b := objects(group)
+
 	// The policy before the binding: the binding references it by name.
-	for _, o := range []*unstructured.Unstructured{p, b} {
-		if err := kube.Create(ctx, o); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				continue
-			}
+	created := false
+	switch err := kube.Create(ctx, p); {
+	case err == nil:
+		created = true
+	case IsUnsupported(err):
+		// Pre-1.36 cluster. RDC's own stamping covers it.
+		return OutcomeUnsupported, nil
+	case !apierrors.IsAlreadyExists(err):
+		return OutcomeUnknown, fmt.Errorf("creating %s %q: %w", p.GetKind(), p.GetName(), err)
+	}
+
+	// An existing policy is still left untouched -- the create-if-absent contract is unchanged, and this
+	// never fights another field manager. What changed is that AlreadyExists is no longer accepted without
+	// looking: it cannot otherwise distinguish two RestDefinitions converging on their shared group's
+	// policy (intended) from two DIFFERENT groups colliding on one slugified name (silent non-stamping).
+	outcome := OutcomeCreated
+	if !created {
+		cur := &unstructured.Unstructured{}
+		cur.SetAPIVersion(policyAPIVersion)
+		cur.SetKind("MutatingAdmissionPolicy")
+		if err := kube.Get(ctx, client.ObjectKey{Name: p.GetName()}, cur); err != nil {
 			if IsUnsupported(err) {
-				// Pre-1.36 cluster. RDC's own stamping covers it.
-				return nil
+				return OutcomeUnsupported, nil
 			}
-			return fmt.Errorf("creating %s %q: %w", o.GetKind(), o.GetName(), err)
+			return OutcomeUnknown, fmt.Errorf("reading the existing policy %q: %w", p.GetName(), err)
+		}
+
+		if groups := policyGroups(cur); !matchesOnly(groups, group) {
+			return OutcomeUnknown, &ErrPolicyGroupMismatch{Policy: p.GetName(), Want: group, Got: groups}
+		}
+
+		outcome = OutcomeCurrent
+		if cur.GetAnnotations()[SpecHashAnnotation] != p.GetAnnotations()[SpecHashAnnotation] {
+			outcome = OutcomeStale
 		}
 	}
-	return nil
+
+	// Always attempt the binding, even when the policy already existed: the two are separate objects and
+	// either can be deleted without the other. A policy with no binding is inert, so it would stamp
+	// nothing while looking present.
+	if err := kube.Create(ctx, b); err != nil {
+		if IsUnsupported(err) {
+			return OutcomeUnsupported, nil
+		}
+		if !apierrors.IsAlreadyExists(err) {
+			return OutcomeUnknown, fmt.Errorf("creating %s %q: %w", b.GetKind(), b.GetName(), err)
+		}
+	}
+
+	return outcome, nil
 }
 
 // IsUnsupported reports whether err means the cluster does not serve the MutatingAdmissionPolicy API.
