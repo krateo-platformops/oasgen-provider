@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-02T00:00:00Z
+timestamp: 2026-10-02T12:00:00Z
 ---
 
 # Log
@@ -12,6 +12,48 @@ timestamp: 2026-10-02T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-02 — 0.27.1
+
+Two fixes to the oas-version policy, both found by validating 0.27.0 on a live cluster rather than by
+review. Neither changes an API; both change what the provider does with a policy that is already there.
+
+- **A deleted policy was never restored.** `EnsureVersionPolicy` was reachable only from the CRD
+  generation path, which runs when the CRD is absent or when the OAS/resource hash changed. On a stable
+  install neither happens, so a policy removed out of band — by a cleanup script, by policy tooling, or
+  by an operator trying to force a refresh — stayed gone until somebody edited the OAS document or the
+  resource spec. Nothing reported its absence.
+
+  It is now ensured on every reconcile. That also makes a stale policy fixable at last: **delete it, and
+  the next reconcile recreates it from the running code.** There is still no in-place update, by design.
+
+  Benign today, because rest-dynamic-controller stamps the label itself when it observes an instance
+  without one. It would not be benign under version-scoped watching, where an unlabelled instance matches
+  no controller's watch, is therefore never observed, and so never reaches that fallback at all.
+
+- **Two API groups could collide on one policy.** The policy name slugifies the group with
+  `[^a-z0-9]+` → `-`, so `github.krateo.io`, `github-krateo.io` and `github.krateo-io` all produce the
+  same name. Accepting `AlreadyExists` without looking cannot tell two RestDefinitions converging on
+  their shared group's policy — which is intended — from two different groups colliding, where the second
+  group matches no policy and its instances are **never stamped**, with no error and no event.
+
+  The existing policy is now read and its match constraints checked. A different group is refused with a
+  message naming both. Two definitions in one group still converge exactly as before.
+
+- **A stale policy can now be seen.** Policies carry `krateo.io/oas-version-policy-hash`, a content hash
+  of the spec they were created from, so a policy that differs from what the running build would write is
+  reported as a `VersionPolicyStale` event. It is a warning, not a failure: a stale policy still stamps.
+
+  **Expect this event on every group immediately after upgrading from 0.27.0.** Every policy 0.27.0 wrote
+  predates the annotation, so it reads as stale — correctly, since those are exactly the policies that
+  cannot be corrected except by deleting them. Delete each one and let it be recreated; the replacement
+  carries the annotation and goes quiet.
+
+- Fixed in passing: the binding is ensured even when the policy already exists. Deleting the binding
+  alone previously left the policy present and **inert** — stamping nothing while looking healthy.
+
+No chart change, and no new permissions: the provider already had `create` and `get` on
+`mutatingadmissionpolicies`, which is all of this needs.
 
 ## 2026-10-02 — 0.27.0
 
