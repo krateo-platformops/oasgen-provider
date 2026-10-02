@@ -25,15 +25,27 @@ func policyObject() *unstructured.Unstructured {
 	return u
 }
 
+// policyAPIServed asks the CLUSTER whether it serves MutatingAdmissionPolicy, rather than inferring it
+// from a failed Get on the object under test.
+//
+// That distinction is the whole point. "The policy is not there" has two causes — the API does not exist
+// (Kubernetes < 1.36, a legitimate environment gap) and EnsureVersionPolicy failed to create it (the bug
+// this test exists to catch). Treating a NotFound on the object as the former would skip on exactly the
+// failure it is meant to report, and CI runs without -v, so the skip would be invisible and the package
+// would still print "ok".
+func policyAPIServed(ctx context.Context, kube client.Client) bool {
+	list := &unstructured.UnstructuredList{}
+	list.SetAPIVersion("admissionregistration.k8s.io/v1")
+	list.SetKind("MutatingAdmissionPolicyList")
+	err := kube.List(ctx, list)
+	return err == nil || !policy.IsUnsupported(err)
+}
+
 // TestVersionPolicyIsRestoredAfterDeletion is the live half of #173.
 //
 // The unit test proves Observe calls EnsureVersionPolicy with both generation gates closed. This proves
 // the call actually RESTORES a policy against a real apiserver, which is the user-facing claim: before
 // this fix, deleting the policy left it deleted until somebody edited the OAS or the resource spec.
-//
-// Skips loudly rather than passing on a cluster that does not serve MutatingAdmissionPolicy (< 1.36).
-// EnsureVersionPolicy correctly returns nil there, so an assertion would report a failure that is really
-// an environment gap -- and a silent pass would be worse still.
 func TestVersionPolicyIsRestoredAfterDeletion(t *testing.T) {
 	name := policy.PolicyName(restoreTestGroup)
 
@@ -44,16 +56,18 @@ func TestVersionPolicyIsRestoredAfterDeletion(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			if !policyAPIServed(ctx, kube) {
+				t.Skip("cluster does not serve MutatingAdmissionPolicy (needs Kubernetes 1.36+)")
+			}
+
 			if err := policy.EnsureVersionPolicy(ctx, kube, restoreTestGroup); err != nil {
 				t.Fatalf("ensuring the policy: %v", err)
 			}
 
+			// The API is served, so a missing object here is a real failure, never an environment gap.
 			got := policyObject()
 			if err := kube.Get(ctx, types.NamespacedName{Name: name}, got); err != nil {
-				if policy.IsUnsupported(err) || errors.IsNotFound(err) {
-					t.Skipf("cluster does not serve MutatingAdmissionPolicy (needs Kubernetes 1.36+): %v", err)
-				}
-				t.Fatalf("policy %q was not created: %v", name, err)
+				t.Fatalf("policy %q was not created on a cluster that serves the API: %v", name, err)
 			}
 			return ctx
 		}).
@@ -63,12 +77,13 @@ func TestVersionPolicyIsRestoredAfterDeletion(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			if !policyAPIServed(ctx, kube) {
+				t.Skip("cluster does not serve MutatingAdmissionPolicy (needs Kubernetes 1.36+)")
+			}
+
 			doomed := policyObject()
 			doomed.SetName(name)
 			if err := kube.Delete(ctx, doomed); err != nil {
-				if policy.IsUnsupported(err) {
-					t.Skipf("cluster does not serve MutatingAdmissionPolicy: %v", err)
-				}
 				t.Fatalf("deleting the policy: %v", err)
 			}
 
@@ -85,7 +100,7 @@ func TestVersionPolicyIsRestoredAfterDeletion(t *testing.T) {
 
 			back := policyObject()
 			if err := kube.Get(ctx, types.NamespacedName{Name: name}, back); err != nil {
-				t.Fatalf("policy %q was not restored: %v", name, err)
+				t.Fatalf("policy %q was not restored after deletion: %v", name, err)
 			}
 			return ctx
 		}).Feature()
