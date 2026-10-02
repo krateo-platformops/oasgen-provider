@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-02T12:00:00Z
+timestamp: 2026-10-02T18:00:00Z
 ---
 
 # Log
@@ -12,6 +12,52 @@ timestamp: 2026-10-02T12:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-02 — 0.28.0
+
+Version coexistence becomes real: a rest-dynamic-controller now watches only the instances its own CRD
+version owns. **Read the Kubernetes floor change before upgrading** — this release will refuse to install
+on clusters the previous one supported.
+
+### BREAKING: the chart floor moves 1.33 → 1.36
+
+`oasgen-provider` and `oasgen-provider-crds` now require Kubernetes **1.36**. Unlike the previous 1.33
+bound, this one excludes supported clusters: 1.33, 1.34 and 1.35 are all current upstream.
+
+- **Why.** Instances carry `krateo.io/oas-version` to record which served CRD version owns them, and the
+  controller is started with an *exact* label selector on it. The `MutatingAdmissionPolicy` that writes
+  that label at admission is GA from 1.36. Below that nothing writes it, so the selector matches nothing
+  — an install that comes up green and reconciles no instance at all. A refused install is the better
+  failure, so the chart refuses.
+- **Not a rounding.** CRD validation ratcheting (the old 1.33 reason) is still required; it is simply no
+  longer the binding constraint.
+- `controller-render-service` keeps no floor. It ships no CRDs and no controller, so neither requirement
+  applies, and it stays installable on clusters the other two now refuse.
+
+### Watching is scoped to a version
+
+The controller for a version watches with exact equality on `krateo.io/oas-version`, the same construction
+composition-dynamic-controller uses.
+
+Exact, rather than "everything except the other versions". An exact selector is a constant function of the
+controller's own version and cannot go stale. The set-based scheme it replaces did: a controller deployed
+with `notin (v26)` starts claiming v28-labelled instances the moment a v28 appears, because the set it
+excludes was fixed when it was rendered. That held under one snapshot and not across time.
+
+### The label is now written in one place, and backfilled once
+
+`rest-dynamic-controller` no longer stamps the label when it observes an unlabelled instance. That path
+could never be reached under an exact selector — an unlabelled instance matches no watch, so it is never
+observed — and a safety net that cannot catch the case it was written for is worse than none.
+
+An absent `MutatingAdmissionPolicy` API is therefore an error now, where it used to be tolerated.
+
+**The upgrade stamps existing instances for you.** Anything written before the policy existed carries no
+label, because the policy only stamps on create and update — on an established cluster that is most
+instances, and under an exact selector all of them would have been orphaned by this release. The provider
+now lists instances carrying no label and stamps the served version before deploying the controller that
+selects on it. It fills an absence and never moves an existing value: rewriting one would be migrating the
+instance onto another version, which is a deliberate act and not a side effect of an upgrade.
 
 ## 2026-10-02 — 0.27.1
 
