@@ -60,7 +60,7 @@ func TestVersionPolicyIsRestoredAfterDeletion(t *testing.T) {
 				t.Skip("cluster does not serve MutatingAdmissionPolicy (needs Kubernetes 1.36+)")
 			}
 
-			if err := policy.EnsureVersionPolicy(ctx, kube, restoreTestGroup); err != nil {
+			if _, err := policy.EnsureVersionPolicy(ctx, kube, restoreTestGroup); err != nil {
 				t.Fatalf("ensuring the policy: %v", err)
 			}
 
@@ -94,7 +94,7 @@ func TestVersionPolicyIsRestoredAfterDeletion(t *testing.T) {
 				t.Fatalf("expected the policy to be deleted, Get returned: %v", err)
 			}
 
-			if err := policy.EnsureVersionPolicy(ctx, kube, restoreTestGroup); err != nil {
+			if _, err := policy.EnsureVersionPolicy(ctx, kube, restoreTestGroup); err != nil {
 				t.Fatalf("re-ensuring the policy: %v", err)
 			}
 

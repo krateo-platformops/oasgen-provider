@@ -723,11 +723,26 @@ func resourceHash(cr *definitionv1alpha1.RestDefinition) string {
 // instance without one. It becomes load-bearing once watching is version-scoped: an unlabelled instance
 // then matches no controller's watch, so it is never observed, so that fallback never runs.
 func (e *external) ensureVersionPolicyBestEffort(ctx context.Context, cr *definitionv1alpha1.RestDefinition) {
-	if err := policy.EnsureVersionPolicy(ctx, e.kube, cr.Spec.ResourceGroup); err != nil {
+	outcome, err := policy.EnsureVersionPolicy(ctx, e.kube, cr.Spec.ResourceGroup)
+	if err != nil {
 		e.log.Warn("Could not ensure the oas-version policy; instances of this group may be admitted without the version label",
 			"group", cr.Spec.ResourceGroup, "error", err)
 		e.rec.Eventf(cr, corev1.EventTypeWarning, "VersionPolicyNotEnsured",
 			"could not ensure the oas-version MutatingAdmissionPolicy for group %q: %v", cr.Spec.ResourceGroup, err)
+		return
+	}
+
+	// A stale policy is not a failure -- it still stamps, just not with the spec this build would write --
+	// so it is reported rather than raised. It is actionable precisely because the ensure now runs every
+	// reconcile: deleting the policy is enough, and the next pass recreates it from the running code.
+	// Before that, saying "this is stale" would have been a complaint with no remedy short of editing the
+	// RestDefinition to force regeneration.
+	if outcome == policy.OutcomeStale {
+		e.log.Warn("The oas-version policy on this cluster was created from a different spec and is never updated in place; delete it to have it recreated",
+			"group", cr.Spec.ResourceGroup, "policy", policy.PolicyName(cr.Spec.ResourceGroup))
+		e.rec.Eventf(cr, corev1.EventTypeWarning, "VersionPolicyStale",
+			"MutatingAdmissionPolicy %q was created from a different spec than this build writes; it is never updated in place, so delete it and the next reconcile will recreate it",
+			policy.PolicyName(cr.Spec.ResourceGroup))
 	}
 }
 
@@ -779,7 +794,10 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	//
 	// Not fatal on a cluster without the MutatingAdmissionPolicy API (< 1.36, which the chart's 1.33 floor
 	// permits): rest-dynamic-controller stamps the label itself on first reconcile.
-	if perr := policy.EnsureVersionPolicy(ctx, e.kube, cr.Spec.ResourceGroup); perr != nil {
+	// A stale policy is NOT fatal even here: it still stamps, and refusing to generate the CRD over a spec
+	// difference would turn a reportable condition into an outage. Observe reports it. A collision is
+	// fatal, because the colliding group's instances would never be stamped at all.
+	if _, perr := policy.EnsureVersionPolicy(ctx, e.kube, cr.Spec.ResourceGroup); perr != nil {
 		return fmt.Errorf("ensuring the oas-version policy for group %q: %w", cr.Spec.ResourceGroup, perr)
 	}
 
