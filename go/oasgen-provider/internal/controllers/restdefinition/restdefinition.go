@@ -433,20 +433,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 			ResourceUpToDate: true,
 		}, nil
 	}
-	opts := deploy.DeployOptions{
-		ConfigurationGVR:       configurationGVR,
-		RBACFolderPath:         RDCrbacConfigFolder,
-		DeploymentTemplatePath: RDCtemplateDeploymentPath,
-		ConfigmapTemplatePath:  RDCtemplateConfigmapPath,
-		KubeClient:             e.kube,
-		NamespacedName: types.NamespacedName{
-			Namespace: cr.Namespace,
-			Name:      cr.Name,
-		},
-		GVR:          gvr,
-		Log:          e.log.Debug,
-		DryRunServer: true,
-	}
+	opts := e.deployOptions(cr, gvk, gvr, configurationGVR, true)
 
 	// An OAS content change (e.g. the referenced ConfigMap was edited) does not alter the render digest below
 	// — that digest depends only on the RD spec, not the OAS document — so detect it explicitly: hash the
@@ -618,20 +605,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	}
 
 	configurationGVR := getConfigurationGVR(cr, hasSecuritySchemes)
-	opts := deploy.DeployOptions{
-		ConfigurationGVR:       configurationGVR,
-		RBACFolderPath:         RDCrbacConfigFolder,
-		DeploymentTemplatePath: RDCtemplateDeploymentPath,
-		ConfigmapTemplatePath:  RDCtemplateConfigmapPath,
-		KubeClient:             e.kube,
-		NamespacedName: types.NamespacedName{
-			Namespace: cr.Namespace,
-			Name:      cr.Name,
-		},
-		GVR:           gvr,
-		Log:           e.log.Debug,
-		LabelSelector: e.versionSelectorFor(gvk.Version),
-	}
+	opts := e.deployOptions(cr, gvk, gvr, configurationGVR, false)
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
 	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
 	// working resource over a migration concern, and the next pass retries.
@@ -712,6 +686,46 @@ func resourceHash(cr *definitionv1alpha1.RestDefinition) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// deployOptions builds the DeployOptions for every path that renders the rest-dynamic-controller.
+//
+// ONE constructor, and that is the whole point. Observe renders what WOULD be deployed and compares its
+// digest against the digest Create/Update stored. If the two paths build their options differently, the
+// digests can never agree: Observe reports ResourceUpToDate=false forever, Update re-renders and stores
+// the same value it already had, and the resource never reaches Available.
+//
+// That is not hypothetical. 0.28.0 shipped with LabelSelector set in Create and Update but missing here,
+// because the three literals were edited by matching on their text and Observe's differed by alignment
+// alone. Every RestDefinition on the affected cluster sat Ready=False/Creating indefinitely, with a
+// stable status.digest and a rendered digest that "changed" on every pass -- a compute-only loop that
+// rewrote nothing, so it looked like churn rather than a stuck gate.
+//
+// dryRun is the ONLY legitimate difference between the read path and the write paths: Observe must not
+// mutate anything to find out what the digest would be. Any other field added here is shared by
+// construction, which is what stops this recurring.
+func (e *external) deployOptions(
+	cr *definitionv1alpha1.RestDefinition,
+	gvk schema.GroupVersionKind,
+	gvr schema.GroupVersionResource,
+	configurationGVR schema.GroupVersionResource,
+	dryRun bool,
+) deploy.DeployOptions {
+	return deploy.DeployOptions{
+		ConfigurationGVR:       configurationGVR,
+		RBACFolderPath:         RDCrbacConfigFolder,
+		DeploymentTemplatePath: RDCtemplateDeploymentPath,
+		ConfigmapTemplatePath:  RDCtemplateConfigmapPath,
+		KubeClient:             e.kube,
+		NamespacedName: types.NamespacedName{
+			Namespace: cr.Namespace,
+			Name:      cr.Name,
+		},
+		GVR:           gvr,
+		Log:           e.log.Debug,
+		LabelSelector: e.versionSelectorFor(gvk.Version),
+		DryRunServer:  dryRun,
+	}
 }
 
 // versionSelectorFor is the label selector the rest-dynamic-controller for this CRD version must watch
@@ -906,20 +920,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	}
 
 	configurationGVR := getConfigurationGVR(cr, hasSecuritySchemes)
-	opts := deploy.DeployOptions{
-		ConfigurationGVR:       configurationGVR,
-		RBACFolderPath:         RDCrbacConfigFolder,
-		DeploymentTemplatePath: RDCtemplateDeploymentPath,
-		ConfigmapTemplatePath:  RDCtemplateConfigmapPath,
-		KubeClient:             e.kube,
-		NamespacedName: types.NamespacedName{
-			Namespace: cr.Namespace,
-			Name:      cr.Name,
-		},
-		GVR:           gvr,
-		Log:           e.log.Debug,
-		LabelSelector: e.versionSelectorFor(gvk.Version),
-	}
+	opts := e.deployOptions(cr, gvk, gvr, configurationGVR, false)
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
 	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
 	// working resource over a migration concern, and the next pass retries.
