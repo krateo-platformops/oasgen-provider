@@ -42,6 +42,13 @@ type: application
 # MutatingAdmissionPolicy, so on them nothing writes krateo.io/oas-version, and the controller's exact
 # selector would match nothing -- an install that comes up green and reconciles no instance at all. A
 # refused install is the better failure. See krateo-platformops/oasgen-provider#152.
+#
+# If you are here to judge whether this floor can be lowered: the code that resolves a RestDefinition
+# for an instance (rest-dynamic-controller, definitiongetter/getter.go) matches on kind and group and
+# never looks at the version label, which reads as evidence the label is optional. It is not. The
+# selector is applied one layer above, on the controller's ListWatcher, as exact equality -- an
+# unlabelled instance is never delivered, so that resolution code never runs for it. It tolerates
+# version SKEW, not label ABSENCE. The note at that call site says the same thing from the other end.
 kubeVersion: ">=1.36.0-0"
 
 # This is the chart version. This version number should be incremented each time you make changes
