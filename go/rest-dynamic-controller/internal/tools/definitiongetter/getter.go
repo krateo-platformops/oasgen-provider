@@ -452,6 +452,24 @@ func (g *dynamicGetter) Get(un *unstructured.Unstructured) (*Info, error) {
 			return nil, err
 		}
 
+		// Resolution matches on KIND and GROUP, never on the version. That is deliberate and it is also
+		// the most misleading code in this module, so read the next paragraph before concluding anything
+		// about krateo.io/oas-version from it.
+		//
+		// Someone asking "is the chart's 1.36 floor really load-bearing, or can we lower it?" lands here,
+		// sees a definition resolved without any reference to the version label, and reasonably concludes
+		// the label is optional. It is not. The selector is applied one layer above, on the controller's
+		// ListWatcher (rest-dynamic-controller main.go, the WithListWatcher block), as exact equality on
+		// krateo.io/oas-version. An instance carrying no label is never delivered to the controller at
+		// all, so this function never runs for it.
+		//
+		// In other words: this tolerates version SKEW between an instance and its definition. It does not
+		// tolerate label ABSENCE, and it cannot, because it sits downstream of the filter that drops
+		// those instances. The evidence that argues against the floor is here; the thing that makes the
+		// floor necessary is above it.
+		//
+		// composition-dynamic-controller has the same shape with a different fallback -- see the tier-3
+		// note in core-provider's archive/getter.go.
 		kind, ok, err := unstructured.NestedString(item.Object, "spec", "resource", "kind")
 		if !ok {
 			return nil, fmt.Errorf("missing kind in definition for '%v' in namespace: %s", gvr, un.GetNamespace())
