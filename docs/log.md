@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-02T18:00:00Z
+timestamp: 2026-10-03T09:00:00Z
 ---
 
 # Log
@@ -12,6 +12,32 @@ timestamp: 2026-10-02T18:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-03 — 0.28.1
+
+**Upgrade from 0.28.0.** 0.28.0 left every RestDefinition reporting `Ready=False` / `Creating`
+indefinitely. Nothing was actually broken by it — generated CRDs were Established, every
+rest-dynamic-controller was running, instances were correctly labelled and no object was being rewritten
+— but the readiness signal never came good, so an umbrella install gating on it reads red forever.
+
+`Observe` renders the controller deployment to work out what the digest *would* be, and compares it
+against the digest `Create`/`Update` stored. In 0.28.0 those two paths rendered from different options:
+the version-scoped label selector was set on the write paths and missing on the read path. The digests
+could therefore never agree. Observe reported "not up to date" on every pass, Update re-rendered and
+stored the value it already had, and the gate that marks a RestDefinition Available sits downstream of
+that comparison.
+
+The signature, if you are on 0.28.0: the provider logs "Rendered resources digest changed" every few
+seconds while `status.digest` never moves and neither does the RestDefinition's `resourceVersion`. It is
+a compute-only loop — it rewrites nothing, which is why it costs nothing but a false red.
+
+The fix is one constructor for those options, shared by all three paths, with dry-run the only
+difference permitted between the read path and the write paths. Adding the missing field back would have
+fixed this instance and left the next field free to diverge the same way.
+
+**No action needed beyond upgrading.** The RestDefinitions recover on their own; nothing has to be
+deleted or edited. If any still require a nudge after this release, the digests disagree somewhere else
+and that is worth reporting.
 
 ## 2026-10-02 — 0.28.0
 
