@@ -473,7 +473,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
 	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
 	// working resource over a migration concern, and the next pass retries.
-	if bferr := e.backfillVersionLabel(ctx, gvk, gvk.Version); bferr != nil {
+	if bferr := e.backfillVersionLabels(ctx, cr, gvk, hasSecuritySchemes); bferr != nil {
 		e.log.Debug("Backfilling the oas-version label", "error", bferr)
 	}
 
@@ -609,7 +609,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
 	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
 	// working resource over a migration concern, and the next pass retries.
-	if bferr := e.backfillVersionLabel(ctx, gvk, gvk.Version); bferr != nil {
+	if bferr := e.backfillVersionLabels(ctx, cr, gvk, hasSecuritySchemes); bferr != nil {
 		e.log.Debug("Backfilling the oas-version label", "error", bferr)
 	}
 
@@ -924,7 +924,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
 	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
 	// working resource over a migration concern, and the next pass retries.
-	if bferr := e.backfillVersionLabel(ctx, gvk, gvk.Version); bferr != nil {
+	if bferr := e.backfillVersionLabels(ctx, cr, gvk, hasSecuritySchemes); bferr != nil {
 		e.log.Debug("Backfilling the oas-version label", "error", bferr)
 	}
 
