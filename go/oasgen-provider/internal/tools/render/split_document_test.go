@@ -3,6 +3,7 @@ package render_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	definitionv1alpha1 "github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
@@ -228,4 +229,38 @@ func TestSplitDocumentAsyncPollPathResolvesInTheVerbsDocument(t *testing.T) {
 	_, err := render.CRDs(context.Background(), cr, render.TargetGVK(cr, docs.Default()), docs, render.HasSecuritySchemes(docs.Default()))
 	require.NoError(t, err,
 		"the poll path is published by the create verb's own document, so it must validate against that one")
+}
+
+// splitDocV10Conflicting is the 1.0 document with an apiVersion query parameter added to the findby, typed
+// INTEGER where the 1.1 document's create types it STRING. That is #108's "version skew": two documents
+// that disagree about something both use.
+var splitDocV10Conflicting = strings.Replace(splitDocV10,
+	`    get:
+      operationId: listCloudServers`,
+	`    get:
+      operationId: listCloudServers
+      parameters:
+        - {name: apiVersion, in: query, required: true, schema: {type: integer}}`, 1)
+
+// TestCrossDocumentConflictRefusesTheRestDefinition is the end-to-end half of the conflict rule: it must be
+// FATAL, not a warning.
+//
+// Parameters are merged across every verb into one spec field, first verb wins. Two documents disagreeing
+// about one means the generated CRD's shape depends on how the author ordered verbsDescription, and the
+// losing verb then sends a value shaped for the other document's contract. A warning would be recorded on
+// a RestDefinition that reports Ready, so the refusal has to stop generation.
+func TestCrossDocumentConflictRefusesTheRestDefinition(t *testing.T) {
+	cr := splitCR()
+
+	p := oas2jsonschema.NewLibOASParser()
+	v10, err := p.Parse([]byte(splitDocV10Conflicting))
+	require.NoError(t, err)
+	v11, err := p.Parse([]byte(splitDocV11))
+	require.NoError(t, err)
+	docs := oas2jsonschema.NewDocumentSetWithOverrides(v10, map[string]oas2jsonschema.OASDocument{"create": v11})
+
+	_, err = render.CRDs(context.Background(), cr, render.TargetGVK(cr, docs.Default()), docs, render.HasSecuritySchemes(docs.Default()))
+	require.Error(t, err, "a cross-document parameter disagreement must stop generation, not warn")
+	assert.Contains(t, err.Error(), "apiVersion", "the message must name the parameter")
+	assert.Contains(t, err.Error(), "different OAS documents")
 }
