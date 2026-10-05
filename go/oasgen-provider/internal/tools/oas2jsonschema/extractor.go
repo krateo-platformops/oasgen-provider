@@ -9,7 +9,7 @@ func (g *OASSchemaGenerator) findParameterInOAS(field ConfigurationField) (*Para
 	for _, action := range field.FromRestDefinition.Actions {
 		for _, verb := range g.resourceConfig.Verbs {
 			if verb.Action == action {
-				path, ok := g.doc().FindPath(verb.Path)
+				path, ok := g.docFor(verb.Action).FindPath(verb.Path)
 				if !ok {
 					continue
 				}
@@ -31,12 +31,18 @@ func (g *OASSchemaGenerator) findParameterInOAS(field ConfigurationField) (*Para
 
 // getBaseSchemaForSpec returns the base schema for the spec, which is the request body of the 'create' action.
 // TODO: what about no create action but only update? (maybe this could be configured in the GeneratorConfig)
+//
+// Resolved against the CREATE verb's own document, which is the whole of #108's motivating case: Aruba's
+// CloudServer has findby/get/delete in compute-provider.json (1.0.0) and create alone in
+// compute-provider_v1.1.json (1.1.0), where the 1.1 document holds exactly that one path. Reading the
+// default document here meant the create body -- the CRD's entire spec -- came from the document that
+// does not contain it.
 func (g *OASSchemaGenerator) getBaseSchemaForSpec() (*Schema, error) {
 	for _, verb := range g.resourceConfig.Verbs {
 		if verb.Action != ActionCreate { // Right now we hardcode the action to 'create'
 			continue
 		}
-		path, ok := g.doc().FindPath(verb.Path)
+		path, ok := g.docFor(verb.Action).FindPath(verb.Path)
 		if !ok {
 			return nil, fmt.Errorf("path '%s' not found in OpenAPI spec", verb.Path)
 		}

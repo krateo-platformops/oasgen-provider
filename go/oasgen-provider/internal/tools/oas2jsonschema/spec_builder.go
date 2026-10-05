@@ -106,8 +106,9 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) []error {
 	}
 
 	for _, verb := range g.resourceConfig.Verbs {
-		// 1. Path lookup
-		path, ok := g.doc().FindPath(verb.Path)
+		// 1. Path lookup, in the verb's OWN document -- parameters are merged across every verb, so a verb
+		// that overrode spec.oasPath contributes its parameters from the document it named.
+		path, ok := g.docFor(verb.Action).FindPath(verb.Path)
 		if !ok {
 			warnings = append(warnings, SchemaGenerationError{Code: CodePathNotFound, Message: fmt.Sprintf("path '%s' set in RestDefinition not found in OAS", verb.Path)})
 			continue

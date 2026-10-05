@@ -53,7 +53,7 @@ func TestCRDsMatchGolden(t *testing.T) {
 	doc, err := oas2jsonschema.NewLibOASParser().Parse(oasText)
 	require.NoError(t, err)
 
-	res, err := render.CRDs(context.Background(), cr, render.TargetGVK(cr, doc), doc, render.HasSecuritySchemes(doc))
+	res, err := render.CRDs(context.Background(), cr, render.TargetGVK(cr, doc), oas2jsonschema.NewDocumentSet(doc), render.HasSecuritySchemes(doc))
 	require.NoError(t, err)
 	require.NotNil(t, res.CRD)
 	require.NotNil(t, res.ConfigurationCRD, "the example's document declares a bearer scheme")
@@ -95,7 +95,7 @@ func TestCRDsAreDeterministic(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rdJSON, cr))
 		doc, derr := oas2jsonschema.NewLibOASParser().Parse(oasText)
 		require.NoError(t, derr)
-		res, rerr := render.CRDs(context.Background(), cr, render.TargetGVK(cr, doc), doc, render.HasSecuritySchemes(doc))
+		res, rerr := render.CRDs(context.Background(), cr, render.TargetGVK(cr, doc), oas2jsonschema.NewDocumentSet(doc), render.HasSecuritySchemes(doc))
 		require.NoError(t, rerr)
 		b, merr := json.Marshal(map[string]any{"crd": res.CRD, "cfg": res.ConfigurationCRD})
 		require.NoError(t, merr)

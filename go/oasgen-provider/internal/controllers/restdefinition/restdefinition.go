@@ -578,10 +578,11 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 
 	e.log.Info("Creating RestDefinition", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)
 
-	doc, oasHash, err := e.getDocumentModelFromCR(ctx, cr)
+	docs, oasHash, err := e.getDocumentSetFromCR(ctx, cr)
 	if err != nil {
 		return fmt.Errorf("getting document model from CR: %w", err)
 	}
+	doc := docs.Default()
 
 	// check if doc has authentication defined, if so log it
 	hasSecuritySchemes := render.HasSecuritySchemes(doc)
@@ -608,7 +609,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	}
 
 	if !crdOk {
-		if err := e.generateAndApplyCRDs(ctx, cr, gvk, doc, hasSecuritySchemes); err != nil {
+		if err := e.generateAndApplyCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); err != nil {
 			return err
 		}
 
@@ -813,8 +814,8 @@ func (e *external) ensureVersionPolicyBestEffort(ctx context.Context, cr *defini
 	}
 }
 
-func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, doc oas2jsonschema.OASDocument, hasSecuritySchemes bool) (err error) {
-	rendered, err := render.CRDs(ctx, cr, gvk, doc, hasSecuritySchemes)
+func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, docs *oas2jsonschema.DocumentSet, hasSecuritySchemes bool) (err error) {
+	rendered, err := render.CRDs(ctx, cr, gvk, docs, hasSecuritySchemes)
 	if err != nil {
 		return err
 	}
@@ -927,10 +928,11 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 		attribute.String("oas.source", cr.Spec.OASPath),
 	)
 
-	doc, oasHash, err := e.getDocumentModelFromCR(ctx, cr)
+	docs, oasHash, err := e.getDocumentSetFromCR(ctx, cr)
 	if err != nil {
 		return fmt.Errorf("getting document model from CR: %w", err)
 	}
+	doc := docs.Default()
 
 	hasSecuritySchemes := render.HasSecuritySchemes(doc)
 
@@ -957,7 +959,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 		e.log.Debug("Regenerating CRD",
 			"oasChanged", oasHash != cr.Status.OASHash,
 			"resourceChanged", resHash != cr.Status.ResourceHash)
-		if gerr := e.generateAndApplyCRDs(ctx, cr, gvk, doc, hasSecuritySchemes); gerr != nil {
+		if gerr := e.generateAndApplyCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); gerr != nil {
 			return fmt.Errorf("regenerating CRD: %w", gerr)
 		}
 		cr.Status.ResourceHash = resHash

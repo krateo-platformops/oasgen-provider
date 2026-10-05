@@ -246,8 +246,17 @@ func (h *Handler) renderOne(ctx context.Context, cr *definitionv1alpha1.RestDefi
 		return nil, []Problem{{Field: "spec.oasPath", Message: fmt.Sprintf("getting document model from CR: %v", err), Severity: SeverityError}}
 	}
 
+	// Build the same document set the controller builds, overrides and all (#108). The preview exists to
+	// answer "what would the controller apply", and the golden test pins the two to one code path -- so a
+	// preview that quietly collapsed every verb onto spec.oasPath would answer a different question than
+	// the one asked, for exactly the RestDefinitions the feature is for.
+	docs, probs := h.documentSetFor(cr, doc, oas)
+	if len(probs) > 0 {
+		return nil, probs
+	}
+
 	gvk := render.TargetGVK(cr, doc)
-	res, err = render.CRDs(ctx, cr, gvk, doc, render.HasSecuritySchemes(doc))
+	res, err = render.CRDs(ctx, cr, gvk, docs, render.HasSecuritySchemes(doc))
 	if err != nil {
 		p := Problem{Message: err.Error(), Severity: SeverityError}
 		var fe *render.FieldError
@@ -293,4 +302,38 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// documentSetFor mirrors the controller's getDocumentSetFromCR against the documents the request supplied.
+//
+// Keyed by ACTION and parsed once per path, so two verbs naming the same override share one parsed
+// document -- the same contract the controller's set is built under. A verb whose override names
+// spec.oasPath is not an override at all and is skipped, which keeps the set's Default the only entry for
+// that document.
+func (h *Handler) documentSetFor(cr *definitionv1alpha1.RestDefinition, def oas2jsonschema.OASDocument, oas map[string]string) (*oas2jsonschema.DocumentSet, []Problem) {
+	parsed := map[string]oas2jsonschema.OASDocument{cr.Spec.OASPath: def}
+	byVerb := map[string]oas2jsonschema.OASDocument{}
+
+	for i, v := range cr.Spec.Resource.VerbsDescription {
+		if v.OASPath == "" || strings.EqualFold(v.OASPath, cr.Spec.OASPath) {
+			continue
+		}
+		field := fmt.Sprintf("spec.resource.verbsDescription[%d].oasPath", i)
+		if _, ok := parsed[v.OASPath]; !ok {
+			raw, ok := oas[v.OASPath]
+			if !ok {
+				return nil, []Problem{{Field: field, Severity: SeverityError,
+					Message: fmt.Sprintf("verb %q: no document supplied for oasPath %q: the request's oas map must carry it under exactly that key", v.Action, v.OASPath)}}
+			}
+			doc, err := h.Parser.Parse([]byte(raw))
+			if err != nil {
+				return nil, []Problem{{Field: field, Severity: SeverityError,
+					Message: fmt.Sprintf("verb %q: parsing OAS document %q: %v", v.Action, v.OASPath, err)}}
+			}
+			parsed[v.OASPath] = doc
+		}
+		byVerb[v.Action] = parsed[v.OASPath]
+	}
+
+	return oas2jsonschema.NewDocumentSetWithOverrides(def, byVerb), nil
 }

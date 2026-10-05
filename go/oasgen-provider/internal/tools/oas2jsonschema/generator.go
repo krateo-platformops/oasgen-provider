@@ -25,7 +25,20 @@ type OASSchemaGenerator struct {
 
 // doc is the document named by spec.oasPath, for the reads that are a property of the RESOURCE rather
 // than of one verb: the security schemes and the CRD version.
+//
+// Use docFor instead wherever a VERB's path is being resolved. Those two reads look identical at the
+// call site and mean different things, which is how three of them came to use this one by mistake.
 func (g *OASSchemaGenerator) doc() OASDocument { return g.docs.Default() }
+
+// docFor is the document a VERB's path must be resolved against: its own, when it overrode spec.oasPath,
+// and the default otherwise.
+//
+// Every lookup of the form `FindPath(verb.Path)` has to go through here. The seam commit claimed
+// ExtractSchemaForAction was the only such expression; it was not, and the three that kept reading the
+// default document silently resolved an overriding verb against the wrong one -- or, for a path present
+// only in the override document, failed with "path not found" while the path plainly existed where the
+// verb said it was.
+func (g *OASSchemaGenerator) docFor(action string) OASDocument { return g.docs.For(action) }
 
 // SkippedSecuritySchemes returns the security schemes that could not be generated, as
 // "<name> (type: <type>, in: <in>)". Empty unless GenerateConfigurationSchema has run.
