@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-05T12:00:00Z
+timestamp: 2026-10-05T18:00:00Z
 ---
 
 # Log
@@ -12,6 +12,43 @@ timestamp: 2026-10-05T12:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-05 — 0.30.0
+
+Completes version coexistence, and closes a gap where a field was accepted and ignored. **Two things
+will look like regressions if you are not expecting them** — both are listed first for that reason.
+
+### Served versions are now retired, so a CRD's version list SHRINKS
+
+A generated CRD used to accumulate every version hop's served endpoint forever. Versions nothing uses
+are now removed, and `spec.versions` getting shorter is this working rather than something eating them.
+
+A version is kept if it is the one currently served, if it is the vacuum storage version, if another
+RestDefinition still serves it, or if any live instance still carries it in `krateo.io/oas-version`.
+The decision is logged at INFO — naming what was pruned, what was kept and why — and a
+`PrunedServedVersions` event is recorded on the RestDefinition, so a retirement can be reconstructed
+afterwards rather than inferred.
+
+Why it matters beyond tidiness: a retired-but-still-served endpoint is one a client can pick, and
+writing through it silently drops any field added after that version. And since 0.28.0 each served
+version is a rest-dynamic-controller Deployment, so dead versions are controllers reconciling nothing
+for the lifetime of the install.
+
+Nothing is pruned while an instance claims it. That is the one failure that would destroy data, and it
+is the case the tests are built around.
+
+### A per-verb `oasPath` is now REFUSED where it used to be accepted
+
+`verbsDescription[].oasPath` has shipped in the CRD for several releases, pattern-validated and
+documented, and **nothing has ever read it**. A RestDefinition setting it was admitted and the verb was
+then resolved from `spec.oasPath` anyway — a CRD generated from the wrong document, with no error.
+
+It is now rejected at admission, with a message saying why and pointing at
+krateo-platformops/oasgen-provider#108. If you were setting it, nothing you had was working; the change
+is that the failure is now visible instead of silent.
+
+The feature itself — a resource whose verbs legitimately span two OAS documents, which is Aruba's
+`CloudServer` — remains open in #108. This release only stops pretending it exists.
 
 ## 2026-10-05 — 0.29.0
 
