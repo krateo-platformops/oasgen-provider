@@ -60,6 +60,14 @@ const (
 	// findby compares each listed item against the CR, so an identifier that exists in neither place can
 	// never match, and the resource is generated, admitted, and non-functional.
 	CodeIdentifierNotResolvable GenerationCode = "IdentifierNotResolvable"
+	// CodeCrossDocumentParameterConflict indicates that two verbs resolving to DIFFERENT OAS documents
+	// declare the same parameter name with structurally different schemas (#108).
+	//
+	// Parameters are merged across every verb into one spec, deduplicated by name, first verb wins. Within
+	// one document that is harmless -- a path parameter repeated across verbs is the same parameter. Across
+	// two documents it is a silent choice between two definitions that disagree, made by verb ORDER, and
+	// the losing verb then sends a value shaped for the other document's contract.
+	CodeCrossDocumentParameterConflict GenerationCode = "CrossDocumentParameterConflict"
 )
 
 // SchemaGenerationError defines a structured error for schema generation warnings.

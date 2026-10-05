@@ -96,7 +96,8 @@ func TestParametersComeFromEachVerbsOwnDocument(t *testing.T) {
 	}
 
 	schema := &Schema{Type: []string{"object"}}
-	warnings := g.addParametersToSpec(schema)
+	warnings, err := g.addParametersToSpec(schema)
+	require.NoError(t, err)
 	assert.Empty(t, warnings, "every verb's path resolves in its own document, so nothing should be reported missing")
 
 	names := make([]string, 0, len(schema.Properties))
@@ -153,4 +154,116 @@ func TestResourceLevelReadsStayOnTheDefaultDocument(t *testing.T) {
 	require.Len(t, g.doc().SecuritySchemes(), 1)
 	assert.Equal(t, "bearerAuth", g.doc().SecuritySchemes()[0].Name)
 	assert.Equal(t, "1.0.0", g.doc().Version(), "the CRD version comes from spec.oasPath's document")
+}
+
+// conflictingSet builds two documents that both declare a `projectId` path parameter, with the schemas
+// the caller gives, so a test can make them agree or disagree.
+func conflictingSet(defSchema, overrideSchema *Schema) *DocumentSet {
+	defaultDoc := &mockOASDocument{Paths: map[string]*mockPathItem{
+		"/cloudServers/{cloudServerId}": {Ops: map[string]Operation{
+			"get": &mockOperation{Parameters: []ParameterInfo{
+				{Name: "projectId", In: "path", Required: true, Schema: defSchema},
+			}},
+		}},
+	}}
+	overrideDoc := &mockOASDocument{Paths: map[string]*mockPathItem{
+		"/cloudServers": {Ops: map[string]Operation{
+			"post": &mockOperation{Parameters: []ParameterInfo{
+				{Name: "projectId", In: "path", Required: true, Schema: overrideSchema},
+			}},
+		}},
+	}}
+	return NewDocumentSetWithOverrides(defaultDoc, map[string]OASDocument{"create": overrideDoc})
+}
+
+func conflictGenerator(docs *DocumentSet) *OASSchemaGenerator {
+	return &OASSchemaGenerator{
+		generatorConfig: DefaultGeneratorConfig(),
+		docs:            docs,
+		resourceConfig: &ResourceConfig{Verbs: []Verb{
+			{Action: "create", Method: "POST", Path: "/cloudServers"},
+			{Action: "get", Method: "GET", Path: "/cloudServers/{cloudServerId}"},
+		}},
+	}
+}
+
+// TestCrossDocumentParameterConflictIsRefused is #108's "version skew" case, at the one site where two
+// documents demonstrably feed the same CRD field.
+//
+// Parameters from every verb are merged into one spec, deduplicated by name, FIRST VERB WINS. With both
+// verbs reading one document that is harmless: a path parameter repeated across verbs is the same
+// parameter. Across two documents it is a silent choice between definitions that disagree, decided by
+// the order of verbsDescription, after which the losing verb sends a value shaped for the other
+// document's contract. Nothing downstream could report it.
+func TestCrossDocumentParameterConflictIsRefused(t *testing.T) {
+	g := conflictGenerator(conflictingSet(
+		&Schema{Type: []string{"string"}},
+		&Schema{Type: []string{"integer"}},
+	))
+
+	_, err := g.addParametersToSpec(&Schema{Type: []string{"object"}})
+	require.Error(t, err, "two documents disagreeing about a merged parameter must not be resolved by verb order")
+
+	var gerr SchemaGenerationError
+	require.ErrorAs(t, err, &gerr)
+	assert.Equal(t, CodeCrossDocumentParameterConflict, gerr.Code)
+	assert.Contains(t, err.Error(), "projectId", "the message must name the parameter")
+	assert.Contains(t, err.Error(), "create", "and both verbs, which is how the author finds the two documents")
+	assert.Contains(t, err.Error(), "get")
+}
+
+// TestAgreeingDocumentsAreNotAConflict is the half that keeps the rule usable. A vendor's 1.0 and 1.1
+// documents share most of their surface; a parameter they both declare IDENTICALLY is not skew, and
+// refusing it would make the split-document case unusable for the resource #108 exists for.
+func TestAgreeingDocumentsAreNotAConflict(t *testing.T) {
+	g := conflictGenerator(conflictingSet(
+		&Schema{Type: []string{"string"}},
+		&Schema{Type: []string{"string"}},
+	))
+
+	schema := &Schema{Type: []string{"object"}}
+	warnings, err := g.addParametersToSpec(schema)
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+
+	names := make([]string, 0, len(schema.Properties))
+	for _, p := range schema.Properties {
+		names = append(names, p.Name)
+	}
+	assert.Equal(t, []string{"projectId"}, names, "the agreeing parameter is merged exactly once")
+}
+
+// TestSameDocumentDisagreementIsNotRefused pins the scoping, and it is the test that says why the rule is
+// cross-document rather than global.
+//
+// Two verbs in ONE document declaring the same parameter differently is pre-existing and resolved by
+// first-wins. It is reachable by every RestDefinition that exists today, so refusing it here would be a
+// regression dressed as a fix -- and it is unreachable by the skew #108 introduces. The rule can only
+// fire once a verb overrides spec.oasPath.
+func TestSameDocumentDisagreementIsNotRefused(t *testing.T) {
+	doc := &mockOASDocument{Paths: map[string]*mockPathItem{
+		"/a": {Ops: map[string]Operation{
+			"post": &mockOperation{Parameters: []ParameterInfo{
+				{Name: "projectId", In: "path", Required: true, Schema: &Schema{Type: []string{"string"}}},
+			}},
+		}},
+		"/b": {Ops: map[string]Operation{
+			"get": &mockOperation{Parameters: []ParameterInfo{
+				{Name: "projectId", In: "path", Required: true, Schema: &Schema{Type: []string{"integer"}}},
+			}},
+		}},
+	}}
+
+	g := &OASSchemaGenerator{
+		generatorConfig: DefaultGeneratorConfig(),
+		docs:            NewDocumentSet(doc),
+		resourceConfig: &ResourceConfig{Verbs: []Verb{
+			{Action: "create", Method: "POST", Path: "/a"},
+			{Action: "get", Method: "GET", Path: "/b"},
+		}},
+	}
+
+	_, err := g.addParametersToSpec(&Schema{Type: []string{"object"}})
+	assert.NoError(t, err,
+		"first-wins within one document is long-standing behaviour; this rule must not reach it")
 }

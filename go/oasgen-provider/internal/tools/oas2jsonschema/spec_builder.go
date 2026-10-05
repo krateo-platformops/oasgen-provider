@@ -2,6 +2,7 @@ package oas2jsonschema
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -23,8 +24,13 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 		return nil, nil, fmt.Errorf("could not determine base schema for spec: %w", err)
 	}
 
-	// Add parameters to the spec schema.
-	warnings = append(warnings, g.addParametersToSpec(baseSchema)...)
+	// Add parameters to the spec schema. A cross-document parameter conflict is fatal, not a warning:
+	// the merged field would otherwise be chosen by verb order (#108).
+	paramWarnings, err := g.addParametersToSpec(baseSchema)
+	warnings = append(warnings, paramWarnings...)
+	if err != nil {
+		return nil, warnings, err
+	}
 
 	// Add identifiers to the spec schema, if configured.
 	// Kept for legacy reasons, disabled by default.
@@ -75,15 +81,30 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 	return byteSchema, warnings, nil
 }
 
+// paramOrigin records which verb contributed a merged parameter, and from which document, so a later
+// verb declaring the same name can be checked against it (#108).
+type paramOrigin struct {
+	action string
+	doc    OASDocument
+	schema *Schema
+}
+
 // addParametersToSpec adds the parameters from all verbs to the schema.
 // Assumption: it adds parameters at the root level of the spec schema and does not support nested parameters.
 // Nested parameters do not make sense in the context of path/query/header/cookie parameters.
-func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) []error {
+//
+// Returns a FATAL error when two verbs resolving to different OAS documents declare the same parameter
+// name with different schemas. This is the one place in generation where two documents demonstrably feed
+// the same CRD field, and the merge below resolves it by VERB ORDER -- so the alternative to refusing is
+// a CRD whose shape depends on how the author happened to order verbsDescription, with the losing verb
+// sending a value shaped for the other document's contract. Nothing downstream could report it.
+func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) ([]error, error) {
 	var warnings []error
 
-	// Track unique parameter names to avoid duplicates (E.g. path parameters may be repeated across verbs).
+	// Track unique parameter names to avoid duplicates (E.g. path parameters may be repeated across verbs),
+	// along with where each came from so a cross-document disagreement can be caught.
 	// Here we track path, query, header, and cookie parameters.
-	uniqueParams := make(map[string]struct{})
+	uniqueParams := make(map[string]paramOrigin)
 
 	// Internal helper function to check if property already exists in schema
 	propertyExists := func(name string) bool {
@@ -108,7 +129,8 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) []error {
 	for _, verb := range g.resourceConfig.Verbs {
 		// 1. Path lookup, in the verb's OWN document -- parameters are merged across every verb, so a verb
 		// that overrode spec.oasPath contributes its parameters from the document it named.
-		path, ok := g.docFor(verb.Action).FindPath(verb.Path)
+		verbDoc := g.docFor(verb.Action)
+		path, ok := verbDoc.FindPath(verb.Path)
 		if !ok {
 			warnings = append(warnings, SchemaGenerationError{Code: CodePathNotFound, Message: fmt.Sprintf("path '%s' set in RestDefinition not found in OAS", verb.Path)})
 			continue
@@ -128,6 +150,29 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) []error {
 				continue
 			}
 
+			// A name already merged from a DIFFERENT document must agree with what is there (#108).
+			//
+			// Scoped to cross-document deliberately: two verbs sharing one document that declare the same
+			// parameter differently is pre-existing, long-standing, and resolved by first-wins, so checking
+			// it here would refuse RestDefinitions that work today. A disagreement is only reachable at all
+			// once a verb overrides spec.oasPath, which is exactly the new surface this guards.
+			if prior, exists := uniqueParams[param.Name]; exists && prior.doc != verbDoc {
+				if diffs := compareSchemas("spec."+param.Name, prior.schema, param.Schema, prior.action, verb.Action, g.generatorConfig); len(diffs) > 0 {
+					return warnings, SchemaGenerationError{
+						Path: "spec." + param.Name,
+						Code: CodeCrossDocumentParameterConflict,
+						Message: fmt.Sprintf(
+							"parameter %q is declared by verb %q and verb %q, which resolve to different OAS documents, "+
+								"with schemas that disagree (%v); the two definitions are merged into one spec field and the "+
+								"winner would be decided by the order of verbsDescription, so set the verbs' oasPath to "+
+								"documents that agree on %q, or exclude it via spec.resource.excludedSpecFields",
+							param.Name, prior.action, verb.Action, errors.Join(diffs...), param.Name),
+						Got:      param.Schema,
+						Expected: prior.schema,
+					}
+				}
+			}
+
 			// Add parameter to spec only if not already present in uniqueParams AND not in existing base schema
 			// Therefore we give precedence to base schema properties over parameters.
 			if _, exists := uniqueParams[param.Name]; !exists && !propertyExists(param.Name) {
@@ -144,7 +189,7 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) []error {
 					schema.Required = append(schema.Required, param.Name)
 				}
 
-				uniqueParams[param.Name] = struct{}{}
+				uniqueParams[param.Name] = paramOrigin{action: verb.Action, doc: verbDoc, schema: param.Schema}
 			}
 
 			// If the parameter is already present but optional in the base schema (e.g., in the request body schema) and it is required in a parameter definition (e.g., path parameter),
@@ -156,7 +201,7 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) []error {
 		}
 	}
 
-	return warnings
+	return warnings, nil
 }
 
 // addConfigurationRefToSpec adds the `configurationRef` property to the schema (at the root level of spec).

@@ -322,7 +322,7 @@ func TestAddParametersToSpec(t *testing.T) {
 	}
 
 	schema := baseSchema.deepCopy()
-	g.addParametersToSpec(schema)
+	_, _ = g.addParametersToSpec(schema)
 
 	// Assertions
 	props := schema.Properties

@@ -521,15 +521,15 @@ spec:
                     description: |-
                       VerbsDescription: the list of verbs to use on this resource
 
-                      The per-verb oasPath override is REJECTED here until the plumbing exists. The field is declared on
-                      VerbsDescription with its full contract, and nothing reads it: a RestDefinition setting it is
-                      admitted and the verb is then resolved from spec.oasPath regardless, silently producing a CRD
-                      generated from the wrong document. Refusing the write is the better failure, and it is temporary --
-                      see krateo-platformops/oasgen-provider#108, which this rule is deleted by.
+                      A per-verb oasPath override used to be refused here, because the field shipped in the CRD and
+                      NOTHING READ IT: the write was admitted and the verb resolved from spec.oasPath regardless, silently
+                      generating the CRD from the wrong document. The rule is gone because #108 implemented it -- every
+                      per-verb lookup now resolves against the verb's own document, and two documents that disagree about
+                      a merged parameter are refused at generation rather than resolved by verb order.
 
-                      Bounded at 32 verbs to keep the rule inside the apiserver's CEL cost budget. An unbounded
-                      comprehension is rejected at CRD-install time with "estimated rule cost exceeds budget", which
-                      takes the whole CRD down rather than just the validation (learned in #169).
+                      The MaxItems=32 bound went with it. It was never a limit on verbs; it existed only to keep that
+                      rule's comprehension inside the apiserver's CEL cost budget, which an unbounded one exceeds at
+                      CRD-install time -- taking the whole CRD down rather than just the validation (#169).
                     items:
                       properties:
                         action:
@@ -1002,9 +1002,13 @@ spec:
                             compute-provider_v1.1.json (1.1.0), and Aruba's own SDK pins exactly that split.
 
                             Documents are read as published and never merged: pre-merging would break the guarantee that a
-                            generated CRD traces back to one vendor document, which this repo checksum-enforces. Where two
-                            documents disagree about a schema both use, the RestDefinition is REJECTED at admission rather
-                            than silently preferring one.
+                            generated CRD traces back to one vendor document, which this repo checksum-enforces.
+
+                            Where two documents disagree, the RestDefinition is REFUSED rather than silently preferring one --
+                            at GENERATION, not admission, because admission cannot see the documents. The check is scoped to
+                            the one place two documents demonstrably feed the same CRD field: parameters are merged across
+                            every verb and deduplicated by name, so the same name declared differently by verbs reading
+                            different documents would otherwise be resolved by the ORDER of this list.
 
                             Which document supplies what is unchanged, only made explicit: the create verb's document drives
                             the generated spec schema, the observe (get/findby) document drives status and identifiers, and
@@ -1368,13 +1372,7 @@ spec:
                         rule: self.action == 'findby' || !has(self.identifiersMatchPolicy)
                       - message: pagination can only be set for 'findby' actions
                         rule: self.action == 'findby' || !has(self.pagination)
-                    maxItems: 32
                     type: array
-                    x-kubernetes-validations:
-                    - message: 'per-verb oasPath is not implemented yet: the field
-                        is declared but nothing reads it, so setting it would silently
-                        generate the CRD from spec.oasPath instead. Track krateo-platformops/oasgen-provider#108'
-                      rule: self.all(v, !has(v.oasPath))
                 required:
                 - kind
                 - verbsDescription
