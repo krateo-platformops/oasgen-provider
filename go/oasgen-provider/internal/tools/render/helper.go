@@ -93,8 +93,11 @@ const defaultHandleParam = "operationId"
 // unresolved required parameter, and one writing .../{operationId} got a lookup miss — both spellings
 // broken, both accepted. Declaring handleParam: id makes the vendor document work as written, and this
 // check then confirms the declared name actually appears in the path.
-func validateAsyncPollPaths(cr *definitionv1alpha1.RestDefinition, doc oas2jsonschema.OASDocument) error {
-	if cr == nil || doc == nil {
+// The poll path is resolved against the VERB's own document (#108): an async verb that overrode
+// spec.oasPath declares a poll endpoint from the document it named, and checking it against the default
+// would reject a path that is present exactly where the verb said it was.
+func validateAsyncPollPaths(cr *definitionv1alpha1.RestDefinition, docs *oas2jsonschema.DocumentSet) error {
+	if cr == nil || docs.Default() == nil {
 		return nil
 	}
 	for i, v := range cr.Spec.Resource.VerbsDescription {
@@ -118,7 +121,7 @@ func validateAsyncPollPaths(cr *definitionv1alpha1.RestDefinition, doc oas2jsons
 					"document declares for the poll endpoint, or set async.poll.handleParam to it",
 				v.Action, pollPath, token)
 		}
-		if _, ok := doc.FindPath(pollPath); !ok {
+		if _, ok := docs.For(v.Action).FindPath(pollPath); !ok {
 			return fieldErrorf(field,
 				"verb %q: async.poll.path %q is not a path declared in the OAS document (paths are matched by "+
 					"exact string, so a differing parameter name is a miss); write the path exactly as the "+

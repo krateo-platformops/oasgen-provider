@@ -118,14 +118,14 @@ func TestValidateAsyncPollPaths(t *testing.T) {
 		}
 	}
 	crWith := func(pollPath string) *definitionv1alpha1.RestDefinition { return crWithHandle(pollPath, "") }
-	doc := &stubOASDoc{paths: map[string]bool{oasPath: true, vendorPath: true}}
+	docs := oas2jsonschema.NewDocumentSet(&stubOASDoc{paths: map[string]bool{oasPath: true, vendorPath: true}})
 
 	t.Run("valid poll path passes", func(t *testing.T) {
-		require.NoError(t, validateAsyncPollPaths(crWith(oasPath), doc))
+		require.NoError(t, validateAsyncPollPaths(crWith(oasPath), docs))
 	})
 
 	t.Run("vendor spelling without a declaration is rejected", func(t *testing.T) {
-		err := validateAsyncPollPaths(crWith(vendorPath), doc)
+		err := validateAsyncPollPaths(crWith(vendorPath), docs)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "{operationId}", "the default is what it looked for")
 		assert.Contains(t, err.Error(), "handleParam", "the error must point at the way out")
@@ -133,18 +133,18 @@ func TestValidateAsyncPollPaths(t *testing.T) {
 	})
 
 	t.Run("vendor spelling PASSES once handleParam declares it — the whole point", func(t *testing.T) {
-		require.NoError(t, validateAsyncPollPaths(crWithHandle(vendorPath, "id"), doc),
+		require.NoError(t, validateAsyncPollPaths(crWithHandle(vendorPath, "id"), docs),
 			"an unmodified vendor OAS must be usable by declaring its parameter name")
 	})
 
 	t.Run("a declared name absent from the path is rejected", func(t *testing.T) {
-		err := validateAsyncPollPaths(crWithHandle(oasPath, "id"), doc)
+		err := validateAsyncPollPaths(crWithHandle(oasPath, "id"), docs)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "{id}", "the error names the declared token, not the default")
 	})
 
 	t.Run("operationId spelling not in the document is rejected as an exact-lookup miss", func(t *testing.T) {
-		err := validateAsyncPollPaths(crWith("/other/monitor/{operationId}"), doc)
+		err := validateAsyncPollPaths(crWith("/other/monitor/{operationId}"), docs)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not a path declared in the OAS document")
 	})
@@ -152,11 +152,11 @@ func TestValidateAsyncPollPaths(t *testing.T) {
 	t.Run("a verb without async is untouched", func(t *testing.T) {
 		cr := crWith(oasPath)
 		cr.Spec.Resource.VerbsDescription[0].Async = nil
-		require.NoError(t, validateAsyncPollPaths(cr, doc))
+		require.NoError(t, validateAsyncPollPaths(cr, docs))
 	})
 
-	t.Run("nil cr or doc is a no-op", func(t *testing.T) {
-		require.NoError(t, validateAsyncPollPaths(nil, doc))
+	t.Run("nil cr or document set is a no-op", func(t *testing.T) {
+		require.NoError(t, validateAsyncPollPaths(nil, docs))
 		require.NoError(t, validateAsyncPollPaths(crWith(oasPath), nil))
 	})
 }
