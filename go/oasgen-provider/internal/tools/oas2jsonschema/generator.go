@@ -8,12 +8,24 @@ import (
 type OASSchemaGenerator struct {
 	generatorConfig *GeneratorConfig
 	resourceConfig  *ResourceConfig
-	doc             OASDocument
+	// docs resolves which document each verb's path belongs to. While #108 is unimplemented it holds a
+	// single document and every verb resolves to it.
+	//
+	// The ONLY document field. An earlier revision of this seam kept `doc` alongside it for the
+	// resource-level reads, and the two promptly disagreed: tests construct this struct literally, so
+	// `docs` was nil while `doc` was set, and the nil-safe For() returned nil rather than panicking --
+	// which moved the panic one line later into FindPath. Two fields that must agree is the same shape
+	// that produced the 0.28.0 readiness loop. Resource-level reads go through doc() below.
+	docs *DocumentSet
 	// skippedSecuritySchemes records security schemes the generator could not express, populated during
 	// configuration-schema generation. Surfaced by the caller as a warning and a condition: a resource whose
 	// only scheme was skipped has no way to authenticate, and today that is discovered via 401s.
 	skippedSecuritySchemes []string
 }
+
+// doc is the document named by spec.oasPath, for the reads that are a property of the RESOURCE rather
+// than of one verb: the security schemes and the CRD version.
+func (g *OASSchemaGenerator) doc() OASDocument { return g.docs.Default() }
 
 // SkippedSecuritySchemes returns the security schemes that could not be generated, as
 // "<name> (type: <type>, in: <in>)". Empty unless GenerateConfigurationSchema has run.
@@ -21,10 +33,18 @@ func (g *OASSchemaGenerator) SkippedSecuritySchemes() []string { return g.skippe
 
 // NewOASSchemaGenerator creates a new, configured OASSchemaGenerator.
 func NewOASSchemaGenerator(doc OASDocument, config *GeneratorConfig, resourceConfig *ResourceConfig) *OASSchemaGenerator {
+	return NewOASSchemaGeneratorFromSet(NewDocumentSet(doc), config, resourceConfig)
+}
+
+// NewOASSchemaGeneratorFromSet is the form that takes a document set directly.
+//
+// Kept alongside the single-document constructor so the many existing callers and tests are untouched by
+// the seam: they pass one document, it becomes a set of one, and nothing about their behaviour changes.
+func NewOASSchemaGeneratorFromSet(docs *DocumentSet, config *GeneratorConfig, resourceConfig *ResourceConfig) *OASSchemaGenerator {
 	return &OASSchemaGenerator{
 		generatorConfig: config,
 		resourceConfig:  resourceConfig,
-		doc:             doc,
+		docs:            docs,
 	}
 }
 
@@ -49,11 +69,11 @@ func (g *OASSchemaGenerator) Generate() (*GenerationResult, error) {
 	generationWarnings = append(generationWarnings, warnings...)
 
 	// Validate Status Schema
-	validationWarnings := ValidateSchemas(g.doc, g.resourceConfig.Verbs, g.generatorConfig)
+	validationWarnings := ValidateSchemas(g.docs, g.resourceConfig.Verbs, g.generatorConfig)
 
 	// Generate Configuration Schema if needed
 	var configurationSchema []byte
-	if len(g.resourceConfig.ConfigurationFields) > 0 || len(g.doc.SecuritySchemes()) > 0 {
+	if len(g.resourceConfig.ConfigurationFields) > 0 || len(g.doc().SecuritySchemes()) > 0 {
 		var err error
 		configurationSchema, err = g.BuildConfigurationSchema()
 		if err != nil {

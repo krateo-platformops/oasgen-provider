@@ -11,7 +11,7 @@ import (
 
 // BuildConfigurationSchema builds the spec schema for the Configuration CRD.
 func (g *OASSchemaGenerator) BuildConfigurationSchema() ([]byte, error) {
-	if len(g.resourceConfig.ConfigurationFields) == 0 && len(g.doc.SecuritySchemes()) == 0 {
+	if len(g.resourceConfig.ConfigurationFields) == 0 && len(g.doc().SecuritySchemes()) == 0 {
 		return nil, nil
 	}
 
@@ -109,7 +109,7 @@ func (g *OASSchemaGenerator) BuildConfigurationSchema() ([]byte, error) {
 // anyone running an oauth2-declaring document against an endpoint that does not enforce it, whose only
 // recourse would be editing the vendor spec.
 func (g *OASSchemaGenerator) buildAuthMethodsSchemaMap() (map[string]*Schema, []string, error) {
-	schemes := g.doc.SecuritySchemes()
+	schemes := g.doc().SecuritySchemes()
 
 	// A header default is only meaningful when exactly one apiKey scheme exists; with several there is no
 	// single correct answer, so the generated field stays required and the author chooses.

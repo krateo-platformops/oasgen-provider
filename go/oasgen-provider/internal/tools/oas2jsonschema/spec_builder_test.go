@@ -312,7 +312,7 @@ func TestAddParametersToSpec(t *testing.T) {
 	}
 
 	g := &OASSchemaGenerator{
-		doc: mockDoc, // Inject the mock document
+		docs: NewDocumentSet(mockDoc), // Inject the mock document
 		resourceConfig: &ResourceConfig{
 			Verbs: []Verb{
 				{Path: "/path1", Method: "get"},
@@ -733,10 +733,10 @@ func TestBuildSpecSchema_ReadOnlyResource(t *testing.T) {
 
 	t.Run("identifier is materialised into the spec as a selector", func(t *testing.T) {
 		g := &OASSchemaGenerator{
-			doc: newDoc([]Property{
+			docs: NewDocumentSet(newDoc([]Property{
 				{Name: "name", Schema: &Schema{Type: []string{"string"}}},
 				{Name: "id", Schema: &Schema{Type: []string{"string"}}},
-			}),
+			})),
 			generatorConfig: DefaultGeneratorConfig(),
 			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"name"}},
 		}
@@ -764,9 +764,9 @@ func TestBuildSpecSchema_ReadOnlyResource(t *testing.T) {
 
 	t.Run("identifier type is taken from the response schema, not forced to string", func(t *testing.T) {
 		g := &OASSchemaGenerator{
-			doc: newDoc([]Property{
+			docs: NewDocumentSet(newDoc([]Property{
 				{Name: "serial", Schema: &Schema{Type: []string{"integer"}}},
-			}),
+			})),
 			generatorConfig: DefaultGeneratorConfig(),
 			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"serial"}},
 		}
@@ -783,9 +783,9 @@ func TestBuildSpecSchema_ReadOnlyResource(t *testing.T) {
 
 	t.Run("identifier absent from the response schema warns", func(t *testing.T) {
 		g := &OASSchemaGenerator{
-			doc: newDoc([]Property{
+			docs: NewDocumentSet(newDoc([]Property{
 				{Name: "id", Schema: &Schema{Type: []string{"string"}}},
-			}),
+			})),
 			generatorConfig: DefaultGeneratorConfig(),
 			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"nonexistent"}},
 		}
@@ -812,7 +812,7 @@ func TestBuildSpecSchema_ReadOnlyResource(t *testing.T) {
 			}},
 		}
 		g := &OASSchemaGenerator{
-			doc:             doc,
+			docs:            NewDocumentSet(doc),
 			generatorConfig: DefaultGeneratorConfig(),
 			resourceConfig: &ResourceConfig{
 				Verbs: append(verbs, Verb{Action: ActionCreate, Path: "/projects/{projectId}/loadBalancers", Method: "post"}),
@@ -874,7 +874,7 @@ func TestBuildSpecSchema_NestedIdentifierSelector(t *testing.T) {
 
 	t.Run("dotted identifier nests instead of becoming a flat dotted key", func(t *testing.T) {
 		g := &OASSchemaGenerator{
-			doc:             doc,
+			docs:            NewDocumentSet(doc),
 			generatorConfig: DefaultGeneratorConfig(),
 			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"metadata.name"}},
 		}
@@ -897,7 +897,7 @@ func TestBuildSpecSchema_NestedIdentifierSelector(t *testing.T) {
 
 	t.Run("nested identifier keeps its declared type", func(t *testing.T) {
 		g := &OASSchemaGenerator{
-			doc:             doc,
+			docs:            NewDocumentSet(doc),
 			generatorConfig: DefaultGeneratorConfig(),
 			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"metadata.serial"}},
 		}
@@ -914,7 +914,7 @@ func TestBuildSpecSchema_NestedIdentifierSelector(t *testing.T) {
 
 	t.Run("a nested identifier that really is absent still warns", func(t *testing.T) {
 		g := &OASSchemaGenerator{
-			doc:             doc,
+			docs:            NewDocumentSet(doc),
 			generatorConfig: DefaultGeneratorConfig(),
 			resourceConfig:  &ResourceConfig{Verbs: verbs, Identifiers: []string{"metadata.nonexistent"}},
 		}

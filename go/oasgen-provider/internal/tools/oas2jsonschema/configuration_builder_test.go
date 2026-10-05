@@ -269,10 +269,10 @@ func TestAPIKeySecurityScheme(t *testing.T) {
 	})
 
 	t.Run("unsupported schemes are reported, not dropped", func(t *testing.T) {
-		g := &OASSchemaGenerator{doc: &stubSecDoc{schemes: []SecuritySchemeInfo{
+		g := &OASSchemaGenerator{docs: NewDocumentSet(&stubSecDoc{schemes: []SecuritySchemeInfo{
 			{Name: "OAuth", Type: SchemeTypeOAuth2},
 			{Name: "ApiKeyAuth", Type: SchemeTypeAPIKey, In: "header", ParamName: "X-Api-Key"},
-		}}}
+		}})}
 		m, skipped, err := g.buildAuthMethodsSchemaMap()
 		require.NoError(t, err)
 		assert.Contains(t, m, "apiKey", "the supported one is still generated")
@@ -281,9 +281,9 @@ func TestAPIKeySecurityScheme(t *testing.T) {
 	})
 
 	t.Run("two apiKey schemes collapse to one key with no default", func(t *testing.T) {
-		g := &OASSchemaGenerator{doc: &stubSecDoc{schemes: []SecuritySchemeInfo{
+		g := &OASSchemaGenerator{docs: NewDocumentSet(&stubSecDoc{schemes: []SecuritySchemeInfo{
 			apiKey("A", "Authorization"), apiKey("B", "X-Api-Key"),
-		}}}
+		}})}
 		m, skipped, err := g.buildAuthMethodsSchemaMap()
 		require.NoError(t, err)
 		assert.Empty(t, skipped)
