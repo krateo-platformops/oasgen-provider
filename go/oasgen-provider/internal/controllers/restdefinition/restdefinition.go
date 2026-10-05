@@ -477,6 +477,23 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		e.log.Debug("Backfilling the oas-version label", "error", bferr)
 	}
 
+	// Drive the served-version prune to completion. Reporting not-up-to-date here is what makes Update
+	// run, and Update prunes exactly what this counted -- the SAME predicate decides both, which is the
+	// only reason this cannot ping-pong. Two predicates that disagree would have Observe ask forever for
+	// work Update does not do, which is the shape of the 0.28.0 readiness loop.
+	//
+	// A failure to evaluate is NOT drift, matching the OAS-content and auth-secret checks above: a
+	// transient List failure must not flap a healthy resource into Creating, and the next pass retries.
+	if prunable, _, perr := e.prunableServedVersions(ctx, cr, gvk, gvr); perr != nil {
+		e.log.Debug("Could not evaluate served-version prune; skipping", "error", perr)
+	} else if len(prunable) > 0 {
+		e.log.Debug("Served versions are prunable", "versions", prunable)
+		return reconciler.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
 		return reconciler.ExternalObservation{}, err
@@ -940,6 +957,21 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 			return fmt.Errorf("regenerating CRD: %w", gerr)
 		}
 		cr.Status.ResourceHash = resHash
+	}
+
+	// Retire served versions nothing is using any more. OUTSIDE the regeneration gate above, because a
+	// version becomes prunable when its last INSTANCE goes away -- which has nothing to do with whether
+	// this RestDefinition's spec or OAS changed. Gating this on regeneration would mean a version stays
+	// served until something unrelated happens to edit the definition, which on a stable install may be
+	// never.
+	//
+	// Reported, not fatal. A CRD that still serves a retired version works; it is dead weight and a
+	// stale endpoint, not an outage. Failing the reconcile over it would take a healthy resource down to
+	// tidy up, and Observe will ask again on the next pass.
+	if perr := e.pruneStaleServedVersions(ctx, cr, gvk, gvr); perr != nil {
+		e.log.Warn("Could not prune stale served versions", "error", perr)
+		e.rec.Eventf(cr, corev1.EventTypeWarning, "ServedVersionPruneFailed",
+			"could not retire unused served version(s): %v", perr)
 	}
 
 	configurationGVR := getConfigurationGVR(cr, hasSecuritySchemes)
