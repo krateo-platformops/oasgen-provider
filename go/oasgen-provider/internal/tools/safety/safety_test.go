@@ -49,7 +49,16 @@ func TestRecursionGuard_Check(t *testing.T) {
 		ctx, cancel := guard.WithContext()
 		defer cancel()
 
-		time.Sleep(20 * time.Millisecond) // Wait for the context to timeout
+		// Wait for the context to actually be DONE, not merely for the deadline to have passed in wall
+		// clock terms. Check does a non-blocking select on ctx.Done(), and a deadline is enforced by a
+		// timer goroutine that closes that channel -- so under load the clock can be past the deadline
+		// while the channel is still open, Check takes the default branch, and this subtest fails with
+		// "An error is expected but got nil". Observed intermittently in a full -tags=unit,integration
+		// run and never in isolation, which is the signature.
+		//
+		// Blocking on ctx.Done() removes the race without weakening the assertion: it is still Check that
+		// has to report the expiry.
+		<-ctx.Done()
 
 		err := guard.Check(ctx, 1)
 		assert.Error(t, err)
