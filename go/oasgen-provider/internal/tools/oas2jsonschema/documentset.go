@@ -29,6 +29,17 @@ func NewDocumentSet(def OASDocument) *DocumentSet {
 	return &DocumentSet{def: def}
 }
 
+// NewDocumentSetWithOverrides builds a set where named actions resolve to their own document.
+//
+// byVerb is keyed by ACTION, not by path: two verbs naming the same override share one parsed document.
+// An empty or nil map is identical to NewDocumentSet.
+func NewDocumentSetWithOverrides(def OASDocument, byVerb map[string]OASDocument) *DocumentSet {
+	if len(byVerb) == 0 {
+		return NewDocumentSet(def)
+	}
+	return &DocumentSet{def: def, byVerb: byVerb}
+}
+
 // Default is the document named by spec.oasPath.
 //
 // It drives everything that is a property of the RESOURCE rather than of one verb: the CRD version,

@@ -440,9 +440,13 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	// resolved OAS and treat a change vs the hash stored at the last Create/Update as drift, so Update
 	// regenerates the CRD. A transient fetch failure is NOT treated as drift, to avoid flapping when the OAS
 	// source is briefly unreachable.
-	if contents, ferr := e.fetchOASBytes(ctx, cr); ferr != nil {
+	// EVERY document, not just spec.oasPath. A RestDefinition whose verbs span several documents would
+	// otherwise have an invisible hole: editing the second document leaves the stored hash unchanged,
+	// Observe sees no drift, and the CRD never regenerates -- the resource stays Ready while serving a
+	// schema that no longer matches its own document.
+	if byPath, ferr := e.fetchAllOASBytes(ctx, cr); ferr != nil {
 		e.log.Debug("Could not fetch OAS for content-drift check; skipping", "error", ferr)
-	} else if h := oasContentDigest(contents); cr.Status.OASHash != h {
+	} else if h := compositeOASDigest(byPath); cr.Status.OASHash != h {
 		e.log.Debug("OAS document content changed", "status", cr.Status.OASHash, "current", h)
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
@@ -1214,10 +1218,17 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 // other's download (the previous shared /tmp/ogen-provider dir was racy under >1 concurrent reconcile, and
 // Observe now fetches on every cycle for drift detection).
 func (e *external) fetchOASBytes(ctx context.Context, cr *definitionv1alpha1.RestDefinition) (contents []byte, err error) {
+	return e.fetchOASBytesAt(ctx, cr, cr.Spec.OASPath)
+}
+
+// fetchOASBytesAt downloads one specific document. Split out from fetchOASBytes so a RestDefinition
+// whose verbs span several documents can fetch each of them (#108); the single-document form above is
+// the same call with spec.oasPath.
+func (e *external) fetchOASBytesAt(ctx context.Context, cr *definitionv1alpha1.RestDefinition, oasPath string) (contents []byte, err error) {
 	ctx, span := oteltelemetry.Tracer().Start(ctx, "restdefinition.fetch_oas")
 	defer span.End()
 	defer func() { oteltelemetry.RecordError(span, err) }()
-	OASPath := cr.Spec.OASPath
+	OASPath := oasPath
 	span.SetAttributes(
 		attribute.String("k8s.object.name", cr.Name),
 		attribute.String("k8s.object.namespace", cr.Namespace),
@@ -1252,22 +1263,26 @@ func oasContentDigest(contents []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// getDocumentModelFromCR fetches and parses the CR's OAS document, also returning the content hash of the
-// exact bytes that were parsed (so callers store a hash consistent with what they generated from).
+// getDocumentModelFromCR fetches and parses the CR's documents, returning the DEFAULT one and the
+// composite hash across all of them.
+//
+// Implemented on top of getDocumentSetFromCR rather than beside it, deliberately. The hash returned here
+// is stored in status.OASHash, and Observe compares that against compositeOASDigest over every document.
+// If this computed a single-document digest while Observe compared a composite, the two could never
+// agree: Observe would report drift on every pass, Update would store a value Observe never computes,
+// and the resource would regenerate forever while reporting Creating. That is precisely the 0.28.0
+// readiness loop, which came from two code paths computing the same thing differently. One function
+// produces the hash; everything else asks it.
 func (e *external) getDocumentModelFromCR(ctx context.Context, cr *definitionv1alpha1.RestDefinition) (doc oas2jsonschema.OASDocument, oasHash string, err error) {
 	ctx, span := oteltelemetry.Tracer().Start(ctx, "restdefinition.parse_oas")
 	defer span.End()
 	defer func() { oteltelemetry.RecordError(span, err) }()
 
-	contents, err := e.fetchOASBytes(ctx, cr)
+	docs, hash, err := e.getDocumentSetFromCR(ctx, cr)
 	if err != nil {
 		return nil, "", err
 	}
-	doc, err = e.parser.Parse(contents)
-	if err != nil {
-		return nil, "", err
-	}
-	return doc, oasContentDigest(contents), nil
+	return docs.Default(), hash, nil
 }
 
 // noteAdoption raises an Event when a CRD was taken over from a RestDefinition that no longer exists.
