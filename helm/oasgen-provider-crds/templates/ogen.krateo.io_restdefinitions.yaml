@@ -518,8 +518,18 @@ spec:
                     - namespace
                     type: object
                   verbsDescription:
-                    description: 'VerbsDescription: the list of verbs to use on this
-                      resource'
+                    description: |-
+                      VerbsDescription: the list of verbs to use on this resource
+
+                      The per-verb oasPath override is REJECTED here until the plumbing exists. The field is declared on
+                      VerbsDescription with its full contract, and nothing reads it: a RestDefinition setting it is
+                      admitted and the verb is then resolved from spec.oasPath regardless, silently producing a CRD
+                      generated from the wrong document. Refusing the write is the better failure, and it is temporary --
+                      see krateo-platformops/oasgen-provider#108, which this rule is deleted by.
+
+                      Bounded at 32 verbs to keep the rule inside the apiserver's CEL cost budget. An unbounded
+                      comprehension is rejected at CRD-install time with "estimated rule cost exceeds budget", which
+                      takes the whole CRD down rather than just the validation (learned in #169).
                     items:
                       properties:
                         action:
@@ -1358,7 +1368,13 @@ spec:
                         rule: self.action == 'findby' || !has(self.identifiersMatchPolicy)
                       - message: pagination can only be set for 'findby' actions
                         rule: self.action == 'findby' || !has(self.pagination)
+                    maxItems: 32
                     type: array
+                    x-kubernetes-validations:
+                    - message: 'per-verb oasPath is not implemented yet: the field
+                        is declared but nothing reads it, so setting it would silently
+                        generate the CRD from spec.oasPath instead. Track krateo-platformops/oasgen-provider#108'
+                      rule: self.all(v, !has(v.oasPath))
                 required:
                 - kind
                 - verbsDescription
