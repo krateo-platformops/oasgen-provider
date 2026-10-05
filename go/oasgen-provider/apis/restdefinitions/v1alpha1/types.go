@@ -629,6 +629,18 @@ type Resource struct {
 	// +required
 	Kind string `json:"kind"`
 	// VerbsDescription: the list of verbs to use on this resource
+	//
+	// The per-verb oasPath override is REJECTED here until the plumbing exists. The field is declared on
+	// VerbsDescription with its full contract, and nothing reads it: a RestDefinition setting it is
+	// admitted and the verb is then resolved from spec.oasPath regardless, silently producing a CRD
+	// generated from the wrong document. Refusing the write is the better failure, and it is temporary --
+	// see krateo-platformops/oasgen-provider#108, which this rule is deleted by.
+	//
+	// Bounded at 32 verbs to keep the rule inside the apiserver's CEL cost budget. An unbounded
+	// comprehension is rejected at CRD-install time with "estimated rule cost exceeds budget", which
+	// takes the whole CRD down rather than just the validation (learned in #169).
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:XValidation:rule="self.all(v, !has(v.oasPath))",message="per-verb oasPath is not implemented yet: the field is declared but nothing reads it, so setting it would silently generate the CRD from spec.oasPath instead. Track krateo-platformops/oasgen-provider#108"
 	// +required
 	VerbsDescription []VerbsDescription `json:"verbsDescription"`
 	// Identifiers: the list of fields to use as identifiers - used to populate the status of the resource
