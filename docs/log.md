@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-03T09:00:00Z
+timestamp: 2026-10-05T12:00:00Z
 ---
 
 # Log
@@ -12,6 +12,49 @@ timestamp: 2026-10-03T09:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-05 — 0.29.0
+
+Two changes an operator can see, both about making an existing silence audible. Nothing here changes
+how a resource reconciles.
+
+### Schema warnings are reachable
+
+Schema generation and validation warnings were logged at DEBUG+3 and appeared nowhere else, so on a
+default install nobody saw them. They are now logged at WARN and summarised in a `SchemaWarnings` event
+on the RestDefinition, visible in `kubectl describe restdefinition`.
+
+The failure they exist to catch is silent by construction: a RestDefinition whose identifier can never
+match reports `Ready`, findby never matches, nothing errors, and the resource simply never converges —
+indistinguishable from a healthy one to `kubectl get`. That is exactly the case where nobody has a
+reason to go tailing debug logs, because everything visible says the system is fine. The warning had
+been accurate since 0.22.x and unreachable the whole time.
+
+One aggregated event per generation rather than one per warning, naming the first three and counting
+the rest; the full list stays in the log. The message says the CRD *was* still generated — this is not
+a failure — and that a field named in it may never resolve at runtime, which is the part worth acting
+on.
+
+Deliberately an event rather than a new status field. A status field brings staleness, and a warning
+describing a problem that has since been fixed is worse than no warning: it teaches people to ignore
+the field. If events prove insufficient, oasgen-provider#151 stays open for the status surface.
+
+### Configuration instances are version-labelled too
+
+The admission policy stamps `krateo.io/oas-version` on every kind in the group, including each
+generated `…Configuration`. The backfill introduced in 0.28.0 stamped only the resource kind, so
+instances predating the policy split permanently into a labelled half and a half that never would be.
+
+Nothing was broken by that — a Configuration is resolved by reference, never by a version-scoped watch,
+so an unlabelled one is not orphaned. It mattered for two reasons. `kubectl get <kind> -A -l
+'!krateo.io/oas-version'` is how an operator checks a migration worked, and it returned a permanently
+non-empty set. And future version pruning keeps versions that have labelled instances, while the
+unlabelled set shrinks over time as objects are touched — so the same question would get a different
+answer depending on when it was asked.
+
+Configurations are stamped with the **Configuration CRD's own version**, which differs from the
+resource's. That is what the policy writes for them, and writing anything else would have the backfill
+disagree with admission on the same object.
 
 ## 2026-10-03 — 0.28.1
 
