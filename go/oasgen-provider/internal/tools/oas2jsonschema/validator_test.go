@@ -486,7 +486,7 @@ func TestValidateSchemas(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			errs := ValidateSchemas(tc.doc, tc.verbs, config)
+			errs := ValidateSchemas(NewDocumentSet(tc.doc), tc.verbs, config)
 			if tc.expectErr {
 				assert.NotEmpty(t, errs, "Expected errors, but got none")
 				validationErr, ok := errs[0].(SchemaValidationError)
@@ -608,7 +608,7 @@ func TestExtractSchemaForAction(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			schema, err := ExtractSchemaForAction(doc, tc.verbs, tc.targetAction, tc.config)
+			schema, err := ExtractSchemaForAction(NewDocumentSet(doc), tc.verbs, tc.targetAction, tc.config)
 
 			if tc.expectErr {
 				assert.Error(t, err)
@@ -835,7 +835,7 @@ func TestValidateSchemas_Complex(t *testing.T) {
 	}
 
 	// Act
-	errs := ValidateSchemas(doc, verbs, DefaultGeneratorConfig())
+	errs := ValidateSchemas(NewDocumentSet(doc), verbs, DefaultGeneratorConfig())
 
 	// Assert
 	assert.NotEmpty(t, errs, "Expected validation errors, but got none")

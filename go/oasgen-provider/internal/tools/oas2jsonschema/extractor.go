@@ -9,7 +9,7 @@ func (g *OASSchemaGenerator) findParameterInOAS(field ConfigurationField) (*Para
 	for _, action := range field.FromRestDefinition.Actions {
 		for _, verb := range g.resourceConfig.Verbs {
 			if verb.Action == action {
-				path, ok := g.doc.FindPath(verb.Path)
+				path, ok := g.doc().FindPath(verb.Path)
 				if !ok {
 					continue
 				}
@@ -36,7 +36,7 @@ func (g *OASSchemaGenerator) getBaseSchemaForSpec() (*Schema, error) {
 		if verb.Action != ActionCreate { // Right now we hardcode the action to 'create'
 			continue
 		}
-		path, ok := g.doc.FindPath(verb.Path)
+		path, ok := g.doc().FindPath(verb.Path)
 		if !ok {
 			return nil, fmt.Errorf("path '%s' not found in OpenAPI spec", verb.Path)
 		}
@@ -71,7 +71,7 @@ func (g *OASSchemaGenerator) getBaseSchemaForStatus() (*Schema, error) {
 	var firstErr error
 	actions := []string{ActionGet, ActionFindBy}
 	for _, action := range actions {
-		schema, err := ExtractSchemaForAction(g.doc, g.resourceConfig.Verbs, action, g.generatorConfig)
+		schema, err := ExtractSchemaForAction(g.docs, g.resourceConfig.Verbs, action, g.generatorConfig)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -88,7 +88,13 @@ func (g *OASSchemaGenerator) getBaseSchemaForStatus() (*Schema, error) {
 	return nil, nil
 }
 
-func ExtractSchemaForAction(doc OASDocument, verbs []Verb, targetAction string, config *GeneratorConfig) (*Schema, error) {
+// ExtractSchemaForAction resolves targetAction's path against the document that action belongs to.
+//
+// docs.For(targetAction) is the ONLY place in the codebase where a verb meets a document, which is why
+// per-verb oasPath (#108) lands here and nowhere else. While that feature is unimplemented the set holds
+// one document and For always returns it, so this is the same lookup it has always been.
+func ExtractSchemaForAction(docs *DocumentSet, verbs []Verb, targetAction string, config *GeneratorConfig) (*Schema, error) {
+	doc := docs.For(targetAction)
 	var verbFound bool
 	for _, verb := range verbs {
 		if !strings.EqualFold(verb.Action, targetAction) {

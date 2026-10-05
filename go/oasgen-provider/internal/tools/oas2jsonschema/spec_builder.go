@@ -54,7 +54,7 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 
 	// If the resource has configuration fields, add a reference to the configuration schema.
 	// This is done only if there are configuration fields or security schemes defined.
-	if len(g.resourceConfig.ConfigurationFields) > 0 || len(g.doc.SecuritySchemes()) > 0 {
+	if len(g.resourceConfig.ConfigurationFields) > 0 || len(g.doc().SecuritySchemes()) > 0 {
 		addConfigurationRefToSpec(baseSchema)
 	}
 
@@ -107,7 +107,7 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) []error {
 
 	for _, verb := range g.resourceConfig.Verbs {
 		// 1. Path lookup
-		path, ok := g.doc.FindPath(verb.Path)
+		path, ok := g.doc().FindPath(verb.Path)
 		if !ok {
 			warnings = append(warnings, SchemaGenerationError{Code: CodePathNotFound, Message: fmt.Sprintf("path '%s' set in RestDefinition not found in OAS", verb.Path)})
 			continue

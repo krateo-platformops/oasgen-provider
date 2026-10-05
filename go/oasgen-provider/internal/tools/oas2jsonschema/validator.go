@@ -14,7 +14,7 @@ const (
 	ActionUpdate = "update"
 )
 
-func ValidateSchemas(doc OASDocument, verbs []Verb, config *GeneratorConfig) []error {
+func ValidateSchemas(docs *DocumentSet, verbs []Verb, config *GeneratorConfig) []error {
 	baseAction, err := determineBaseAction(verbs)
 	if err != nil {
 		return []error{err}
@@ -30,7 +30,7 @@ func ValidateSchemas(doc OASDocument, verbs []Verb, config *GeneratorConfig) []e
 
 		if isComparable {
 			// Perform the comparison against the base action schema.
-			errors = append(errors, compareActionResponseSchemas(doc, verbs, verb.Action, baseAction, config)...)
+			errors = append(errors, compareActionResponseSchemas(docs, verbs, verb.Action, baseAction, config)...)
 		}
 	}
 
@@ -64,8 +64,8 @@ func determineBaseAction(verbs []Verb) (string, error) {
 	}
 }
 
-func compareActionResponseSchemas(doc OASDocument, verbs []Verb, action1, action2 string, config *GeneratorConfig) []error {
-	schema2, err := ExtractSchemaForAction(doc, verbs, action2, config)
+func compareActionResponseSchemas(docs *DocumentSet, verbs []Verb, action1, action2 string, config *GeneratorConfig) []error {
+	schema2, err := ExtractSchemaForAction(docs, verbs, action2, config)
 	if err != nil {
 		return []error{SchemaValidationError{
 			Code:    CodeActionSchemaMissing,
@@ -73,7 +73,7 @@ func compareActionResponseSchemas(doc OASDocument, verbs []Verb, action1, action
 		}}
 	}
 
-	schema1, err := ExtractSchemaForAction(doc, verbs, action1, config)
+	schema1, err := ExtractSchemaForAction(docs, verbs, action1, config)
 	if err != nil {
 		return []error{SchemaValidationError{
 			Code:    CodeActionSchemaMissing,
