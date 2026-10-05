@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	definitionv1alpha1 "github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/crd/generation"
 )
 
@@ -96,4 +97,41 @@ func labelAbsence() (labels.Selector, error) {
 		return nil, fmt.Errorf("building the unlabelled-instance selector: %w", err)
 	}
 	return labels.NewSelector().Add(*req), nil
+}
+
+// backfillVersionLabels stamps the version label on EVERY kind this RestDefinition generates: the
+// resource kind and, when one exists, its Configuration kind.
+//
+// One entry point on purpose. The resource kind alone was backfilled until #180, which left the policy
+// and the backfill disagreeing about scope -- the MutatingAdmissionPolicy matches resources: ["*"] and
+// so stamps both, while the backfill stamped one. Splitting the call across two sites invites exactly
+// the divergence that DeployOptions suffered: correct the day it is written, wrong the next time
+// something is added.
+//
+// NOTE the version each kind is stamped with. The policy writes request.requestKind.version -- the
+// version of the endpoint the write came through -- so a Configuration is labelled with the
+// Configuration CRD's OWN version, not the resource's. Those differ: the resource CRD is generated at a
+// per-release version while the Configuration CRD sits at a fixed one. Passing the resource's version
+// here would have the backfill write a different value than the policy writes for the same object,
+// which is worse than not writing it at all: the disagreement would only appear on objects old enough
+// to have been backfilled, and nothing would say why.
+func (e *external) backfillVersionLabels(
+	ctx context.Context,
+	cr *definitionv1alpha1.RestDefinition,
+	gvk schema.GroupVersionKind,
+	hasSecuritySchemes bool,
+) error {
+	if err := e.backfillVersionLabel(ctx, gvk, gvk.Version); err != nil {
+		return err
+	}
+
+	// No configuration fields and no security schemes means no Configuration CRD was generated, so there
+	// is nothing of that kind to list. getConfigurationGVR already encodes that rule; reuse it rather
+	// than restating the condition.
+	if getConfigurationGVR(cr, hasSecuritySchemes) == (schema.GroupVersionResource{}) {
+		return nil
+	}
+
+	cfgGVK := getConfigurationGVK(cr)
+	return e.backfillVersionLabel(ctx, cfgGVK, cfgGVK.Version)
 }
