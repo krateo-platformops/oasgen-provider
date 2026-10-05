@@ -797,11 +797,34 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	if err != nil {
 		return err
 	}
-	for _, w := range rendered.GenerationWarnings {
-		e.log.Debug("Schema generation warning", "Warning", w)
+	// Schema warnings are WARN plus an event, not DEBUG.
+	//
+	// They were DEBUG+3 and on nothing else, which made them unreachable on a default install (#151). The
+	// failure they exist to catch is silent by construction: a RestDefinition whose identifier can never
+	// match reports Ready, findby never matches, nothing errors, and the resource simply never converges.
+	// That is exactly the case where nobody has a reason to go tailing debug logs -- everything visible
+	// says the system is fine. An accurate warning nobody can reach is close to worthless.
+	//
+	// An EVENT rather than a new status field, deliberately. The issue proposes status.generationWarnings,
+	// which is an API change on a published CRD and brings staleness with it: a warning describing a fixed
+	// problem is worse than none, because it teaches people to ignore the field. Events expire on their
+	// own, are already where an operator looks (`kubectl describe restdefinition`), and follow the
+	// SkippedSecuritySchemes precedent immediately below. Status surface remains open in #151 if these
+	// turn out not to be enough.
+	//
+	// ONE aggregated event rather than one per warning: this runs on every CRD generation, and a document
+	// with a dozen unresolvable fields should not write a dozen events. The log keeps the full detail.
+	logWarnings := func(kind string, warnings []error) {
+		for _, w := range warnings {
+			e.log.Warn("Schema "+kind+" warning", "warning", w)
+		}
 	}
-	for _, w := range rendered.ValidationWarnings {
-		e.log.Debug("Schema validation warning", "Warning", w)
+	logWarnings("generation", rendered.GenerationWarnings)
+	logWarnings("validation", rendered.ValidationWarnings)
+
+	if len(rendered.GenerationWarnings)+len(rendered.ValidationWarnings) > 0 {
+		all := append(append([]error{}, rendered.GenerationWarnings...), rendered.ValidationWarnings...)
+		e.rec.Eventf(cr, corev1.EventTypeWarning, "SchemaWarnings", "%s", warningEventMessage(all))
 	}
 
 	// A skipped security scheme is not a debug-level fact. The document advertises a way to authenticate
