@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-05T18:00:00Z
+timestamp: 2026-10-06T09:00:00Z
 ---
 
 # Log
@@ -12,6 +12,90 @@ timestamp: 2026-10-05T18:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-06 — 0.31.0
+
+Makes per-verb `oasPath` real: a resource whose verbs legitimately span two OAS documents can now be
+described natively. 0.30.0 refused the field; this release implements it and lifts the refusal.
+
+**Two things can change under you** — a new way a RestDefinition can fail, and a change to generated
+Configuration CRDs — both listed first for that reason.
+
+### A RestDefinition can now be REFUSED for two documents that disagree
+
+New failure mode, and it only exists once a verb overrides `spec.oasPath`.
+
+Parameters are merged from every verb into one spec schema, deduplicated by name, first verb wins.
+Within one document that is harmless: a path parameter repeated across verbs is the same parameter.
+Across two documents it is a silent choice between definitions that disagree, decided by the order of
+`verbsDescription`, after which the losing verb sends a value shaped for the other document's contract.
+
+Generation now refuses that, naming the parameter and both verbs. The check is deliberately narrow: it
+compares only where two documents demonstrably feed the same CRD field, and only across documents. Two
+verbs sharing one document that declare a parameter differently is long-standing first-wins behaviour
+and is untouched, so **this cannot fire for any RestDefinition that worked before this release**.
+
+The refusal happens at generation, not admission. Admission cannot see the documents.
+
+### Generated Configuration CRDs may change for split-document resources
+
+A `configurationFields` entry scoped to several actions used to resolve its parameter once and apply
+that one definition to every action. With one document that was correct by construction. With two it
+meant whichever document answered first described every action.
+
+Each action now takes the parameter as **its own** document declares it, so a `query.<action>.<param>`
+entry's `default` and whether it is `required` can both change. Aruba's `CloudServer` is the live case:
+`api-version` is declared by both compute documents, required with default `1.1` in the 1.1 document
+that serves create and optional with default `1` in the 1.0 document that serves everything else. The
+generated Configuration offered create the 1.0 description, so a Configuration omitting the field was
+accepted and sent `api-version=1` to an endpoint that requires `1.1`.
+
+If you have a split-document resource, re-read its generated Configuration CRD before upgrading a
+Configuration CR against it. **Single-document resources are unaffected** — their generated output is
+byte-identical.
+
+An action whose own document does not declare the parameter keeps its entry, as before. Resolving
+strictly per action would have deleted fields some Configuration may already set.
+
+### A verb may name its own OAS document
+
+`verbsDescription[].oasPath` overrides `spec.oasPath` for that verb only, using the same URI schemes.
+
+This exists because a resource whose verbs span two documents was not merely degraded but impossible to
+express. Aruba's `CloudServer` is the motivating case: `findby`/`get`/`delete` are published in
+`compute-provider.json` (1.0.0) while `create` lives alone in `compute-provider_v1.1.json` (1.1.0),
+where that document holds exactly one path. The workaround was to delegate the missing verb to a
+RESTAction, which needs `URL_SNOWPLOW` — and no chart sets it, so that create had never executed.
+
+Documents are read as published and never merged. Pre-merging would break the guarantee that a
+generated CRD traces back to one vendor document, which this repository checksum-enforces.
+
+Which document supplies what is unchanged, only now explicit: the create verb's document drives the
+spec schema, the observe document drives status and identifiers, and the CRD version and security
+schemes come from `spec.oasPath`'s document. So a 1.1 override does **not** move the generated CRD's
+API version.
+
+The `maxItems: 32` bound on `verbsDescription` is also gone. It was never a limit on verbs — it existed
+only to keep 0.30.0's refusal rule inside the apiserver's CEL cost budget.
+
+### Drift detection now covers every document a resource reads
+
+`status.OASHash` was a hash of `spec.oasPath`'s bytes alone. With per-verb overrides that would have
+been a silent hole: editing the second document would leave the stored hash unchanged, Observe would
+see no drift, and the CRD would never regenerate — the resource staying `Ready` while serving a schema
+that no longer matches its own document.
+
+The hash is now a composite across every referenced document, keyed by path, so a document **moving**
+between paths registers as a change even when its bytes did not.
+
+### Validation status
+
+Generation was verified on a cluster, not only in tests: the real published Aruba documents through the
+controller's own path on Kubernetes 1.36.1, confirming the generated CRD's spec is built from the 1.1
+document and that the existing definitions on that cluster were unaffected. The `api-version` defect
+above was found that way, after the static suite had passed and the golden CRD was byte-identical.
+
+Not yet done: no verb of a split-document resource has been driven against a live vendor API.
 
 ## 2026-10-05 — 0.30.0
 
