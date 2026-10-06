@@ -5,25 +5,46 @@ import (
 	"strings"
 )
 
+// findParameterForAction resolves field's parameter against ONE action, in the document THAT action reads.
+//
+// The per-action form exists because a configuration field scoped to several actions can now span two
+// documents (#108), and those documents can describe the same parameter differently. Aruba's CloudServer
+// is the live case: `api-version` is declared by both compute documents, required with default "1.1" in
+// the 1.1 document that serves create and optional with default "1" in the 1.0 document that serves
+// everything else. One resolution cannot be right for both.
+func (g *OASSchemaGenerator) findParameterForAction(field ConfigurationField, action string) (*ParameterInfo, error) {
+	for _, verb := range g.resourceConfig.Verbs {
+		if !strings.EqualFold(verb.Action, action) {
+			continue
+		}
+		path, ok := g.docFor(verb.Action).FindPath(verb.Path)
+		if !ok {
+			continue
+		}
+		ops := path.GetOperations()
+		op, ok := ops[strings.ToLower(verb.Method)]
+		if !ok {
+			continue
+		}
+		for _, param := range op.GetParameters() {
+			if param.Name == field.FromOpenAPI.Name && param.In == field.FromOpenAPI.In {
+				return &param, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("parameter '%s' in '%s' not found for action '%s'", field.FromOpenAPI.Name, field.FromOpenAPI.In, action)
+}
+
+// findParameterInOAS resolves field's parameter against the FIRST of its actions that declares it.
+//
+// Implemented on top of findParameterForAction so there is one definition of "resolve this field against
+// this action" rather than two that can drift. It stays because the configuration builder still needs a
+// field-level answer: whether the field resolves anywhere at all, and which parameter location (query,
+// header, ...) its bucket belongs under.
 func (g *OASSchemaGenerator) findParameterInOAS(field ConfigurationField) (*ParameterInfo, error) {
 	for _, action := range field.FromRestDefinition.Actions {
-		for _, verb := range g.resourceConfig.Verbs {
-			if verb.Action == action {
-				path, ok := g.docFor(verb.Action).FindPath(verb.Path)
-				if !ok {
-					continue
-				}
-				ops := path.GetOperations()
-				op, ok := ops[strings.ToLower(verb.Method)]
-				if !ok {
-					continue
-				}
-				for _, param := range op.GetParameters() {
-					if param.Name == field.FromOpenAPI.Name && param.In == field.FromOpenAPI.In {
-						return &param, nil
-					}
-				}
-			}
+		if param, err := g.findParameterForAction(field, action); err == nil {
+			return param, nil
 		}
 	}
 	return nil, fmt.Errorf("parameter '%s' in '%s' not found for any of the specified actions", field.FromOpenAPI.Name, field.FromOpenAPI.In)
