@@ -24,14 +24,14 @@ func (g *OASSchemaGenerator) BuildConfigurationSchema() ([]byte, error) {
 	paramTypeSchemas := make(map[string]*Schema)
 
 	for _, field := range g.resourceConfig.ConfigurationFields {
-		param, err := g.findParameterInOAS(field)
+		fieldParam, err := g.findParameterInOAS(field)
 		if err != nil {
 			// TODO: Consider logging a warning here.
 			continue
 		}
 
 		// Ensure the top-level schema for the parameter's location (e.g., "query") already exists.
-		paramIn := param.In
+		paramIn := fieldParam.In
 		if _, ok := paramTypeSchemas[paramIn]; !ok {
 			paramTypeSchemas[paramIn] = &Schema{Type: []string{"object"}, Properties: []Property{}}
 		}
@@ -39,6 +39,21 @@ func (g *OASSchemaGenerator) BuildConfigurationSchema() ([]byte, error) {
 
 		// Iterate over all actions this configuration field applies to.
 		for _, action := range field.FromRestDefinition.Actions {
+			// Each action takes the parameter as ITS OWN document declares it (#108). A field scoped to
+			// several actions can span two documents, and resolving once for the whole field stamped
+			// whichever document answered first onto every action -- so Aruba's create, served by the 1.1
+			// document, was offered api-version as the 1.0 document describes it: optional, defaulting to
+			// "1", against an endpoint that requires "1.1". Admission accepted the omission and the wrong
+			// version went on the wire with nothing to report it.
+			//
+			// Falling back to the field-level resolution keeps this a correction and not a removal: an
+			// action whose own document does not declare the parameter still gets an entry, exactly as
+			// before, rather than silently losing a field some Configuration may already set.
+			param := fieldParam
+			if actionParam, aerr := g.findParameterForAction(field, action); aerr == nil {
+				param = actionParam
+			}
+
 			var actionSchema *Schema
 			found := false
 			// Check if a schema for this action (e.g., "get") already exists
