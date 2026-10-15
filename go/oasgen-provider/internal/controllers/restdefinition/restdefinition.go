@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/krateo-platformops/plumbing/env"
 	"github.com/krateo-platformops/plumbing/kubeutil/dynamicwatch"
@@ -40,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/crd"
+	"github.com/krateo-platformops/oasgen-provider/internal/tools/crd/collision"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/crd/generation"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/deploy"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/deployment"
@@ -819,6 +822,11 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	if err != nil {
 		return err
 	}
+
+	// Refuse a generated name that a built-in resource already serves, BEFORE anything is applied (#200).
+	if cerr := e.guardAgainstBuiltInCollision(ctx, cr, rendered); cerr != nil {
+		return cerr
+	}
 	// Schema warnings are WARN plus an event, not DEBUG.
 	//
 	// They were DEBUG+3 and on nothing else, which made them unreachable on a default install (#151). The
@@ -1302,4 +1310,77 @@ func (e *external) noteAdoption(cr *definitionv1alpha1.RestDefinition, crdName s
 		crdName, outcome.AdoptedFrom)
 	e.log.Info("adopted CRD from a deleted RestDefinition",
 		"crd", crdName, "previousOwner", outcome.AdoptedFrom, "newOwner", cr.Namespace+"/"+cr.Name)
+}
+
+// guardAgainstBuiltInCollision refuses to mint a CRD whose plural or singular a built-in resource
+// already serves (#200).
+//
+// Two asymmetries, both deliberate.
+//
+// FAIL OPEN when the built-in set cannot be read. Discovery being unreachable means the guard is
+// absent, not satisfied. Refusing to generate on that basis would convert an apiserver hiccup into an
+// outage for every RestDefinition on the cluster, to prevent a collision that is a tooling-ambiguity
+// bug rather than data loss. The check is a safety net, so an unreachable safety net is reported and
+// stepped over. Note a PARTIAL discovery result is different and is used: an incomplete set can only
+// miss a collision, never invent one, so the refusals it does produce are still sound.
+//
+// REFUSE only while the CRD does not exist yet; WARN once it does. Refusing is what keeps the
+// collision from being created, and before the apply that is exactly achievable. Afterwards it is not:
+// the colliding CRD is already served, so refusing would not unbreak kubectl -- it would only stop the
+// resource from ever being updated again, and the sole remedy, renaming the kind, destroys the CRs of
+// the old one. That trades a usability bug for data loss. So an existing collision is reported loudly
+// and repeatedly (it runs on every generation) and left for a human to decide about.
+func (e *external) guardAgainstBuiltInCollision(ctx context.Context, cr *definitionv1alpha1.RestDefinition, rendered *render.Result) error {
+	builtins, err := collision.Discover(ctx, e.disc, e.kube)
+	if err != nil {
+		e.log.Warn("Could not enumerate built-in resource names; the generated CRD was NOT checked for a collision with a built-in resource",
+			"name", cr.Name, "namespace", cr.Namespace, "error", err)
+		e.rec.Eventf(cr, corev1.EventTypeWarning, "BuiltInCollisionCheckSkipped",
+			"could not enumerate the cluster's built-in resource names, so the generated CRD was not checked for a name collision: %v", err)
+		return nil
+	}
+	if builtins.Partial {
+		e.log.Warn("Built-in resource discovery was incomplete, usually an unhealthy aggregated APIService; the collision check is best-effort this pass",
+			"name", cr.Name, "namespace", cr.Namespace)
+	}
+
+	for _, generated := range []*apiextensionsv1.CustomResourceDefinition{rendered.CRD, rendered.ConfigurationCRD} {
+		if generated == nil {
+			continue
+		}
+		cerr := builtins.Check(generated)
+		if cerr == nil {
+			continue
+		}
+
+		exists, lerr := crdExists(ctx, e.kube, generated.Name)
+		if lerr != nil {
+			// Unknown whether this is a new mint or an existing one. Refusing is the safe half: it
+			// cannot destroy anything, and the next pass re-decides with a working read.
+			return fmt.Errorf("checking whether CRD %q already exists, after detecting a built-in name collision (%w): %w", generated.Name, cerr, lerr)
+		}
+
+		if !exists {
+			e.rec.Eventf(cr, corev1.EventTypeWarning, "BuiltInNameCollision", "%s", cerr.Error())
+			return cerr
+		}
+
+		e.log.Warn("This RestDefinition's CRD shadows a built-in resource name; it is already served, so generation continues rather than blocking updates to it",
+			"crd", generated.Name, "error", cerr)
+		e.rec.Eventf(cr, corev1.EventTypeWarning, "BuiltInNameCollisionExisting",
+			"%s. This CRD is ALREADY served, so generation continues: refusing now would block every future update without removing the collision, and renaming the kind destroys this CRD's existing resources. Resolve it deliberately.", cerr.Error())
+	}
+	return nil
+}
+
+// crdExists reports whether a CustomResourceDefinition of this name is already on the cluster.
+func crdExists(ctx context.Context, kube client.Client, name string) (bool, error) {
+	obj := &apiextensionsv1.CustomResourceDefinition{}
+	if err := kube.Get(ctx, client.ObjectKey{Name: name}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
