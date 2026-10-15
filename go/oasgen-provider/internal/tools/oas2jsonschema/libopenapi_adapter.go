@@ -14,6 +14,7 @@ import (
 	"github.com/pb33f/libopenapi/datamodel/high/base"
 	v3 "github.com/pb33f/libopenapi/datamodel/high/v3"
 	"github.com/pb33f/libopenapi/orderedmap"
+	"github.com/pb33f/libopenapi/utils"
 )
 
 // --- Parser Implementation ---
@@ -36,6 +37,13 @@ func (p *libOASParser) Parse(content []byte) (OASDocument, error) {
 			Message: "failed to create new libopenapi document",
 			Err:     err,
 		}
+	}
+
+	// Sniff the version BEFORE building a model: BuildV3Model rejects a Swagger 2.0 document outright
+	// ("supplied spec is a different version (oas2)"), which is how 2.0 documents used to be refused at
+	// the front door. ArgoCD, Grafana, Argo Workflows and Harbor all publish 2.0 (#196).
+	if info := d.GetSpecInfo(); info != nil && info.SpecType == utils.OpenApi2 {
+		return parseV2(d)
 	}
 
 	doc, modelErrors := d.BuildV3Model()
