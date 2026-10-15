@@ -26,7 +26,7 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 
 	// Add parameters to the spec schema. A cross-document parameter conflict is fatal, not a warning:
 	// the merged field would otherwise be chosen by verb order (#108).
-	paramWarnings, err := g.addParametersToSpec(baseSchema)
+	requiredParameters, paramWarnings, err := g.addParametersToSpec(baseSchema)
 	warnings = append(warnings, paramWarnings...)
 	if err != nil {
 		return nil, warnings, err
@@ -49,8 +49,12 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 	// because a create body normally defines it. Where there is no create body, materialise the
 	// identifiers into the spec explicitly: they are SELECTORS, values the user supplies to choose which
 	// existing object this CR refers to.
+	identifierSelectors := map[string]bool{}
 	if !g.hasCreateVerb() {
 		warnings = append(warnings, g.addIdentifierSelectorsToSpec(baseSchema)...)
+		for _, id := range g.resourceConfig.Identifiers {
+			identifierSelectors[id] = true
+		}
 	}
 
 	// Schema preparation for CRD compatibility.
@@ -60,7 +64,8 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 
 	// If the resource has configuration fields, add a reference to the configuration schema.
 	// This is done only if there are configuration fields or security schemes defined.
-	if len(g.resourceConfig.ConfigurationFields) > 0 || len(g.doc().SecuritySchemes()) > 0 {
+	hasConfigurationRef := len(g.resourceConfig.ConfigurationFields) > 0 || len(g.doc().SecuritySchemes()) > 0
+	if hasConfigurationRef {
 		addConfigurationRefToSpec(baseSchema)
 	}
 
@@ -69,6 +74,18 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 
 	// Remove excluded fields from the spec schema.
 	warnings = append(warnings, g.removeExcludedSpecFields(baseSchema)...)
+
+	// Narrow the spec to the allowlist, if one is declared. Mutually exclusive with excludedSpecFields at
+	// admission, so the two never both apply; it runs here, last, because an allowlist has to see the
+	// finished spec -- parameters merged, configurationRef added, configuration fields already pulled out --
+	// or it would be deciding about fields that are not yet there. FATAL on an entry that matches nothing.
+	if ierr := g.retainIncludedSpecFields(baseSchema, alwaysKeptFields{
+		requiredParameters:  requiredParameters,
+		identifierSelectors: identifierSelectors,
+		configurationRef:    hasConfigurationRef,
+	}); ierr != nil {
+		return nil, warnings, ierr
+	}
 
 	// Convert the schema to JSON schema format.
 	byteSchema, err := GenerateJsonSchema(baseSchema, g.generatorConfig)
@@ -98,7 +115,11 @@ type paramOrigin struct {
 // the same CRD field, and the merge below resolves it by VERB ORDER -- so the alternative to refusing is
 // a CRD whose shape depends on how the author happened to order verbsDescription, with the losing verb
 // sending a value shaped for the other document's contract. Nothing downstream could report it.
-func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) ([]error, error) {
+// Returns the names of spec fields derived from REQUIRED parameters, which includedSpecFields may never
+// drop: a kind that cannot bind its own URL is the breakage #197 fixed, and an allowlist could otherwise
+// reintroduce it by configuration. Returned rather than stashed on the generator because a second field
+// that must agree with the schema is the shape generator.go already regrets once.
+func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]bool, []error, error) {
 	var warnings []error
 
 	// Track unique parameter names to avoid duplicates (E.g. path parameters may be repeated across verbs),
@@ -117,6 +138,8 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) ([]error, error
 	}
 
 	// Internal helper function to check if property is already required in schema
+	requiredParameters := map[string]bool{}
+
 	propertyAlreadyRequired := func(name string) bool {
 		for _, req := range schema.Required {
 			if req == name {
@@ -158,7 +181,7 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) ([]error, error
 			// once a verb overrides spec.oasPath, which is exactly the new surface this guards.
 			if prior, exists := uniqueParams[param.Name]; exists && prior.doc != verbDoc {
 				if diffs := compareSchemas("spec."+param.Name, prior.schema, param.Schema, prior.action, verb.Action, g.generatorConfig); len(diffs) > 0 {
-					return warnings, SchemaGenerationError{
+					return nil, warnings, SchemaGenerationError{
 						Path: "spec." + param.Name,
 						Code: CodeCrossDocumentParameterConflict,
 						Message: fmt.Sprintf(
@@ -171,6 +194,10 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) ([]error, error
 						Expected: prior.schema,
 					}
 				}
+			}
+
+			if param.Required {
+				requiredParameters[param.Name] = true
 			}
 
 			// Add parameter to spec only if not already present in uniqueParams AND not in existing base schema
@@ -201,7 +228,7 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) ([]error, error
 		}
 	}
 
-	return warnings, nil
+	return requiredParameters, warnings, nil
 }
 
 // addConfigurationRefToSpec adds the `configurationRef` property to the schema (at the root level of spec).

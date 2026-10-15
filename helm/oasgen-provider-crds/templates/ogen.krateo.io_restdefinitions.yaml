@@ -351,6 +351,54 @@ spec:
                     - message: Identifiers are immutable, you cannot change them once
                         the CRD has been generated
                       rule: self == oldSelf
+                  includedSpecFields:
+                    description: |-
+                      IncludedSpecFields: the ALLOWLIST counterpart of excludedSpecFields. When set, the generated spec keeps
+                      ONLY these fields (plus the machinery described below); when unset, nothing changes.
+
+                      A blocklist inverts badly on a wide vendor schema. Keycloak's RealmRepresentation has 152 fields, so
+                      "I want 30 of them" means naming ~122 exclusions, and because excludedSpecFields is immutable, getting
+                      that list wrong once is unrecoverable without deleting the RestDefinition and its CRs. The Keycloak KOG
+                      abandoned the vendor document over exactly this and hand-writes a curated OAS per kind -- a 328-line
+                      generator plus a vendored subset standing in for a 30-line RestDefinition.
+
+                      It is a correctness control as much as an economy. An unbounded generated schema is a liability at the
+                      apiserver: a CRD has already been taken down here by the CEL cost budget (#169, "estimated rule cost
+                      exceeds budget" is a CRD-INSTALL failure, not a validation failure). Bounding what gets generated is
+                      load-bearing even for a single integration.
+
+                      APPEND-ONLY rather than immutable, following additionalStatusFields. Widening a subset is safe -- the
+                      CRD gains fields. Narrowing it removes fields that live CRs may be setting, which is the thing
+                      immutability actually protects against. See the note on AdditionalStatusFields above for why the rule
+                      is a prefix comparison and why the MaxItems/MaxLength bounds are required rather than stylistic: a CEL
+                      comprehension over an unbounded list costs as effectively infinite and gets the whole CRD rejected.
+
+                      Dot-notation selects nested fields, as in excludedSpecFields. A path naming a parent keeps that parent's
+                      whole subtree; naming a child keeps the parent and only the listed children.
+
+                      ALWAYS KEPT, whether listed or not, because they are machinery the resource cannot function without:
+                      configurationRef (without it the resource has no way to reference its credentials), spec fields derived
+                      from REQUIRED OAS parameters (without them the resource cannot build its own URL -- the same breakage
+                      #197 fixed), and the identifier selectors materialised into the spec of a resource with no create verb
+                      (without them findby can never match). Optional parameter-derived fields are ordinary fields and can be
+                      dropped.
+
+                      A listed field that does not exist in the generated schema is REFUSED, where excludedSpecFields only
+                      warns. The asymmetry is deliberate: a typo in a blocklist silently leaves a field IN, where it is
+                      visible and discoverable; a typo in an allowlist silently leaves a field OUT, and the author sees a
+                      missing field with no explanation and a CR that fails validation on a field they believed they had
+                      included.
+                    items:
+                      maxLength: 253
+                      type: string
+                    maxItems: 256
+                    type: array
+                    x-kubernetes-validations:
+                    - message: 'IncludedSpecFields is append-only: you may add new
+                        entries at the end, but existing entries cannot be removed,
+                        renamed, reordered or changed once the CRD has been generated'
+                      rule: size(self) >= size(oldSelf) && oldSelf.all(i, v, self[i]
+                        == v)
                   kind:
                     description: 'Name: the name of the resource to manage'
                     type: string
@@ -1397,6 +1445,10 @@ spec:
                     drift'
                   rule: '!has(self.compareScope) || self.compareScope != ''updatable''
                     || self.verbsDescription.exists(v, v.action == ''update'')'
+                - message: 'declare at most one of includedSpecFields or excludedSpecFields:
+                    an allowlist and a blocklist over the same fields is a contradiction,
+                    not a merge'
+                  rule: '!(has(self.includedSpecFields) && has(self.excludedSpecFields))'
               resourceGroup:
                 description: 'Group: the group of the resource to manage'
                 type: string
