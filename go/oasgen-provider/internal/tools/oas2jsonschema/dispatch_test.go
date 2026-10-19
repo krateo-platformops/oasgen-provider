@@ -173,3 +173,45 @@ func TestValidateSchemasIsQuietForADispatchOnlyResource(t *testing.T) {
 
 	assert.Empty(t, errs, "there is nothing to compare against a 204-empty trigger response")
 }
+
+// The last way to reach the failure the whole verb exists to prevent: a mistyped echo path never
+// matches, so the invocation reads as absent forever and Create fires on every reconcile.
+func TestValidateCorrelationEchoRefusesAnUndeclaredRoot(t *testing.T) {
+	g := dispatchGenerator()
+	g.resourceConfig.Verbs[0].Correlation.EchoedAt = ".conclsion" // typo for .conclusion
+
+	err := g.ValidateCorrelationEcho()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conclsion")
+	assert.Contains(t, err.Error(), "fire on every reconcile")
+	assert.Contains(t, err.Error(), "conclusion, id, status",
+		"naming the item's real fields is what makes this fixable; sorted, so the message is stable")
+}
+
+func TestValidateCorrelationEchoAcceptsADeclaredRoot(t *testing.T) {
+	g := dispatchGenerator()
+	g.resourceConfig.Verbs[0].Correlation.EchoedAt = ".status"
+
+	require.NoError(t, g.ValidateCorrelationEcho())
+}
+
+// Only the ROOT can be required, exactly as for fromSpec: an open object promises nothing about its
+// leaves, and demanding one would refuse #199's motivating case.
+func TestValidateCorrelationEchoSkipsAnExplicitlyOpenItem(t *testing.T) {
+	g := dispatchGenerator()
+	runs := g.docs.Default().(*mockOASDocument).Paths["/repos/{owner}/{repo}/actions/runs"]
+	item := runs.Ops["get"].(*mockOperation).Responses[200].Content["application/json"].Properties[1].Schema.Items
+	item.AdditionalProperties = &AdditionalProperties{}
+	g.resourceConfig.Verbs[0].Correlation.EchoedAt = ".inputs.correlationId"
+
+	require.NoError(t, g.ValidateCorrelationEcho(),
+		"an item that declares itself open may still carry an undeclared root")
+}
+
+func TestValidateCorrelationEchoIsInertWithoutADispatch(t *testing.T) {
+	g := dispatchGenerator()
+	g.resourceConfig.Verbs = []Verb{{Action: ActionGet, Method: "GET", Path: "/x"}}
+
+	require.NoError(t, g.ValidateCorrelationEcho())
+}

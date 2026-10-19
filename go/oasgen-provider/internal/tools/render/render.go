@@ -145,6 +145,21 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 	}
 	generator := oas2jsonschema.NewOASSchemaGeneratorFromSet(docs, oas2jsonschema.DefaultGeneratorConfig(), resourceConfig)
 
+	// The echo path is checked here, against the collection's item schema, because this is the first point
+	// that schema exists. It is the last way to reach a dispatch that fires on every reconcile: a mistyped
+	// echoedAt never matches, so the invocation reads as absent forever.
+	if verr := generator.ValidateCorrelationEcho(); verr != nil {
+		for i, v := range cr.Spec.Resource.VerbsDescription {
+			if strings.EqualFold(v.Action, oas2jsonschema.ActionDispatch) {
+				return nil, &FieldError{
+					Field: fmt.Sprintf("spec.resource.verbsDescription[%d].correlation.echoedAt", i),
+					Err:   verr,
+				}
+			}
+		}
+		return nil, verr
+	}
+
 	_, genSpan := oteltelemetry.Tracer().Start(ctx, "restdefinition.generate_crd")
 	defer genSpan.End()
 	defer func() { oteltelemetry.RecordError(genSpan, err) }()

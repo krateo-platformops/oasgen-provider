@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
@@ -29,6 +30,22 @@ import (
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
+
+const (
+	// annotationDispatchedToken records the correlation token this controller has SUCCESSFULLY POSTed for.
+	// It is what makes "fire exactly once per token" enforceable rather than merely intended: Observe
+	// refuses to report not-exists for a token it already fired, so a dispatch cannot be repeated however
+	// long the invocation takes to appear -- or whether it ever appears at all.
+	annotationDispatchedToken = "krateo.io/dispatched-token"
+	// annotationDispatchObserveMisses counts reconciles since the dispatch fired in which the token has not
+	// yet turned up in the collection. Eventual consistency is normal and this tolerates it; a persistent
+	// miss is a declaration defect and is eventually reported as such rather than waited on forever.
+	annotationDispatchObserveMisses = "krateo.io/dispatch-observe-misses"
+	// maxDispatchObserveMisses is where "still appearing" stops being the likelier explanation than "the
+	// echo path does not match". Deliberately a diagnosis deadline and not a retry budget -- nothing is
+	// re-POSTed when it passes.
+	maxDispatchObserveMisses = 5
 )
 
 // dispatchVerb returns the resource's dispatch verb, or nil when it declares none. At most one is
@@ -201,6 +218,55 @@ func (h *handler) observeDispatch(ctx context.Context, mg *unstructured.Unstruct
 		return controller.ExternalObservation{}, true, err
 	}
 	if !found {
+		// Already fired for THIS token? Then it must not be fired again, and that is the whole guarantee.
+		//
+		// Returning not-exists here is what the reconciler acts on by calling Create, so doing it a second
+		// time for one token is the duplicate run this verb exists to prevent -- and it would happen on
+		// every reconcile, forever, for a cause as small as a mistyped echoedAt. Generation now refuses the
+		// echo paths it can check, but it cannot check a path into a free-form object, so this is the
+		// backstop for the case that gets through.
+		//
+		// A FAILED post deliberately leaves no annotation (createDispatch records it only on success), so a
+		// dispatch that never actually happened is still retried. Fire-once applies to invocations that
+		// occurred, not to attempts.
+		if alreadyDispatched(mg, token) {
+			misses := dispatchObserveMisses(mg) + 1
+			if err := h.patchAnnotations(ctx, mg, map[string]interface{}{
+				annotationDispatchObserveMisses: strconv.Itoa(misses),
+			}); err != nil {
+				return controller.ExternalObservation{}, true, err
+			}
+
+			cond := condition.Creating()
+			if misses >= maxDispatchObserveMisses {
+				cond = condition.Unavailable()
+				cond.Reason = "DispatchedButNotObserved"
+				cond.Message = fmt.Sprintf(
+					"dispatched with correlation token %q but it has not appeared at %q in %s %s after %d checks; "+
+						"the most likely cause is that correlation.echoedAt does not match where this API echoes the "+
+						"token. NOT re-dispatching: the invocation may well have happened",
+					token, c.EchoedAt, c.Observe.Method, c.Observe.Path, misses)
+				log.Info("Dispatched invocation never appeared; not re-dispatching",
+					"token", token, "echoedAt", c.EchoedAt, "checks", misses)
+			} else {
+				cond.Message = fmt.Sprintf("dispatched with correlation token %q; waiting for it to appear in %s %s",
+					token, c.Observe.Method, c.Observe.Path)
+				log.Debug("Dispatched invocation not yet visible", "token", token, "checks", misses)
+			}
+			if err := unstructuredtools.SetConditions(mg, cond); err != nil {
+				return controller.ExternalObservation{}, true, err
+			}
+			if _, err := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+				Pluralizer:    h.pluralizer,
+				DynamicClient: h.dynamicClient,
+			}); err != nil {
+				return controller.ExternalObservation{}, true, err
+			}
+			// exists=true so Create is NOT called again. upToDate=true because there is no update that
+			// could help: the only action available would be to re-POST.
+			return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, true, nil
+		}
+
 		log.Debug("Correlated invocation not found; the dispatch will fire", "token", token)
 		return controller.ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, true, nil
 	}
@@ -210,6 +276,11 @@ func (h *handler) observeDispatch(ctx context.Context, mg *unstructured.Unstruct
 	// is why compareScope is refused on a dispatch resource -- any other scope would report drift whose
 	// only available remedy is to POST again.
 	log.Debug("Correlated invocation found", "token", token)
+	if dispatchObserveMisses(mg) > 0 {
+		if err := h.patchAnnotations(ctx, mg, map[string]interface{}{annotationDispatchObserveMisses: nil}); err != nil {
+			return controller.ExternalObservation{}, true, err
+		}
+	}
 	if err := unstructuredtools.SetConditions(mg, condition.Available()); err != nil {
 		return controller.ExternalObservation{}, true, err
 	}
@@ -273,6 +344,15 @@ func (h *handler) createDispatch(ctx context.Context, mg *unstructured.Unstructu
 	if _, err := apiCall(ctx, httpCli, callInfo.Path, conf); err != nil {
 		return true, err
 	}
+	// Record the token ONLY now, after the POST succeeded. This is what Observe reads to refuse a second
+	// dispatch for the same token; writing it before the call would strand a resource whose dispatch never
+	// actually happened, and writing it on failure would do the same.
+	if err := h.patchAnnotations(ctx, mg, map[string]interface{}{
+		annotationDispatchedToken:       token,
+		annotationDispatchObserveMisses: nil,
+	}); err != nil {
+		return true, fmt.Errorf("recording the dispatched correlation token (the dispatch itself succeeded): %w", err)
+	}
 	h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Dispatch", fmt.Sprintf("Dispatched %s %s for: %s (correlation token %s)", callInfo.Method, callInfo.Path, mg.GetName(), token)))
 	return true, nil
 }
@@ -291,4 +371,27 @@ func (h *handler) deleteDispatch(mg *unstructured.Unstructured, clientInfo *gett
 	log.Debug("Dispatch resource deleted; the dispatched invocation is history and is left untouched")
 	h.eventRecorder.Event(mg, event.Normal(reasonDeleted, "Delete", fmt.Sprintf("Removed dispatch resource %s; the dispatched invocation is history and was left untouched", mg.GetName())))
 	return true
+}
+
+// dispatchObserveMisses reads the miss counter, treating anything unparsable as zero -- the counter is a
+// diagnosis aid, so a corrupt value must not be able to fail a reconcile.
+func dispatchObserveMisses(mg *unstructured.Unstructured) int {
+	n, err := strconv.Atoi(mg.GetAnnotations()[annotationDispatchObserveMisses])
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// alreadyDispatched reports whether this controller has successfully POSTed for exactly this token.
+//
+// The token comparison is what makes the guarantee per-INVOCATION rather than per-resource: changing the
+// token in the spec is a new invocation and must fire, while leaving it alone must never fire twice. An
+// empty token never counts as dispatched, so a resource whose token was removed cannot inherit the
+// previous one's fired state.
+func alreadyDispatched(mg *unstructured.Unstructured, token string) bool {
+	if mg == nil || token == "" {
+		return false
+	}
+	return mg.GetAnnotations()[annotationDispatchedToken] == token
 }

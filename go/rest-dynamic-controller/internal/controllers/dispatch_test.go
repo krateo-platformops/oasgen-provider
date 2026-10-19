@@ -152,3 +152,46 @@ func TestDeleteDispatchIsANoOpOnlyForADispatchResource(t *testing.T) {
 			Correlation: &getter.Correlation{FromSpec: "token"}}},
 	}}, logging.NewNopLogger()), "a dispatch resource's delete is handled here, as a no-op")
 }
+
+func annotated(ann map[string]string) *unstructured.Unstructured {
+	u := cr(map[string]interface{}{"token": "t1"})
+	u.SetAnnotations(ann)
+	return u
+}
+
+// The guarantee: exactly one POST per token, ever. Observe returns not-exists only when this is false,
+// and not-exists is what the reconciler acts on by calling Create — so a true answer here is the only
+// thing standing between a mistyped echoedAt and a duplicate run on every single reconcile.
+func TestAlreadyDispatchedIsPerTokenNotPerResource(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ann   map[string]string
+		token string
+		want  bool
+	}{
+		"never dispatched":        {nil, "t1", false},
+		"dispatched this token":   {map[string]string{annotationDispatchedToken: "t1"}, "t1", true},
+		"token changed => fire":   {map[string]string{annotationDispatchedToken: "t1"}, "t2", false},
+		"empty token never fired": {map[string]string{annotationDispatchedToken: ""}, "", false},
+		"other annotations only":  {map[string]string{"krateo.io/something": "t1"}, "t1", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, alreadyDispatched(annotated(tc.ann), tc.token))
+		})
+	}
+	assert.False(t, alreadyDispatched(nil, "t1"))
+}
+
+// A corrupt counter must not be able to fail a reconcile: it is a diagnosis aid, not state.
+func TestDispatchObserveMissesToleratesRubbish(t *testing.T) {
+	for in, want := range map[string]int{"": 0, "3": 3, "nonsense": 0, "-4": 0, "0": 0} {
+		assert.Equal(t, want, dispatchObserveMisses(annotated(map[string]string{annotationDispatchObserveMisses: in})), "input %q", in)
+	}
+	assert.Equal(t, 0, dispatchObserveMisses(annotated(nil)))
+}
+
+// The deadline is a DIAGNOSIS deadline, not a retry budget — nothing is re-POSTed when it passes. This
+// pins the constant against being read as "retry 5 times".
+func TestDispatchObserveMissesDeadlineIsSmallAndPositive(t *testing.T) {
+	assert.Greater(t, maxDispatchObserveMisses, 1, "one slow reconcile must not be reported as a defect")
+	assert.Less(t, maxDispatchObserveMisses, 20, "a persistent miss is a declaration defect; do not wait indefinitely")
+}

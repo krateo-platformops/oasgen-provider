@@ -2,6 +2,7 @@ package oas2jsonschema
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -69,4 +70,48 @@ func (g *OASSchemaGenerator) correlationItemSchema() (*Schema, error) {
 		}
 	}
 	return nil, fmt.Errorf("correlation.observe: no suitable response schema found for %s %s", c.ObserveMethod, c.ObservePath)
+}
+
+// ValidateCorrelationEcho refuses an echoedAt whose ROOT segment is not a declared property of the
+// correlation collection's item.
+//
+// This closes the last way to reach the failure the dispatch verb exists to prevent. The other checks
+// cover the collection endpoint and the token's spec field, but nothing covered the ECHO path -- and a
+// mistyped one never matches, so Observe reports the invocation absent forever while Create fires on
+// every reconcile. A duplicate run per resync is exactly what #199 is about.
+//
+// Only the ROOT is required to be declared, for the same reason only fromSpec's root is: the token
+// routinely lives inside a free-form object (GitHub's workflow_run `inputs`), so requiring the leaf
+// would refuse the motivating case. The root is the part the document does promise. The check is skipped
+// when the item declares no properties at all, or explicitly permits additional ones, since then the
+// document promises nothing to check against.
+func (g *OASSchemaGenerator) ValidateCorrelationEcho() error {
+	verb := g.dispatchVerb()
+	if verb == nil || verb.Correlation == nil || verb.Correlation.EchoedAt == "" {
+		return nil
+	}
+	item, err := g.correlationItemSchema()
+	if err != nil {
+		return err
+	}
+	if item == nil || len(item.Properties) == 0 {
+		return nil // nothing promised, nothing to check
+	}
+	if item.AdditionalProperties != nil {
+		return nil // the item is explicitly open; an undeclared root may still be real
+	}
+
+	root := strings.SplitN(strings.TrimPrefix(verb.Correlation.EchoedAt, "."), ".", 2)[0]
+	declared := make([]string, 0, len(item.Properties))
+	for _, p := range item.Properties {
+		if p.Name == root {
+			return nil
+		}
+		declared = append(declared, p.Name)
+	}
+	sort.Strings(declared)
+	return fmt.Errorf(
+		"correlation.echoedAt %q names %q, which the collection's items do not declare, so the token would "+
+			"never match and the dispatch would fire on every reconcile; the item's fields are: %s",
+		verb.Correlation.EchoedAt, root, strings.Join(declared, ", "))
 }

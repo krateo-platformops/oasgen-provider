@@ -1474,6 +1474,14 @@ spec:
                     a correlated invocation came from'
                   rule: self.verbsDescription.filter(v, v.action == 'dispatch').size()
                     <= 1
+                - message: 'a ''dispatch'' verb cannot be combined with any *ApiRef:
+                    delegating to a Snowplow RESTAction and declaring a correlated
+                    dispatch are the two alternative answers to the same problem,
+                    and declaring both leaves which one runs decided by the order
+                    of checks in the controller rather than by the author'
+                  rule: '!self.verbsDescription.exists(v, v.action == ''dispatch'')
+                    || !(has(self.createApiRef) || has(self.updateApiRef) || has(self.deleteApiRef)
+                    || has(self.observeApiRef))'
                 - message: 'compareScope cannot be set alongside a ''dispatch'' verb:
                     a dispatch is compared on its correlation token alone, so any
                     other scope would make an unrelated spec edit read as drift on
