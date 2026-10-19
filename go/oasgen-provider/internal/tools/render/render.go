@@ -101,6 +101,12 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 	if verr := validateAsyncPollPaths(cr, docs); verr != nil {
 		return nil, verr
 	}
+	// Same reasoning, one verb along: a dispatch whose correlation cannot close the loop re-fires on
+	// every reconcile, so it is refused before anything is applied rather than discovered as duplicate
+	// runs (#199).
+	if verr := validateDispatchCorrelation(cr, docs); verr != nil {
+		return nil, verr
+	}
 
 	// Shim VerbsDescription -> oas2jsonschema.Verb (decoupled from the RestDefinition CRD types).
 	verbs := make([]oas2jsonschema.Verb, len(cr.Spec.Resource.VerbsDescription))
@@ -111,6 +117,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 			Path:         v.Path,
 			ItemsPath:    v.ItemsPath,
 			FieldMapping: toDomainFieldMapping(v),
+			Correlation:  toDomainCorrelation(v.Correlation),
 		}
 	}
 
@@ -151,6 +158,13 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 	result, err := generator.Generate()
 	if err != nil {
 		return nil, fmt.Errorf("generating schemas: %w", err)
+	}
+
+	// The token must be a field the CR can actually carry, and only now is there a spec schema to ask.
+	// A token naming nothing in the spec can never match an echoed value, so the dispatch would fire on
+	// every reconcile -- the one outcome this verb exists to prevent.
+	if verr := validateCorrelationTokenInSpec(cr, result.SpecSchema); verr != nil {
+		return nil, verr
 	}
 
 	out := &Result{

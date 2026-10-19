@@ -37,6 +37,32 @@ const configurationVersion = "v1alpha1"
 // MIRRORS oasgen-provider's apis/restdefinitions/v1alpha1/types.go. These two structs are the same
 // contract decoded twice, and a field present in only one is silently dropped rather than rejected --
 // which is how #51 shipped half-working. Change both or neither.
+// Correlation declares how ONE invocation of a dispatch verb is identified afterwards. See
+// oasgen-provider's apis/restdefinitions/v1alpha1 Correlation for the design; this is its runtime mirror.
+//
+// The token is CR-SUPPLIED and echoed back, not extracted from the trigger response -- a response-carried
+// handle is the async/operationRef case, and the canonical dispatch answers 204 with an empty body. The
+// token IS the resource's identity, so observation reduces to a findby: token found => Ready and nothing
+// fires; token absent => the resource does not exist => the dispatch fires, exactly once, because its own
+// run is then what stops it.
+type Correlation struct {
+	// FromSpec is the dot-path, within the CR's spec, of the field carrying the token.
+	FromSpec string `json:"fromSpec"`
+	// Observe is the collection read in which the invocation becomes visible.
+	Observe CorrelationObserve `json:"observe"`
+	// EchoedAt is the dot-path, within ONE ITEM of that collection, at which the token comes back.
+	EchoedAt string `json:"echoedAt"`
+}
+
+// CorrelationObserve is the collection read used to look up a dispatched invocation.
+type CorrelationObserve struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	// ItemsPath names the property holding the collection for an envelope response; empty means infer,
+	// which succeeds only when exactly one array property is present.
+	ItemsPath string `json:"itemsPath,omitempty"`
+}
+
 type Pagination struct {
 	// Type specifies the pagination strategy: "continuationToken" or "pageNumber".
 	Type string `json:"type"`
@@ -242,6 +268,14 @@ type VerbsDescription struct {
 	// Pagination defines the pagination strategy for 'findby' actions. To be set only for 'findby' actions.
 	// If not set, no pagination will be used.
 	Pagination *Pagination `json:"pagination,omitempty"`
+	// Correlation is set only on a 'dispatch' verb and is what makes one observable (#199).
+	//
+	// MIRRORS oasgen-provider's types.go, and the mirror is load-bearing in both directions: the generator
+	// reads it to build the status schema from an item of the collection, this side reads it to find the
+	// invocation in that collection's DATA. A field present on only one side is silently dropped rather
+	// than rejected, and dropping this one means the controller cannot tell a dispatched run from an
+	// absent one -- so it would POST again on every reconcile.
+	Correlation *Correlation `json:"correlation,omitempty"`
 	// ItemsPath names the property holding the collection for an ENVELOPE findby response, e.g. ".values".
 	//
 	// MIRRORS oasgen-provider's types.go. The generator uses it to find the item SCHEMA; this side uses it

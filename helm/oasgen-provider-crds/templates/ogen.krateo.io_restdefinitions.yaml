@@ -534,13 +534,14 @@ spec:
                       properties:
                         action:
                           description: Name of the action to perform when this api
-                            is called [create, update, get, delete, findby]
+                            is called [create, update, get, delete, findby, dispatch]
                           enum:
                           - create
                           - update
                           - get
                           - delete
                           - findby
+                          - dispatch
                           type: string
                         async:
                           description: |-
@@ -694,6 +695,60 @@ spec:
                           required:
                           - operationRef
                           - poll
+                          type: object
+                        correlation:
+                          description: Correlation is REQUIRED for, and permitted
+                            only on, a 'dispatch' action. See the Correlation type.
+                          properties:
+                            echoedAt:
+                              description: |-
+                                EchoedAt is the path, PER ITEM of that collection, at which the token comes back — e.g.
+                                ".inputs.correlationId". Uses the same path dialect as itemsPath and async.poll.statusPath.
+
+                                Whether a given vendor really echoes the token is exactly what this field forces the author to
+                                establish before the RestDefinition is accepted, instead of discovering it as a resource that
+                                reports Ready and never converges.
+                              type: string
+                            fromSpec:
+                              description: |-
+                                FromSpec is the dot-path of the spec field the CR supplies as the correlation token, e.g.
+                                "inputs.correlationId". It must resolve to a field that exists in the generated spec schema;
+                                generation refuses otherwise, since a token the CR cannot carry can never be matched.
+                              type: string
+                            observe:
+                              description: Observe is the collection endpoint in which
+                                the invocation becomes visible.
+                              properties:
+                                itemsPath:
+                                  description: |-
+                                    ItemsPath names the property holding the collection when the response is an ENVELOPE rather than a
+                                    bare array — e.g. "workflow_runs" for {"total_count": 3, "workflow_runs": [...]}.
+
+                                    Same rule, and the same reason, as the findby itemsPath: optional because the common envelope has
+                                    exactly one array property, required as soon as there is more than one, because guessing searches
+                                    the wrong list and reports not-found — which here means firing the dispatch a second time.
+                                  type: string
+                                method:
+                                  description: Method for the collection read. POST
+                                    is allowed because some APIs expose search that
+                                    way.
+                                  enum:
+                                  - GET
+                                  - POST
+                                  type: string
+                                path:
+                                  description: |-
+                                    Path of the collection endpoint, written exactly as the OAS document declares it (paths are matched
+                                    by exact string, so a differing parameter name is a miss).
+                                  type: string
+                              required:
+                              - method
+                              - path
+                              type: object
+                          required:
+                          - echoedAt
+                          - fromSpec
+                          - observe
                           type: object
                         fieldMapping:
                           description: |-
@@ -1372,6 +1427,17 @@ spec:
                         rule: self.action == 'findby' || !has(self.identifiersMatchPolicy)
                       - message: pagination can only be set for 'findby' actions
                         rule: self.action == 'findby' || !has(self.pagination)
+                      - message: correlation can only be set for 'dispatch' actions
+                        rule: self.action == 'dispatch' || !has(self.correlation)
+                      - message: 'a ''dispatch'' action requires correlation: a dispatch
+                          that cannot be correlated would re-fire on every reconcile
+                          while reporting Ready'
+                        rule: self.action != 'dispatch' || has(self.correlation)
+                      - message: 'async cannot be set for ''dispatch'' actions: async
+                          extracts an operation handle from the trigger response,
+                          which is the case a dispatch does not have (a 204-empty
+                          trigger carries no handle) — that is what correlation replaces'
+                        rule: self.action != 'dispatch' || !has(self.async)
                     type: array
                 required:
                 - kind
@@ -1397,6 +1463,24 @@ spec:
                     drift'
                   rule: '!has(self.compareScope) || self.compareScope != ''updatable''
                     || self.verbsDescription.exists(v, v.action == ''update'')'
+                - message: 'a ''dispatch'' verb cannot be combined with ''create''
+                    or ''update'': the dispatch IS the create, and there is nothing
+                    an update of a past invocation could mean'
+                  rule: '!self.verbsDescription.exists(v, v.action == ''dispatch'')
+                    || !self.verbsDescription.exists(v, v.action == ''create'' ||
+                    v.action == ''update'')'
+                - message: 'declare at most one ''dispatch'' verb: two dispatches
+                    on one kind have no defined order and no way to tell which one
+                    a correlated invocation came from'
+                  rule: self.verbsDescription.filter(v, v.action == 'dispatch').size()
+                    <= 1
+                - message: 'compareScope cannot be set alongside a ''dispatch'' verb:
+                    a dispatch is compared on its correlation token alone, so any
+                    other scope would make an unrelated spec edit read as drift on
+                    a resource whose only response to drift is to fire the dispatch
+                    again'
+                  rule: '!self.verbsDescription.exists(v, v.action == ''dispatch'')
+                    || !has(self.compareScope)'
               resourceGroup:
                 description: 'Group: the group of the resource to manage'
                 type: string

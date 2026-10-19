@@ -60,7 +60,10 @@ func (g *OASSchemaGenerator) findParameterInOAS(field ConfigurationField) (*Para
 // does not contain it.
 func (g *OASSchemaGenerator) getBaseSchemaForSpec() (*Schema, error) {
 	for _, verb := range g.resourceConfig.Verbs {
-		if verb.Action != ActionCreate { // Right now we hardcode the action to 'create'
+		// create OR dispatch. A dispatch resource has no create verb at all -- CEL refuses the
+		// combination, because the dispatch IS its create -- so without this the entire spec of a
+		// dispatch kind would be empty and the correlation token would have nowhere to live.
+		if verb.Action != ActionCreate && verb.Action != ActionDispatch {
 			continue
 		}
 		path, ok := g.docFor(verb.Action).FindPath(verb.Path)
@@ -109,6 +112,21 @@ func (g *OASSchemaGenerator) getBaseSchemaForStatus() (*Schema, error) {
 			return schema, nil
 		}
 	}
+
+	// A dispatch resource observes through its correlation collection and has no get or findby verb to
+	// consult, so it is tried LAST and only once the ordinary sources have produced nothing. Last rather
+	// than first because a dispatch verb may legally coexist with a get or findby (CEL forbids only
+	// create and update), and where one exists it is the better status source: it describes the resource,
+	// while the collection item describes an invocation of it.
+	//
+	// Its error REPLACES firstErr. A dispatch resource's get/findby failure is "no such verb", which is
+	// not a defect for this kind and would bury the real problem -- a mistyped collection path.
+	if schema, err := g.correlationItemSchema(); err != nil {
+		return nil, err
+	} else if schema != nil {
+		return schema, nil
+	}
+
 	if firstErr != nil {
 		return nil, firstErr
 	}

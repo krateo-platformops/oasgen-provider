@@ -12,6 +12,11 @@ const (
 	ActionFindBy = "findby"
 	ActionCreate = "create"
 	ActionUpdate = "update"
+	// ActionDispatch is the non-CRUD verb for a fire-and-forget endpoint (#199). It is both a MUTATING
+	// verb (it supplies the spec base schema, as create does) and an OBSERVABLE one (its correlation
+	// collection supplies the status base schema, as findby does) -- which is why it appears in both
+	// roles below rather than slotting into either existing group.
+	ActionDispatch = "dispatch"
 )
 
 func ValidateSchemas(docs *DocumentSet, verbs []Verb, config *GeneratorConfig) []error {
@@ -26,6 +31,11 @@ func ValidateSchemas(docs *DocumentSet, verbs []Verb, config *GeneratorConfig) [
 		isComparable := verb.Action == ActionCreate || verb.Action == ActionUpdate
 		if baseAction == ActionGet && verb.Action == ActionFindBy {
 			isComparable = true
+		}
+		// There is nothing to compare against a dispatch base: the dispatch's own response is the 204-empty
+		// body that made this verb necessary, and CEL forbids create/update alongside it anyway.
+		if baseAction == ActionDispatch {
+			isComparable = false
 		}
 
 		if isComparable {
@@ -56,6 +66,16 @@ func determineBaseAction(verbs []Verb) (string, error) {
 	}
 	if hasFindBy {
 		return ActionFindBy, nil
+	}
+	// A dispatch resource legitimately has neither. Its observation is the correlation collection, which
+	// composeStatusSchema resolves directly, so there is nothing here to compare a mutating verb's
+	// response against -- a dispatch's own response is typically 204 with no body at all. Reporting
+	// CodeMissingBaseAction would make every correctly-declared dispatch resource carry a validation
+	// warning for a base action it is defined not to have.
+	for _, verb := range verbs {
+		if verb.Action == ActionDispatch {
+			return ActionDispatch, nil
+		}
 	}
 
 	return "", SchemaValidationError{

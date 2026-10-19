@@ -1,7 +1,9 @@
 package render
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	definitionv1alpha1 "github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
@@ -128,6 +130,121 @@ func validateAsyncPollPaths(cr *definitionv1alpha1.RestDefinition, docs *oas2jso
 					"document declares it and set async.poll.handleParam to its handle parameter's name",
 				v.Action, pollPath)
 		}
+	}
+	return nil
+}
+
+// toDomainCorrelation shims a dispatch verb's correlation block into the generator's domain type. nil in,
+// nil out: every non-dispatch verb takes this path, and CEL already guarantees the two agree.
+func toDomainCorrelation(c *definitionv1alpha1.Correlation) *oas2jsonschema.Correlation {
+	if c == nil {
+		return nil
+	}
+	return &oas2jsonschema.Correlation{
+		FromSpec:         c.FromSpec,
+		ObserveMethod:    c.Observe.Method,
+		ObservePath:      c.Observe.Path,
+		ObserveItemsPath: c.Observe.ItemsPath,
+		EchoedAt:         c.EchoedAt,
+	}
+}
+
+// validateDispatchCorrelation refuses a dispatch verb whose correlation cannot possibly close the loop,
+// here rather than at reconcile time.
+//
+// This is the mandatory-correlation rule from #199 made mechanical. An uncorrelated or mis-correlated
+// dispatch is not a degraded resource but an actively harmful one: it reports Ready and re-fires its POST
+// on every reconcile, which for a dispatch means a duplicate run every resync. That is the failure class
+// behind this repo's worst regressions -- pagination duplicates, apiLookup's items[0], envelope
+// inference, #194's wrong default -- every one of which passed a static suite and surfaced on a real
+// install. Refusing is cheap; an undetectable duplicate-dispatch loop is not.
+//
+// The echoed path is NOT checked against the item schema here, deliberately. The collections these
+// endpoints return are routinely free-form at exactly the point the token lives (GitHub's workflow_run
+// `inputs` is an open object), so requiring the leaf to be a declared property would refuse the
+// motivating example. What IS checkable -- and is checked -- is that the collection endpoint exists and
+// that the token names a spec field the CR can actually carry.
+func validateDispatchCorrelation(cr *definitionv1alpha1.RestDefinition, docs *oas2jsonschema.DocumentSet) error {
+	if cr == nil || docs == nil || docs.Default() == nil {
+		return nil
+	}
+	for i, v := range cr.Spec.Resource.VerbsDescription {
+		if !strings.EqualFold(v.Action, oas2jsonschema.ActionDispatch) || v.Correlation == nil {
+			continue
+		}
+		field := fmt.Sprintf("spec.resource.verbsDescription[%d].correlation", i)
+		doc := docs.For(v.Action)
+		if doc == nil {
+			continue
+		}
+
+		path, ok := doc.FindPath(v.Correlation.Observe.Path)
+		if !ok {
+			return fieldErrorf(field+".observe.path",
+				"correlation.observe.path %q is not a path declared in the OAS document (paths are matched by "+
+					"exact string, so a differing parameter name is a miss); without a collection to look the "+
+					"token up in, the dispatch would fire again on every reconcile",
+				v.Correlation.Observe.Path)
+		}
+		// A document adapter may report a path without handing back an inspectable item. Skip the method
+		// check rather than dereference: the path check above has already done the load-bearing work, and
+		// panicking inside a validator would take down a reconcile over a diagnostic.
+		if path == nil {
+			continue
+		}
+		if _, ok := path.GetOperations()[strings.ToLower(v.Correlation.Observe.Method)]; !ok {
+			return fieldErrorf(field+".observe.method",
+				"correlation.observe: method %q is not declared for path %q in the OAS document",
+				v.Correlation.Observe.Method, v.Correlation.Observe.Path)
+		}
+	}
+	return nil
+}
+
+// validateCorrelationTokenInSpec refuses a dispatch whose correlation token names nothing in the
+// generated spec.
+//
+// Only the token's ROOT segment is required to exist, and that is the whole subtlety. These endpoints
+// routinely carry the token inside a free-form object -- GitHub's workflow_dispatch body is
+// {ref, inputs} where `inputs` is an open object -- so "inputs.correlationId" is a perfectly good token
+// that is not, and cannot be, a declared property. Requiring the full path would refuse the motivating
+// case of #199. Requiring nothing would accept "nosuchfield.token", which can never match and therefore
+// re-fires forever. The root is exactly the part the document does promise.
+func validateCorrelationTokenInSpec(cr *definitionv1alpha1.RestDefinition, specSchema []byte) error {
+	if cr == nil || len(specSchema) == 0 {
+		return nil
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(specSchema, &schema); err != nil {
+		// Fail open: an unparsable spec schema is a different and larger problem, and crdgen is about to
+		// report it properly. Refusing here would attribute it to the correlation field.
+		return nil
+	}
+
+	for i, v := range cr.Spec.Resource.VerbsDescription {
+		if !strings.EqualFold(v.Action, oas2jsonschema.ActionDispatch) || v.Correlation == nil {
+			continue
+		}
+		token := v.Correlation.FromSpec
+		if token == "" {
+			continue // required by the CRD; nothing useful to add here
+		}
+		root := strings.SplitN(token, ".", 2)[0]
+		if _, ok := schema.Properties[root]; ok {
+			continue
+		}
+		available := make([]string, 0, len(schema.Properties))
+		for name := range schema.Properties {
+			available = append(available, name)
+		}
+		sort.Strings(available)
+		return fieldErrorf(fmt.Sprintf("spec.resource.verbsDescription[%d].correlation.fromSpec", i),
+			"correlation.fromSpec %q names %q, which is not a field of the generated spec, so no instance "+
+				"could ever supply the token and the dispatch would fire on every reconcile; the spec's "+
+				"top-level fields are: %s",
+			token, root, strings.Join(available, ", "))
 	}
 	return nil
 }
