@@ -29,7 +29,8 @@ line.
   surface, immutability, generated resources, supported auth — plus the RDC runtime
   contract (status, conditions, events, self-provisioned RBAC, metrics).
 - [examples](./examples.md) — the runnable examples under `examples/`.
-- [release](./release.md) — how a release ships (one tag → both images + charts on GHCR).
+- [release](./release.md) — how a release ships (one tag → both images + charts on GHCR),
+  and why the CRD chart must never be renamed or replaced.
 - [log](./log.md) — curated history.
 - [llms.txt](./llms.txt) — the version-pinned agent index of this bundle.
 
