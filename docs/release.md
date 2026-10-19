@@ -1,10 +1,10 @@
 ---
 type: Runbook
 title: oasgen-provider — release
-description: How a release ships — one plain-semver tag drives the test gate, the multi-platform image, and both OCI charts.
+description: How a release ships — one plain-semver tag drives the test gate, the multi-platform image, and both OCI charts — and why the CRD chart must never be renamed.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, release, ci]
-timestamp: 2026-08-10T00:00:00Z
+timestamp: 2026-10-15T00:00:00Z
 ---
 
 # Release
@@ -67,3 +67,39 @@ commit when changing `apis/`), and the docs-standard lint (`lint-docs`).
   installer's `component-pins.yaml`) to pick the release up in platform deploys.
 - Release notes live in GitHub Releases; notable changes are curated into
   [log.md](./log.md).
+
+## Never rename or replace the `oasgen-provider-crds` release
+
+`oasgen-provider-crds` owns `restdefinitions.ogen.krateo.io`. A `helm uninstall` of that release
+takes the CRD with it, **and every RestDefinition on the cluster goes with the CRD** — each one
+owning generated CRDs and live CRs. On the cluster this was observed from, that was 30
+RestDefinitions.
+
+That is not a hypothetical uninstall. It is precisely what a **chart rename** does: the installer
+deletes the old release and installs the new one, and the delete is the destructive half. The
+0.26.0 split of `oasgen-render` into `controller-render-service` was safe only because it moved a
+Deployment, a Service and a Secret — all recreated harmlessly. A CRD is not.
+
+### The remedy is not the one you would reach for first
+
+`helm.sh/resource-policy: keep` on the CRD is the obvious answer and is **not** what Krateo uses.
+`helm uninstall` reads that policy from the release's **stored manifest**, not from the live
+object, so adding it to a live CRD out of band does nothing at all. It only works if it was in the
+chart when the release was installed — which, for any already-deployed release, it was not. Adding
+it now would protect future installs, not existing ones, and would make the CRD un-uninstallable
+forever, leaking it on legitimate teardown.
+
+**The remedy is `krateo.io/deletion-policy=orphan` on the Composition**, set *before* the old
+release is removed. The controller then drops the finalizer without uninstalling the release at
+all, and ownership of the CRD transfers to the new release via helm take-ownership. This was
+observed working during the `alert-troubleshooter` → `alert-provider` rename: at one sample the old
+composition was gone and all 25 live `Alert` CRs were still present, before the new release adopted
+the CRD. Without the annotation they would have been destroyed in exactly that window.
+
+That annotation lives in the installer, not here — which is why this is written down rather than
+fixed. The published CRD carries no protective annotation (verified on 0.27.1), and neither does
+`core-provider-crds` for `compositiondefinitions.core.krateo.io` / `kubernetestargets.core.krateo.io`,
+so this is an org-wide shape rather than something oasgen got wrong.
+
+If you are ever renaming, splitting or replacing `oasgen-provider-crds`: set the orphan annotation
+on the Composition first, confirm it took, and only then let the old release go.

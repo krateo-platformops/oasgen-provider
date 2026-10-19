@@ -142,6 +142,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 		AdditionalStatusFields: cr.Spec.Resource.AdditionalStatusFields,
 		ConfigurationFields:    configurationFields,
 		ExcludedSpecFields:     cr.Spec.Resource.ExcludedSpecFields,
+		IncludedSpecFields:     cr.Spec.Resource.IncludedSpecFields,
 	}
 	generator := oas2jsonschema.NewOASSchemaGeneratorFromSet(docs, oas2jsonschema.DefaultGeneratorConfig(), resourceConfig)
 

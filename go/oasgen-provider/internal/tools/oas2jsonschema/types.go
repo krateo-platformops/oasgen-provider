@@ -37,6 +37,7 @@ type ResourceConfig struct {
 	AdditionalStatusFields []string
 	ConfigurationFields    []ConfigurationField
 	ExcludedSpecFields     []string
+	IncludedSpecFields     []string
 }
 
 type ConfigurationField struct {

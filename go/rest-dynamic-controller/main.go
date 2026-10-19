@@ -268,7 +268,7 @@ func main() {
 	}
 	apiRecorder := event.NewAPIRecorder(rec)
 
-	handler = restResources.NewHandler(cfg, log, swg, *pluralizer, *prettyJSONDebug, *resourceVersion)
+	handler = restResources.NewHandler(cfg, log, swg, *pluralizer, *prettyJSONDebug)
 	if handler == nil {
 		log.Error(fmt.Errorf("handler is nil"), "Creating handler for controller.")
 		os.Exit(1)

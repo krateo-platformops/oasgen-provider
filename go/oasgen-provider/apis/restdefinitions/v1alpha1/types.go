@@ -691,6 +691,7 @@ type QueryParam struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby')",message="createApiRef requires a get or findby verb so the controller can verify the create converged (level-based convergence)"
 // +kubebuilder:validation:XValidation:rule="!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0)",message="compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against"
 // +kubebuilder:validation:XValidation:rule="!has(self.compareScope) || self.compareScope != 'updatable' || self.verbsDescription.exists(v, v.action == 'update')",message="compareScope 'updatable' requires an update verb: with no update verb the set of updatable fields is empty, so nothing would ever be compared and the resource would silently never report drift"
+// +kubebuilder:validation:XValidation:rule="!(has(self.includedSpecFields) && has(self.excludedSpecFields))",message="declare at most one of includedSpecFields or excludedSpecFields: an allowlist and a blocklist over the same fields is a contradiction, not a merge"
 // +kubebuilder:validation:XValidation:rule="!self.verbsDescription.exists(v, v.action == 'dispatch') || !self.verbsDescription.exists(v, v.action == 'create' || v.action == 'update')",message="a 'dispatch' verb cannot be combined with 'create' or 'update': the dispatch IS the create, and there is nothing an update of a past invocation could mean"
 // +kubebuilder:validation:XValidation:rule="self.verbsDescription.filter(v, v.action == 'dispatch').size() <= 1",message="declare at most one 'dispatch' verb: two dispatches on one kind have no defined order and no way to tell which one a correlated invocation came from"
 // +kubebuilder:validation:XValidation:rule="!self.verbsDescription.exists(v, v.action == 'dispatch') || !(has(self.createApiRef) || has(self.updateApiRef) || has(self.deleteApiRef) || has(self.observeApiRef))",message="a 'dispatch' verb cannot be combined with any *ApiRef: delegating to a Snowplow RESTAction and declaring a correlated dispatch are the two alternative answers to the same problem, and declaring both leaves which one runs decided by the order of checks in the controller rather than by the author"
@@ -773,6 +774,46 @@ type Resource struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="ExcludedSpecFields are immutable, you cannot change them once the CRD has been generated"
 	// +optional
 	ExcludedSpecFields []string `json:"excludedSpecFields,omitempty"`
+	// IncludedSpecFields: the ALLOWLIST counterpart of excludedSpecFields. When set, the generated spec keeps
+	// ONLY these fields (plus the machinery described below); when unset, nothing changes.
+	//
+	// A blocklist inverts badly on a wide vendor schema. Keycloak's RealmRepresentation has 152 fields, so
+	// "I want 30 of them" means naming ~122 exclusions, and because excludedSpecFields is immutable, getting
+	// that list wrong once is unrecoverable without deleting the RestDefinition and its CRs. The Keycloak KOG
+	// abandoned the vendor document over exactly this and hand-writes a curated OAS per kind -- a 328-line
+	// generator plus a vendored subset standing in for a 30-line RestDefinition.
+	//
+	// It is a correctness control as much as an economy. An unbounded generated schema is a liability at the
+	// apiserver: a CRD has already been taken down here by the CEL cost budget (#169, "estimated rule cost
+	// exceeds budget" is a CRD-INSTALL failure, not a validation failure). Bounding what gets generated is
+	// load-bearing even for a single integration.
+	//
+	// APPEND-ONLY rather than immutable, following additionalStatusFields. Widening a subset is safe -- the
+	// CRD gains fields. Narrowing it removes fields that live CRs may be setting, which is the thing
+	// immutability actually protects against. See the note on AdditionalStatusFields above for why the rule
+	// is a prefix comparison and why the MaxItems/MaxLength bounds are required rather than stylistic: a CEL
+	// comprehension over an unbounded list costs as effectively infinite and gets the whole CRD rejected.
+	//
+	// Dot-notation selects nested fields, as in excludedSpecFields. A path naming a parent keeps that parent's
+	// whole subtree; naming a child keeps the parent and only the listed children.
+	//
+	// ALWAYS KEPT, whether listed or not, because they are machinery the resource cannot function without:
+	// configurationRef (without it the resource has no way to reference its credentials), spec fields derived
+	// from REQUIRED OAS parameters (without them the resource cannot build its own URL -- the same breakage
+	// #197 fixed), and the identifier selectors materialised into the spec of a resource with no create verb
+	// (without them findby can never match). Optional parameter-derived fields are ordinary fields and can be
+	// dropped.
+	//
+	// A listed field that does not exist in the generated schema is REFUSED, where excludedSpecFields only
+	// warns. The asymmetry is deliberate: a typo in a blocklist silently leaves a field IN, where it is
+	// visible and discoverable; a typo in an allowlist silently leaves a field OUT, and the author sees a
+	// missing field with no explanation and a CR that fails validation on a field they believed they had
+	// included.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="size(self) >= size(oldSelf) && oldSelf.all(i, v, self[i] == v)",message="IncludedSpecFields is append-only: you may add new entries at the end, but existing entries cannot be removed, renamed, reordered or changed once the CRD has been generated"
+	// +optional
+	IncludedSpecFields []string `json:"includedSpecFields,omitempty"`
 	// ObserveApiRef, when set, delegates the OBSERVE of this resource to a Snowplow RESTAction instead of the
 	// get/findby verbs: the rest-dynamic-controller invokes the referenced RESTAction (via snowplow /call,
 	// under its own identity) each reconcile — passing the resource's name/namespace/uid and its identifier

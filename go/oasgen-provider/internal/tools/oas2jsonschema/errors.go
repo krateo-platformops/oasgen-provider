@@ -68,6 +68,10 @@ const (
 	// two documents it is a silent choice between two definitions that disagree, made by verb ORDER, and
 	// the losing verb then sends a value shaped for the other document's contract.
 	CodeCrossDocumentParameterConflict GenerationCode = "CrossDocumentParameterConflict"
+	// CodeIncludedFieldNotFound indicates that an includedSpecFields entry names a field the generated
+	// schema does not have. Fatal, unlike the excludedSpecFields equivalent: a typo in an allowlist
+	// silently leaves a field OUT, which is invisible, where a typo in a blocklist leaves it IN.
+	CodeIncludedFieldNotFound GenerationCode = "IncludedFieldNotFound"
 )
 
 // SchemaGenerationError defines a structured error for schema generation warnings.

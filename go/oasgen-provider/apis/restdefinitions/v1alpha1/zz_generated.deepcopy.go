@@ -520,6 +520,11 @@ func (in *Resource) DeepCopyInto(out *Resource) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.IncludedSpecFields != nil {
+		in, out := &in.IncludedSpecFields, &out.IncludedSpecFields
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.ObserveApiRef != nil {
 		in, out := &in.ObserveApiRef, &out.ObserveApiRef
 		*out = new(ApiRef)

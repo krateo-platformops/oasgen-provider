@@ -38,7 +38,7 @@ const (
 	reasonDeleted event.Reason = "ResourceDeleted"
 )
 
-func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool, version string) controller.ExternalClient {
+func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool) controller.ExternalClient {
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		log.Error(err, "Creating dynamic client.")
@@ -62,7 +62,6 @@ func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, plurali
 		// when an API-backed recorder is not wired in (e.g. in tests). main.go
 		// injects the real recorder via SetEventRecorder.
 		eventRecorder: event.NewNopRecorder(),
-		version:       version,
 	}
 }
 
@@ -81,9 +80,6 @@ type handler struct {
 	// self-provisioning secretRef RBAC (issue #31). main.go hard-fails at startup if it is unset, so by
 	// the time Create/Update/Delete run it is always populated.
 	selfServiceAccount types.NamespacedName
-	// version is the served CRD version this controller was started for (-version). It is stamped onto
-	// instances that reach it without a krateo.io/oas-version label.
-	version string
 }
 
 // SetEventRecorder wires a Kubernetes Event recorder used to emit Events on the
@@ -130,6 +126,11 @@ const VersionLabel = "krateo.io/oas-version"
 //
 // The merge-patch reasoning that lived in the old comment is preserved in the provider's backfill, which
 // is where that write now happens.
+//
+// The handler's own `version` field went with it. It outlived the fallback by several releases: assigned
+// from -version at construction and never read again, while its doc went on claiming the label "is
+// stamped onto instances that reach it without one". The -version flag itself is still needed (the watch
+// selector, the GVR and the logger all use it), so only the handler's unread copy is gone.
 
 func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (controller.ExternalObservation, error) {
 	if mg == nil {

@@ -30,10 +30,19 @@ import (
 const (
 	// policyAPIVersion is the GA MutatingAdmissionPolicy API, on by default since Kubernetes 1.36.
 	//
-	// The chart's floor is 1.33 (set for CRD validation ratcheting), so on 1.33-1.35 this API is absent
-	// and no policy is created. That is tolerated rather than fatal: rest-dynamic-controller stamps the
-	// label itself when it reconciles an instance that lacks one, so the model still works, just without
-	// the apiserver doing it at admission. See EnsureVersionPolicy's NoMatch handling.
+	// The chart's floor IS 1.36, precisely so this API is always served. EnsureVersionPolicy still
+	// handles NoMatch, because a RestDefinition can be reconciled on a cluster the chart was not
+	// installed through -- but on such a cluster nothing stamps the label and no instance is ever
+	// delivered to its controller's watch, so a missing policy is a dead install, not a degraded one.
+	//
+	// This comment used to say the floor was 1.33 and that rest-dynamic-controller stamped the label
+	// itself when it met an unlabelled instance, so 1.33-1.35 merely lost admission-time stamping.
+	// Both halves stopped being true in stage 2 (#178): the floor moved to 1.36 and that fallback was
+	// deleted, because version-scoped watching selects on exact label equality and an unlabelled
+	// instance therefore never reaches Observe, where the fallback lived. The note is kept because this
+	// is the comment someone reads when deciding whether the floor can be lowered, and it previously
+	// promised a safety net that no longer exists. See restResources.go's removal note, and the
+	// reasoning in helm/oasgen-provider/Chart.yaml.
 	policyAPIVersion = "admissionregistration.k8s.io/v1"
 
 	// VersionLabel must match crd/generation.VersionLabel. The policy stamps the request's served version
