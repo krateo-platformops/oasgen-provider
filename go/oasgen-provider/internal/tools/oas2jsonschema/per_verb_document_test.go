@@ -96,7 +96,7 @@ func TestParametersComeFromEachVerbsOwnDocument(t *testing.T) {
 	}
 
 	schema := &Schema{Type: []string{"object"}}
-	warnings, err := g.addParametersToSpec(schema)
+	_, warnings, err := g.addParametersToSpec(schema)
 	require.NoError(t, err)
 	assert.Empty(t, warnings, "every verb's path resolves in its own document, so nothing should be reported missing")
 
@@ -201,7 +201,7 @@ func TestCrossDocumentParameterConflictIsRefused(t *testing.T) {
 		&Schema{Type: []string{"integer"}},
 	))
 
-	_, err := g.addParametersToSpec(&Schema{Type: []string{"object"}})
+	_, _, err := g.addParametersToSpec(&Schema{Type: []string{"object"}})
 	require.Error(t, err, "two documents disagreeing about a merged parameter must not be resolved by verb order")
 
 	var gerr SchemaGenerationError
@@ -222,7 +222,7 @@ func TestAgreeingDocumentsAreNotAConflict(t *testing.T) {
 	))
 
 	schema := &Schema{Type: []string{"object"}}
-	warnings, err := g.addParametersToSpec(schema)
+	_, warnings, err := g.addParametersToSpec(schema)
 	require.NoError(t, err)
 	assert.Empty(t, warnings)
 
@@ -263,7 +263,7 @@ func TestSameDocumentDisagreementIsNotRefused(t *testing.T) {
 		}},
 	}
 
-	_, err := g.addParametersToSpec(&Schema{Type: []string{"object"}})
+	_, _, err := g.addParametersToSpec(&Schema{Type: []string{"object"}})
 	assert.NoError(t, err,
 		"first-wins within one document is long-standing behaviour; this rule must not reach it")
 }
