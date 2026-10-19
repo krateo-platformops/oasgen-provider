@@ -873,6 +873,11 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 		}
 	}
 
+	// Same reasoning as the two warnings above -- a misconfiguration that is only discoverable at reconcile
+	// time, said once at generation instead. See warnOnApiRefWithoutSnowplow for why it warns and never
+	// refuses.
+	e.warnOnApiRefWithoutSnowplow(cr, RDCtemplateConfigmapPath)
+
 	// Ensure the version-stamping policy BEFORE the CRD exists, because the CRD is what makes instances
 	// writable: once it is served, an instance can be created, and one admitted without the
 	// krateo.io/oas-version label is invisible to its version's controller. Ordering this after the apply
