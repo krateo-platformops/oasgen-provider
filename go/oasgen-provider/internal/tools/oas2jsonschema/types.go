@@ -67,6 +67,21 @@ type Verb struct {
 	// of relocated status fields against the response schema; request-direction entries are carried for
 	// completeness but are not used during generation.
 	FieldMapping []FieldMappingEntry
+	// Correlation is set only on a dispatch verb, and is what makes one observable (#199). Generation
+	// needs it for two things a dispatch resource has no other source for: the STATUS base schema, which
+	// comes from an item of the correlation collection rather than from a get/findby response, and the
+	// refusal checks that the collection endpoint exists and that the token names a real spec field.
+	Correlation *Correlation
+}
+
+// Correlation mirrors the RestDefinition's correlation block, library-agnostic (see the API type for the
+// design and why each part is mandatory).
+type Correlation struct {
+	FromSpec         string
+	ObserveMethod    string
+	ObservePath      string
+	ObserveItemsPath string
+	EchoedAt         string
 }
 
 // FieldMappingEntry is a library-agnostic representation of a single RestDefinition fieldMapping entry,

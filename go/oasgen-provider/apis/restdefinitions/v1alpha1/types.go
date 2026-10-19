@@ -353,11 +353,17 @@ type JQProgram struct {
 
 // +kubebuilder:validation:XValidation:rule="self.action == 'findby' || !has(self.identifiersMatchPolicy)",message="identifiersMatchPolicy can only be set for 'findby' actions"
 // +kubebuilder:validation:XValidation:rule="self.action == 'findby' || !has(self.pagination)",message="pagination can only be set for 'findby' actions"
+// +kubebuilder:validation:XValidation:rule="self.action == 'dispatch' || !has(self.correlation)",message="correlation can only be set for 'dispatch' actions"
+// +kubebuilder:validation:XValidation:rule="self.action != 'dispatch' || has(self.correlation)",message="a 'dispatch' action requires correlation: a dispatch that cannot be correlated would re-fire on every reconcile while reporting Ready"
+// +kubebuilder:validation:XValidation:rule="self.action != 'dispatch' || !has(self.async)",message="async cannot be set for 'dispatch' actions: async extracts an operation handle from the trigger response, which is the case a dispatch does not have (a 204-empty trigger carries no handle) — that is what correlation replaces"
 type VerbsDescription struct {
-	// Name of the action to perform when this api is called [create, update, get, delete, findby]
-	// +kubebuilder:validation:Enum=create;update;get;delete;findby
+	// Name of the action to perform when this api is called [create, update, get, delete, findby, dispatch]
+	// +kubebuilder:validation:Enum=create;update;get;delete;findby;dispatch
 	// +required
 	Action string `json:"action"`
+	// Correlation is REQUIRED for, and permitted only on, a 'dispatch' action. See the Correlation type.
+	// +optional
+	Correlation *Correlation `json:"correlation,omitempty"`
 	// Method: the http method to use [GET, POST, PUT, DELETE, PATCH]
 	// +kubebuilder:validation:Enum=GET;POST;PUT;DELETE;PATCH
 	// +required
@@ -508,6 +514,64 @@ type VerbsDescription struct {
 	Async *AsyncConfig `json:"async,omitempty"`
 }
 
+// Correlation declares how ONE invocation of a dispatch verb is identified afterwards, which is the only
+// thing that makes a dispatch safe in a level-based reconciler.
+//
+// A dispatch-style endpoint (ArgoCD sync, GitHub workflow_dispatch, Jenkins build, Argo resubmit) fits
+// none of the CRUD five: two POSTs are two runs, so the call is not idempotent, and the canonical case
+// answers 204 with an empty body, so nothing comes back to key on. Without correlation every reconcile
+// would re-fire it, which is why this is required rather than optional (#199).
+//
+// It is NOT the async case. AsyncConfig/OperationRef extract a handle FROM THE TRIGGER RESPONSE and poll
+// it; where that handle exists, async already covers the endpoint and no dispatch verb is needed. The
+// token here travels the other way: the CR supplies it, the API echoes it, and the controller finds it
+// again in a collection. That is the only loop available when the trigger tells you nothing.
+//
+// The token IS the resource's identity, which answers what drift means for an action. Observation reduces
+// to a findby: the token is found => Ready, nothing fires; the token is absent => the resource does not
+// exist => the dispatch fires. Changing the token in the spec is therefore a NEW invocation, and firing
+// for it happens exactly once, because its own run is what then stops it. Comparison is scoped to this
+// field alone and never fullSpec, so an unrelated spec edit cannot read as drift on a resource whose only
+// response to drift would be to POST again.
+type Correlation struct {
+	// FromSpec is the dot-path of the spec field the CR supplies as the correlation token, e.g.
+	// "inputs.correlationId". It must resolve to a field that exists in the generated spec schema;
+	// generation refuses otherwise, since a token the CR cannot carry can never be matched.
+	// +required
+	FromSpec string `json:"fromSpec"`
+	// Observe is the collection endpoint in which the invocation becomes visible.
+	// +required
+	Observe CorrelationObserve `json:"observe"`
+	// EchoedAt is the path, PER ITEM of that collection, at which the token comes back — e.g.
+	// ".inputs.correlationId". Uses the same path dialect as itemsPath and async.poll.statusPath.
+	//
+	// Whether a given vendor really echoes the token is exactly what this field forces the author to
+	// establish before the RestDefinition is accepted, instead of discovering it as a resource that
+	// reports Ready and never converges.
+	// +required
+	EchoedAt string `json:"echoedAt"`
+}
+
+// CorrelationObserve is the collection read in which a dispatched invocation is looked up.
+type CorrelationObserve struct {
+	// Method for the collection read. POST is allowed because some APIs expose search that way.
+	// +kubebuilder:validation:Enum=GET;POST
+	// +required
+	Method string `json:"method"`
+	// Path of the collection endpoint, written exactly as the OAS document declares it (paths are matched
+	// by exact string, so a differing parameter name is a miss).
+	// +required
+	Path string `json:"path"`
+	// ItemsPath names the property holding the collection when the response is an ENVELOPE rather than a
+	// bare array — e.g. "workflow_runs" for {"total_count": 3, "workflow_runs": [...]}.
+	//
+	// Same rule, and the same reason, as the findby itemsPath: optional because the common envelope has
+	// exactly one array property, required as soon as there is more than one, because guessing searches
+	// the wrong list and reports not-found — which here means firing the dispatch a second time.
+	// +optional
+	ItemsPath string `json:"itemsPath,omitempty"`
+}
+
 // AsyncConfig declares how a mutating verb's long-running operation is driven to completion.
 type AsyncConfig struct {
 	// Mode selects how the long-running operation is driven:
@@ -628,6 +692,10 @@ type QueryParam struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0)",message="compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against"
 // +kubebuilder:validation:XValidation:rule="!has(self.compareScope) || self.compareScope != 'updatable' || self.verbsDescription.exists(v, v.action == 'update')",message="compareScope 'updatable' requires an update verb: with no update verb the set of updatable fields is empty, so nothing would ever be compared and the resource would silently never report drift"
 // +kubebuilder:validation:XValidation:rule="!(has(self.includedSpecFields) && has(self.excludedSpecFields))",message="declare at most one of includedSpecFields or excludedSpecFields: an allowlist and a blocklist over the same fields is a contradiction, not a merge"
+// +kubebuilder:validation:XValidation:rule="!self.verbsDescription.exists(v, v.action == 'dispatch') || !self.verbsDescription.exists(v, v.action == 'create' || v.action == 'update')",message="a 'dispatch' verb cannot be combined with 'create' or 'update': the dispatch IS the create, and there is nothing an update of a past invocation could mean"
+// +kubebuilder:validation:XValidation:rule="self.verbsDescription.filter(v, v.action == 'dispatch').size() <= 1",message="declare at most one 'dispatch' verb: two dispatches on one kind have no defined order and no way to tell which one a correlated invocation came from"
+// +kubebuilder:validation:XValidation:rule="!self.verbsDescription.exists(v, v.action == 'dispatch') || !(has(self.createApiRef) || has(self.updateApiRef) || has(self.deleteApiRef) || has(self.observeApiRef))",message="a 'dispatch' verb cannot be combined with any *ApiRef: delegating to a Snowplow RESTAction and declaring a correlated dispatch are the two alternative answers to the same problem, and declaring both leaves which one runs decided by the order of checks in the controller rather than by the author"
+// +kubebuilder:validation:XValidation:rule="!self.verbsDescription.exists(v, v.action == 'dispatch') || !has(self.compareScope)",message="compareScope cannot be set alongside a 'dispatch' verb: a dispatch is compared on its correlation token alone, so any other scope would make an unrelated spec edit read as drift on a resource whose only response to drift is to fire the dispatch again"
 type Resource struct {
 	// Name: the name of the resource to manage
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Kind is immutable, you cannot change that once the CRD has been generated"

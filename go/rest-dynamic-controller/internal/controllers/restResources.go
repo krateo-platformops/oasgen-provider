@@ -198,6 +198,16 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}
 	}
 
+	// A dispatch resource is observed by looking its correlation token up in the declared collection, which
+	// replaces the get/findby observe entirely (#199). BEFORE the async check, because the two are mutually
+	// exclusive by construction: async extracts a handle from the trigger response, and a dispatch has no
+	// handle to extract -- that absence is what the correlation token exists to replace. CEL refuses async
+	// on a dispatch verb, so reaching the poll below with a dispatch declared would mean acting on a
+	// handle no dispatch could have produced.
+	if obs, handled, derr := h.observeDispatch(ctx, mg, cli, &http.Client{}, clientInfo, log); handled {
+		return obs, derr
+	}
+
 	// If a requeue-based (Model B) async operation is in flight, poll it once before the normal existence
 	// checks: stay pending until it terminates, then (on success) fall through to observe the real state.
 	if opID, action := asyncOperationInFlight(mg); opID != "" {
@@ -528,6 +538,27 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 			return err
 		}
 		h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Create", fmt.Sprintf("Invoked create RESTAction for: %s", mg.GetName())))
+		return nil
+	}
+
+	// A dispatch resource has no create verb -- the dispatch IS its create -- so this must come before the
+	// create builder, which would otherwise find nothing and report a missing action for a resource that
+	// correctly declares none (#199).
+	if handled, derr := h.createDispatch(ctx, mg, cli, &http.Client{}, clientInfo, log); handled {
+		if derr != nil {
+			log.Error(derr, "Dispatching")
+			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Dispatch", derr))
+			return derr
+		}
+		// Creating, not Available: the invocation is not confirmed until the next Observe finds the token
+		// in the collection, which is the only evidence a 204-empty trigger leaves behind.
+		if err := unstructuredtools.SetConditions(mg, condition.Creating()); err != nil {
+			return err
+		}
+		if _, err := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{Pluralizer: h.pluralizer, DynamicClient: h.dynamicClient}); err != nil {
+			log.Error(err, "Updating status")
+			return err
+		}
 		return nil
 	}
 
@@ -862,6 +893,17 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	cli.Debug = meta.IsVerbose(mg)
 	cli.PrettyJSON = h.prettyJSONDebug
 	cli.SetAuth = clientInfo.SetAuth
+
+	// A dispatch resource's delete is a no-op that releases the finalizer: the invocation its token names
+	// is immutable history, not an object, so there is nothing to tear down and nothing to verify gone.
+	// Before the delegated and OAS delete paths, both of which would look for a delete verb a dispatch
+	// kind does not declare (#199).
+	if handled := h.deleteDispatch(mg, clientInfo, log); handled {
+		if err := unstructuredtools.SetConditions(mg, condition.Deleting()); err != nil {
+			log.Warn("Setting condition", "error", err)
+		}
+		return nil
+	}
 
 	// If delete is delegated to a RESTAction, invoke the teardown sequence, then VERIFY the resource is
 	// actually gone before releasing the finalizer — a RESTAction returns 200 even if a teardown stage

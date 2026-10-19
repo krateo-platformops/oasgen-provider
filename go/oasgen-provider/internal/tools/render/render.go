@@ -101,6 +101,12 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 	if verr := validateAsyncPollPaths(cr, docs); verr != nil {
 		return nil, verr
 	}
+	// Same reasoning, one verb along: a dispatch whose correlation cannot close the loop re-fires on
+	// every reconcile, so it is refused before anything is applied rather than discovered as duplicate
+	// runs (#199).
+	if verr := validateDispatchCorrelation(cr, docs); verr != nil {
+		return nil, verr
+	}
 
 	// Shim VerbsDescription -> oas2jsonschema.Verb (decoupled from the RestDefinition CRD types).
 	verbs := make([]oas2jsonschema.Verb, len(cr.Spec.Resource.VerbsDescription))
@@ -111,6 +117,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 			Path:         v.Path,
 			ItemsPath:    v.ItemsPath,
 			FieldMapping: toDomainFieldMapping(v),
+			Correlation:  toDomainCorrelation(v.Correlation),
 		}
 	}
 
@@ -139,6 +146,21 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 	}
 	generator := oas2jsonschema.NewOASSchemaGeneratorFromSet(docs, oas2jsonschema.DefaultGeneratorConfig(), resourceConfig)
 
+	// The echo path is checked here, against the collection's item schema, because this is the first point
+	// that schema exists. It is the last way to reach a dispatch that fires on every reconcile: a mistyped
+	// echoedAt never matches, so the invocation reads as absent forever.
+	if verr := generator.ValidateCorrelationEcho(); verr != nil {
+		for i, v := range cr.Spec.Resource.VerbsDescription {
+			if strings.EqualFold(v.Action, oas2jsonschema.ActionDispatch) {
+				return nil, &FieldError{
+					Field: fmt.Sprintf("spec.resource.verbsDescription[%d].correlation.echoedAt", i),
+					Err:   verr,
+				}
+			}
+		}
+		return nil, verr
+	}
+
 	_, genSpan := oteltelemetry.Tracer().Start(ctx, "restdefinition.generate_crd")
 	defer genSpan.End()
 	defer func() { oteltelemetry.RecordError(genSpan, err) }()
@@ -152,6 +174,13 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 	result, err := generator.Generate()
 	if err != nil {
 		return nil, fmt.Errorf("generating schemas: %w", err)
+	}
+
+	// The token must be a field the CR can actually carry, and only now is there a spec schema to ask.
+	// A token naming nothing in the spec can never match an echoed value, so the dispatch would fire on
+	// every reconcile -- the one outcome this verb exists to prevent.
+	if verr := validateCorrelationTokenInSpec(cr, result.SpecSchema); verr != nil {
+		return nil, verr
 	}
 
 	out := &Result{
