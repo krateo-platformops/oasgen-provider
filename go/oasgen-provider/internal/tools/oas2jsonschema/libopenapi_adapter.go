@@ -124,27 +124,66 @@ func (a *libOASPathItemAdapter) GetOperations() map[string]Operation {
 	ops := make(map[string]Operation)
 	rawOps := a.path.GetOperations()
 	for pair := rawOps.First(); pair != nil; pair = pair.Next() {
-		ops[pair.Key()] = &libOASOperationAdapter{op: pair.Value()}
+		// Every operation on this path inherits the path item's shared parameters. Handing them to
+		// the operation adapter here is what makes them visible to both callers at once (#197).
+		ops[pair.Key()] = &libOASOperationAdapter{op: pair.Value(), pathParams: a.path.Parameters}
 	}
 	return ops
 }
 
 type libOASOperationAdapter struct {
 	op *v3.Operation
+	// pathParams are the parameters the enclosing path item declares for all of its operations.
+	// They are merged UNDER op.Parameters by GetParameters.
+	pathParams []*v3.Parameter
 }
 
+// GetParameters merges the path item's shared parameters under the operation's own.
+//
+// OAS 3 lets a path item declare `parameters` that apply to each of its operations, and an operation
+// may override one by redeclaring the same name and location. Keycloak leans on this heavily -- it
+// declares path-item parameters on 273 of its 274 paths -- so reading only op.Parameters made a
+// REQUIRED path parameter like `realm` invisible, and the generated kind had no spec field with which
+// to build its own URL.
 func (a *libOASOperationAdapter) GetParameters() []ParameterInfo {
+	// Operation-level first, so the override rule is a plain "already seen" check below rather than
+	// an append-then-overwrite that depends on map iteration order.
 	var params []ParameterInfo
+	seen := make(map[string]struct{}, len(a.op.Parameters))
 	for _, p := range a.op.Parameters {
-		params = append(params, ParameterInfo{
-			Name:        p.Name,
-			In:          p.In,
-			Description: p.Description,
-			Required:    p.Required != nil && *p.Required,
-			Schema:      convertLibopenapiSchema(p.Schema),
-		})
+		if p == nil {
+			continue
+		}
+		seen[parameterKey(p.Name, p.In)] = struct{}{}
+		params = append(params, convertLibopenapiParameter(p))
+	}
+	for _, p := range a.pathParams {
+		if p == nil {
+			continue
+		}
+		if _, overridden := seen[parameterKey(p.Name, p.In)]; overridden {
+			continue
+		}
+		params = append(params, convertLibopenapiParameter(p))
 	}
 	return params
+}
+
+// parameterKey identifies a parameter the way OAS does: by name AND location. A `realm` path
+// parameter and a `realm` query parameter are two different parameters, and only the matching pair
+// overrides.
+func parameterKey(name, in string) string {
+	return in + "\x00" + name
+}
+
+func convertLibopenapiParameter(p *v3.Parameter) ParameterInfo {
+	return ParameterInfo{
+		Name:        p.Name,
+		In:          p.In,
+		Description: p.Description,
+		Required:    p.Required != nil && *p.Required,
+		Schema:      convertLibopenapiSchema(p.Schema),
+	}
 }
 
 func (a *libOASOperationAdapter) GetRequestBody() RequestBodyInfo {
