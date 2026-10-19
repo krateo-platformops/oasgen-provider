@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-06T09:00:00Z
+timestamp: 2026-10-19T09:00:00Z
 ---
 
 # Log
@@ -12,6 +12,127 @@ timestamp: 2026-10-06T09:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-19 — 0.32.0
+
+Three features — an allowlist, Swagger 2.0 documents, and the first non-CRUD verb — plus a new
+refusal and a new diagnostic. **One thing can break an existing install**, and it is the first entry
+for that reason.
+
+### Existing CRs can stop validating, if the vendor document declares path-item parameters
+
+OpenAPI lets `parameters` sit on the path item rather than on the operation, and until this release
+they were invisible: `PathItem` exposed only `GetOperations()`, so nothing ever read them. A path
+parameter declared that way never became a spec field, which meant a generated kind could not bind its
+own URL. Keycloak declares them on **273 of 274 paths**, so this is the common shape, not a corner.
+
+They are now read and merged under the operation's own parameters, overridden by name **and** location.
+Newly visible optional parameters are additive and benign. A path-item parameter with `required: true`
+now marks its spec field **required**, and a CR that omits it stops validating.
+
+What limits the damage: the chart's floor is 1.36, so CRD validation ratcheting is active and
+`LockToDefault`, which means an update that does not touch the newly-invalid field is still accepted.
+So stored CRs are not retroactively broken — it is creates, and updates that touch the field, that are
+rejected. Check any resource whose document declares path-item parameters before upgrading.
+
+The #108 cross-document conflict rule is **not** a broad risk alongside this: it is scoped to
+cross-document disagreement, so a single-document RestDefinition cannot begin failing. Only a
+multi-document one can, by gaining a name on both sides of the merge.
+
+### Generation now refuses a CRD whose names would shadow a built-in resource
+
+A generated plural comes from the vendor document's own resource name, and vendor APIs are full of
+names Kubernetes already serves. GitHub's document contains "deployment", so generation minted
+`deployments.github.krateo.io`; two groups then claimed the plural `deployments`, and `kubectl get
+deployment` started refusing the bare two-argument form **for the built-in**.
+
+The guard enumerates every non-CRD group from discovery — not just core, because `deployments` lives in
+`apps/v1`, which is the trap — and checks plurals and singulars, subtracting CRD-backed resources so a
+generated resource does not collide with itself on re-reconcile.
+
+Two deliberate asymmetries. It **fails open** when discovery is unreachable, and partial results are
+still used, because they can only miss a collision, never invent one. And it **refuses only while the
+CRD does not exist yet, warning once it does**: refusing later cannot unbreak `kubectl`, and the only
+remedy at that point destroys CRs. So this cannot break an install that already works.
+
+### `includedSpecFields`: an allowlist, because a blocklist cannot narrow a 152-field schema
+
+`excludedSpecFields` requires naming everything you do not want. Keycloak's `RealmRepresentation` has
+152 fields, so the useful direction is the other one.
+
+Mutually exclusive with `excludedSpecFields` (CEL), append-only rather than immutable, dot-notation,
+bounded at 256 entries. Two decisions resolved toward refusing rather than guessing: a listed field
+that does not exist is **fatal**, and machinery is **always kept** — `configurationRef`, spec fields
+derived from required parameters, and identifier selectors on a create-less resource. Dropping a
+required parameter's field would reintroduce the breakage in the first entry above, by configuration.
+
+Validated on a cluster: the CRD Establishes at `maxItems: 256`, both lists together are rejected,
+appends are accepted, removal and reordering are rejected, and 152 real entries are accepted.
+
+### Swagger / OpenAPI 2.0 documents are accepted, by a second adapter
+
+Selected by sniffing the document's spec type before a model is built. **Not** a 2.0 → 3.0 conversion:
+converting would make `status.oasHash` hash a document the vendor never published, breaking the
+guarantee that a generated CRD traces back to one vendor document — which this repository
+checksum-enforces.
+
+Cheap because a 2.0 parameter's and response's schema are the *same* object the 3.0 path already
+consumes. Inline-typed non-body parameters synthesise a schema; responses synthesise a MIME map from
+`produces`, which narrows rather than widens; the `in: body` parameter surfaces as the request body and
+is excluded from the parameter list; and `type: basic` becomes `{http, basic}`, so a 2.0 document's
+basic auth no longer generates no auth field at all.
+
+### A `dispatch` verb, for endpoints that fit none of the five
+
+ArgoCD sync, GitHub `workflow_dispatch`, Jenkins build. Two POSTs are two runs, so the call is not
+idempotent, and the canonical case answers 204 with an empty body, so nothing comes back to key on —
+which is also why `async` cannot reach it: `operationRef` extracts a handle *from the trigger
+response*, and there is no handle.
+
+What makes one safe is a **CR-supplied correlation token that the API echoes back** in an observable
+collection. The token is the resource's identity, so observation is an ordinary lookup: found ⇒ Ready
+and nothing fires; absent ⇒ the resource does not exist ⇒ the dispatch fires. Changing the token is a
+new invocation, not drift.
+
+Correlation is **mandatory** — an uncorrelated dispatch would report Ready while POSTing every resync —
+and is checked at admission, against the OAS document, and against the generated spec. A dispatch
+cannot be combined with `create`, `update`, `compareScope`, `async` or any `*ApiRef`; at most one is
+allowed per kind; and `delete` is a no-op that releases the finalizer, because the invocation a token
+names is immutable history rather than an object.
+
+Fire-once is enforced, not merely intended: the controller records the token it successfully POSTed and
+refuses to report not-exists for that token again, so a mis-declared echo path produces one dispatch and
+then a diagnosis, instead of a duplicate run per reconcile. The annotation is written only after the
+POST succeeds, so a dispatch that never actually happened is still retried.
+
+**Not yet done: no dispatch verb has been driven against a live vendor API.**
+
+### A delegated verb with no snowplow URL is now reported at generation
+
+A RestDefinition that delegates a verb to a Snowplow RESTAction is inoperative, not degraded, when the
+generated controller has no `URL_SNOWPLOW`: every reconcile of every instance fails. That was already a
+clear runtime error — but it needed an instance to reconcile, so it was found by whoever first wrote a
+CR rather than by whoever set the chart values. `rdc.env` defaults to `{}`, so the unconfigured case is
+the default one.
+
+Generation now says it once, as an event, naming the field and the RESTAction. A warning and never
+fatal: the snowplow URL is platform configuration the RestDefinition author often does not own, and it
+can arrive later by a `helm upgrade` that restarts the generated controller without the RestDefinition
+changing at all.
+
+### Documentation
+
+Two notes corrected that said the opposite of the code. `docs/release.md` now records why the
+`oasgen-provider-crds` release must never be renamed or replaced — and that `helm.sh/resource-policy:
+keep` is **not** the remedy, because helm reads it from the release's stored manifest rather than the
+live object; `krateo.io/deletion-policy=orphan` on the Composition is, and it lives in the installer.
+
+Separately, the version-policy code claimed the chart floor was 1.33 and that rest-dynamic-controller
+stamps the `krateo.io/oas-version` label itself when it meets an unlabelled instance. Both stopped being
+true when version-scoped watching landed: the floor is 1.36 and that fallback was deleted, because the
+watch selector is exact label equality so an unlabelled instance never reaches Observe. `Chart.yaml`
+already said the opposite, so the repository contradicted itself — in the comment headed "if you are
+here to judge whether this floor can be lowered".
 
 ## 2026-10-06 — 0.31.0
 
