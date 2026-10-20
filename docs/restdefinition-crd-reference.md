@@ -4,7 +4,7 @@ title: RestDefinition CRD reference
 description: Generated field-by-field reference for restdefinitions.ogen.krateo.io (crdoc output from go/oasgen-provider/crds; regenerate after `make generate`).
 resource: restdefinitions.ogen.krateo.io
 tags: [kog, crd, restdefinition, generated]
-timestamp: 2026-09-22T00:00:00Z
+timestamp: 2026-10-20T00:00:00Z
 ---
 
 # API Reference
@@ -107,7 +107,7 @@ RestDefinitionSpec is the specification of a RestDefinition.
         <td>
           The resource to manage<br/>
           <br/>
-            <i>Validations</i>:<li>!(has(self.createApiRef) && has(self.observeApiRef) && !has(self.observeApiRef.notFoundExpr)): createApiRef with observeApiRef requires observeApiRef.notFoundExpr, so a create can be triggered when the delegated observe reports the resource absent</li><li>!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby'): createApiRef requires a get or findby verb so the controller can verify the create converged (level-based convergence)</li><li>!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0): compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against</li><li>!has(self.compareScope) || self.compareScope != 'updatable' || self.verbsDescription.exists(v, v.action == 'update'): compareScope 'updatable' requires an update verb: with no update verb the set of updatable fields is empty, so nothing would ever be compared and the resource would silently never report drift</li>
+            <i>Validations</i>:<li>!(has(self.createApiRef) && has(self.observeApiRef) && !has(self.observeApiRef.notFoundExpr)): createApiRef with observeApiRef requires observeApiRef.notFoundExpr, so a create can be triggered when the delegated observe reports the resource absent</li><li>!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby'): createApiRef requires a get or findby verb so the controller can verify the create converged (level-based convergence)</li><li>!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0): compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against</li><li>!has(self.compareScope) || self.compareScope != 'updatable' || self.verbsDescription.exists(v, v.action == 'update'): compareScope 'updatable' requires an update verb: with no update verb the set of updatable fields is empty, so nothing would ever be compared and the resource would silently never report drift</li><li>!(has(self.includedSpecFields) && has(self.excludedSpecFields)): declare at most one of includedSpecFields or excludedSpecFields: an allowlist and a blocklist over the same fields is a contradiction, not a merge</li><li>!self.verbsDescription.exists(v, v.action == 'dispatch') || !self.verbsDescription.exists(v, v.action == 'create' || v.action == 'update'): a 'dispatch' verb cannot be combined with 'create' or 'update': the dispatch IS the create, and there is nothing an update of a past invocation could mean</li><li>self.verbsDescription.filter(v, v.action == 'dispatch').size() <= 1: declare at most one 'dispatch' verb: two dispatches on one kind have no defined order and no way to tell which one a correlated invocation came from</li><li>!self.verbsDescription.exists(v, v.action == 'dispatch') || !(has(self.createApiRef) || has(self.updateApiRef) || has(self.deleteApiRef) || has(self.observeApiRef)): a 'dispatch' verb cannot be combined with any *ApiRef: delegating to a Snowplow RESTAction and declaring a correlated dispatch are the two alternative answers to the same problem, and declaring both leaves which one runs decided by the order of checks in the controller rather than by the author</li><li>!self.verbsDescription.exists(v, v.action == 'dispatch') || !has(self.compareScope): compareScope cannot be set alongside a 'dispatch' verb: a dispatch is compared on its correlation token alone, so any other scope would make an unrelated spec edit read as drift on a resource whose only response to drift is to fire the dispatch again</li>
         </td>
         <td>true</td>
       </tr><tr>
@@ -152,16 +152,51 @@ The resource to manage
         <td><b><a href="#restdefinitionspecresourceverbsdescriptionindex">verbsDescription</a></b></td>
         <td>[]object</td>
         <td>
-          VerbsDescription: the list of verbs to use on this resource<br/>
+          VerbsDescription: the list of verbs to use on this resource
+
+A per-verb oasPath override used to be refused here, because the field shipped in the CRD and
+NOTHING READ IT: the write was admitted and the verb resolved from spec.oasPath regardless, silently
+generating the CRD from the wrong document. The rule is gone because #108 implemented it -- every
+per-verb lookup now resolves against the verb's own document, and two documents that disagree about
+a merged parameter are refused at generation rather than resolved by verb order.
+
+The MaxItems=32 bound went with it. It was never a limit on verbs; it existed only to keep that
+rule's comprehension inside the apiserver's CEL cost budget, which an unbounded one exceeds at
+CRD-install time -- taking the whole CRD down rather than just the validation (#169).<br/>
         </td>
         <td>true</td>
       </tr><tr>
         <td><b>additionalStatusFields</b></td>
         <td>[]string</td>
         <td>
-          AdditionalStatusFields: the list of fields to use as additional status fields - used to populate the status of the resource<br/>
+          AdditionalStatusFields: the list of fields to use as additional status fields - used to populate the status of the resource
+
+APPEND-ONLY, not immutable. Entries may be added at the end; the existing ones must stay in place,
+in order, unchanged.
+
+Fully immutable was too strong and blocked an ordinary upgrade: a KOG chart that adds a status field
+-- github-provider-kog 0.3.2 adding `merged` and `merged_at` to PullRequest -- could not be applied
+over an existing install at all, and the only way through was deleting the RestDefinition and its
+CRs. On the cluster that hit it those CRs were 24 publish records, so that was not an option.
+
+Appending is safe: the generated CRD gains optional status properties (and any printer columns), and
+stored objects simply do not carry them yet. The operations still refused are the ones that break
+stored objects or columns -- removing, renaming, reordering, or changing an existing entry.
+
+The rule is a prefix comparison. `oldSelf.all(i, v, self[i] == v)` is a TWO-VARIABLE comprehension,
+available in the apiserver's CEL from Kubernetes 1.32, which is below this chart's 1.36 floor. The
+obvious alternative, `self.slice(0, size(oldSelf)) == oldSelf`, needs ext.Lists, which the apiserver
+only enables from 1.34 -- and a CRD whose CEL does not compile is rejected outright, so that would
+have broken installs on 1.33 rather than merely failing to validate.
+
+MaxItems and MaxLength are REQUIRED for the rule above, not stylistic. Kubernetes costs a CEL rule
+statically, and a comprehension over an unbounded list of unbounded strings estimates as effectively
+infinite: the apiserver refused the whole CRD with "estimated rule cost exceeds budget by factor of
+more than 100x", which rejects the install rather than the RestDefinition. The bounds make the
+estimate finite. They are generous -- a resource with more than 64 additional status fields, or a
+field path longer than 253 characters, is not a thing we have seen.<br/>
           <br/>
-            <i>Validations</i>:<li>self == oldSelf: AdditionalStatusFields are immutable, you cannot change them once the CRD has been generated</li>
+            <i>Validations</i>:<li>size(self) >= size(oldSelf) && oldSelf.all(i, v, self[i] == v): AdditionalStatusFields is append-only: you may add new entries at the end, but existing entries cannot be removed, renamed, reordered or changed once the CRD has been generated</li>
         </td>
         <td>false</td>
       </tr><tr>
@@ -240,6 +275,49 @@ sub-resource.<br/>
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b>includedSpecFields</b></td>
+        <td>[]string</td>
+        <td>
+          IncludedSpecFields: the ALLOWLIST counterpart of excludedSpecFields. When set, the generated spec keeps
+ONLY these fields (plus the machinery described below); when unset, nothing changes.
+
+A blocklist inverts badly on a wide vendor schema. Keycloak's RealmRepresentation has 152 fields, so
+"I want 30 of them" means naming ~122 exclusions, and because excludedSpecFields is immutable, getting
+that list wrong once is unrecoverable without deleting the RestDefinition and its CRs. The Keycloak KOG
+abandoned the vendor document over exactly this and hand-writes a curated OAS per kind -- a 328-line
+generator plus a vendored subset standing in for a 30-line RestDefinition.
+
+It is a correctness control as much as an economy. An unbounded generated schema is a liability at the
+apiserver: a CRD has already been taken down here by the CEL cost budget (#169, "estimated rule cost
+exceeds budget" is a CRD-INSTALL failure, not a validation failure). Bounding what gets generated is
+load-bearing even for a single integration.
+
+APPEND-ONLY rather than immutable, following additionalStatusFields. Widening a subset is safe -- the
+CRD gains fields. Narrowing it removes fields that live CRs may be setting, which is the thing
+immutability actually protects against. See the note on AdditionalStatusFields above for why the rule
+is a prefix comparison and why the MaxItems/MaxLength bounds are required rather than stylistic: a CEL
+comprehension over an unbounded list costs as effectively infinite and gets the whole CRD rejected.
+
+Dot-notation selects nested fields, as in excludedSpecFields. A path naming a parent keeps that parent's
+whole subtree; naming a child keeps the parent and only the listed children.
+
+ALWAYS KEPT, whether listed or not, because they are machinery the resource cannot function without:
+configurationRef (without it the resource has no way to reference its credentials), spec fields derived
+from REQUIRED OAS parameters (without them the resource cannot build its own URL -- the same breakage
+#197 fixed), and the identifier selectors materialised into the spec of a resource with no create verb
+(without them findby can never match). Optional parameter-derived fields are ordinary fields and can be
+dropped.
+
+A listed field that does not exist in the generated schema is REFUSED, where excludedSpecFields only
+warns. The asymmetry is deliberate: a typo in a blocklist silently leaves a field IN, where it is
+visible and discoverable; a typo in an allowlist silently leaves a field OUT, and the author sees a
+missing field with no explanation and a CR that fails validation on a field they believed they had
+included.<br/>
+          <br/>
+            <i>Validations</i>:<li>size(self) >= size(oldSelf) && oldSelf.all(i, v, self[i] == v): IncludedSpecFields is append-only: you may add new entries at the end, but existing entries cannot be removed, renamed, reordered or changed once the CRD has been generated</li>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b><a href="#restdefinitionspecresourceobserveapiref">observeApiRef</a></b></td>
         <td>object</td>
         <td>
@@ -286,9 +364,9 @@ whole spec — the desired state) to re-apply it. Like create, the RESTAction MU
         <td><b>action</b></td>
         <td>enum</td>
         <td>
-          Name of the action to perform when this api is called [create, update, get, delete, findby]<br/>
+          Name of the action to perform when this api is called [create, update, get, delete, findby, dispatch]<br/>
           <br/>
-            <i>Enum</i>: create, update, get, delete, findby<br/>
+            <i>Enum</i>: create, update, get, delete, findby, dispatch<br/>
         </td>
         <td>true</td>
       </tr><tr>
@@ -314,6 +392,13 @@ whole spec — the desired state) to re-apply it. Like create, the RESTAction MU
           Async declares long-running-operation (async) handling for this mutating verb: after the trigger call
 returns an operation handle, the controller polls an operations endpoint until it reaches a terminal
 status, turning an asynchronous API into a synchronous reconcile. Set only on create/update/delete.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelation">correlation</a></b></td>
+        <td>object</td>
+        <td>
+          Correlation is REQUIRED for, and permitted only on, a 'dispatch' action. See the Correlation type.<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -347,6 +432,29 @@ Possible values are 'AND' or 'OR'.
 - 'OR': at least one identifier must match (the default behavior).<br/>
           <br/>
             <i>Enum</i>: AND, OR<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>itemsPath</b></td>
+        <td>string</td>
+        <td>
+          ItemsPath names the property holding the collection, for a 'findby' whose response is an ENVELOPE
+rather than a bare array -- e.g. ".values" for {"total": 12, "values": [...]}. To be set only for
+'findby' actions.
+
+It resolves ONE question that is asked in two places and must get the same answer in both: the
+generator reads it to find the schema of an item (so identifiers get their real types instead of
+degrading to string), and the controller reads it at runtime to find the items themselves. When
+those two disagree, the generated CRD describes a shape the controller never looks at.
+
+Optional, because the overwhelmingly common envelope has exactly one array property and that one is
+unambiguous. Declare it when there is more than one: an envelope like {"data": [...],
+"included": [...]} (plain JSON:API) has no single obvious collection, and rather than pick one,
+both sides refuse -- generation fails with the candidates named. Guessing here is not a smaller
+version of being right; it silently searches the wrong list and reports not-found, which the
+reconciler acts on by creating a duplicate.
+
+Uses the same path dialect as async.poll.statusPath, fieldMapping and pagination body paths.<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -392,9 +500,13 @@ motivating example -- findby/get/delete live in compute-provider.json (1.0.0) wh
 compute-provider_v1.1.json (1.1.0), and Aruba's own SDK pins exactly that split.
 
 Documents are read as published and never merged: pre-merging would break the guarantee that a
-generated CRD traces back to one vendor document, which this repo checksum-enforces. Where two
-documents disagree about a schema both use, the RestDefinition is REJECTED at admission rather
-than silently preferring one.
+generated CRD traces back to one vendor document, which this repo checksum-enforces.
+
+Where two documents disagree, the RestDefinition is REFUSED rather than silently preferring one --
+at GENERATION, not admission, because admission cannot see the documents. The check is scoped to
+the one place two documents demonstrably feed the same CRD field: parameters are merged across
+every verb and deduplicated by name, so the same name declared differently by verbs reading
+different documents would otherwise be resolved by the ORDER of this list.
 
 Which document supplies what is unchanged, only made explicit: the create verb's document drives
 the generated spec schema, the observe (get/findby) document drives status and identifiers, and
@@ -743,6 +855,103 @@ Requires rest-dynamic-controller >= 0.18.0; an older controller ignores it and b
         <td>integer</td>
         <td>
           TimeoutSeconds: overall cap on the polling loop. 0 means no explicit cap (bounded by MaxAttempts).<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindex)</sup></sup>
+
+
+
+Correlation is REQUIRED for, and permitted only on, a 'dispatch' action. See the Correlation type.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>echoedAt</b></td>
+        <td>string</td>
+        <td>
+          EchoedAt is the path, PER ITEM of that collection, at which the token comes back — e.g.
+".inputs.correlationId". Uses the same path dialect as itemsPath and async.poll.statusPath.
+
+Whether a given vendor really echoes the token is exactly what this field forces the author to
+establish before the RestDefinition is accepted, instead of discovering it as a resource that
+reports Ready and never converges.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>fromSpec</b></td>
+        <td>string</td>
+        <td>
+          FromSpec is the dot-path of the spec field the CR supplies as the correlation token, e.g.
+"inputs.correlationId". It must resolve to a field that exists in the generated spec schema;
+generation refuses otherwise, since a token the CR cannot carry can never be matched.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobserve">observe</a></b></td>
+        <td>object</td>
+        <td>
+          Observe is the collection endpoint in which the invocation becomes visible.<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelation)</sup></sup>
+
+
+
+Observe is the collection endpoint in which the invocation becomes visible.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>method</b></td>
+        <td>enum</td>
+        <td>
+          Method for the collection read. POST is allowed because some APIs expose search that way.<br/>
+          <br/>
+            <i>Enum</i>: GET, POST<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>path</b></td>
+        <td>string</td>
+        <td>
+          Path of the collection endpoint, written exactly as the OAS document declares it (paths are matched
+by exact string, so a differing parameter name is a miss).<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>itemsPath</b></td>
+        <td>string</td>
+        <td>
+          ItemsPath names the property holding the collection when the response is an ENVELOPE rather than a
+bare array — e.g. "workflow_runs" for {"total_count": 3, "workflow_runs": [...]}.
+
+Same rule, and the same reason, as the findby itemsPath: optional because the common envelope has
+exactly one array property, required as soon as there is more than one, because guessing searches
+the wrong list and reports not-found — which here means firing the dispatch a second time.<br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -2570,6 +2779,20 @@ re-hashes the referenced OAS each reconcile and treats a change as drift, so an 
         <td>object</td>
         <td>
           Resource: the resource to manage<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>resourceHash</b></td>
+        <td>string</td>
+        <td>
+          ResourceHash: a content hash of spec.resource at the last successful Create/Update.
+
+The CRD is regenerated when the OAS content changes, which was sufficient while every input to
+generation was immutable. additionalStatusFields is append-only rather than immutable (a KOG chart
+adding a status field must be upgradable in place), so a RestDefinition can now change in a way that
+alters the generated schema while the OAS is byte-identical. Without this the apply would be accepted
+and then do nothing -- the CRD keeping its old status schema, looking for all the world like it had
+worked.<br/>
         </td>
         <td>false</td>
       </tr></tbody>

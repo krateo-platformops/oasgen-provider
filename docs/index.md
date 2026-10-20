@@ -1,16 +1,16 @@
 ---
 type: Component
 title: oasgen-provider — index
-description: The map of the oasgen-provider doc bundle — the Krateo Operator Generator that turns OAS 3.0/3.1 documents into CRDs and dynamic REST controllers via the RestDefinition CRD.
+description: The map of the oasgen-provider doc bundle — the Krateo Operator Generator that turns OpenAPI documents (3.1, 3.0 and Swagger 2.0) into CRDs and dynamic REST controllers via the RestDefinition CRD.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, restdefinition, openapi, generator]
-timestamp: 2026-08-10T00:00:00Z
+timestamp: 2026-10-20T00:00:00Z
 ---
 
 # oasgen-provider
 
-oasgen-provider is the **Krateo Operator Generator (KOG)**: from an OpenAPI 3.0/3.1
-document and a `RestDefinition` CR it generates a resource CRD (plus a `*Configuration`
+oasgen-provider is the **Krateo Operator Generator (KOG)**: from an OpenAPI document
+(3.1, 3.0, or Swagger 2.0 since 0.32.0) and a `RestDefinition` CR it generates a resource CRD (plus a `*Configuration`
 CRD for auth/config) and deploys a dedicated **rest-dynamic-controller** (RDC) instance
 that reconciles the external REST resource. This monorepo carries both Go modules
 (`go/oasgen-provider/`, `go/rest-dynamic-controller/`) and both Helm charts
@@ -25,9 +25,10 @@ line.
   `helm install oci://…`; requirements; the local-render recipe.
 - [configuration](./configuration.md) — the whole config surface: both charts' values,
   provider env/flags, the RDC env contract.
-- [api](./api.md) — the `RestDefinition` CRD contract: the five actions, the full field
-  surface, immutability, generated resources, supported auth — plus the RDC runtime
-  contract (status, conditions, events, self-provisioned RBAC, metrics).
+- [api](./api.md) — the `RestDefinition` CRD contract: the six actions (including the
+  correlated `dispatch`), the full field surface, immutability, generated resources,
+  supported auth — plus the RDC runtime contract (status, conditions, events,
+  self-provisioned RBAC, metrics).
 - [examples](./examples.md) — the runnable examples under `examples/`.
 - [release](./release.md) — how a release ships (one tag → both images + charts on GHCR),
   and why the CRD chart must never be renamed or replaced.

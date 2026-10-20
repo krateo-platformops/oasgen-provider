@@ -1,7 +1,7 @@
 # oasgen-provider
 
 The Krateo Operator Generator (KOG): a Kubernetes controller that turns an OpenAPI
-Specification (OAS) 3.0/3.1 document plus a `RestDefinition` CR into a generated CRD and a
+Specification (OAS) document — 3.1, 3.0 or Swagger 2.0 — plus a `RestDefinition` CR into a generated CRD and a
 dedicated controller that reconciles external REST resources — no custom operator code.
 
 ## What is this
