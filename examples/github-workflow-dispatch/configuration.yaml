@@ -1,0 +1,14 @@
+# Applied AFTER the RestDefinition is Ready (the WorkflowRunConfiguration CRD is
+# generated from it) and after the gh-token Secret exists — see README.md.
+apiVersion: github.ogen.krateo.io/v1alpha1
+kind: WorkflowRunConfiguration
+metadata:
+  name: gh-workflow-config
+  namespace: gh-wf-system
+spec:
+  authentication:
+    bearer:
+      tokenRef:
+        name: gh-token
+        namespace: gh-wf-system
+        key: token

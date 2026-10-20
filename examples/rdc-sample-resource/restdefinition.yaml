@@ -15,6 +15,23 @@ spec:
       - name
     additionalStatusFields:
       - id
+    # The create body and the get/findby responses share one `Resource` schema, so
+    # without this the server-generated and response-only fields all land in the spec --
+    # and `id`, being a REQUIRED path parameter of get/update/delete, lands there
+    # REQUIRED, which no author can satisfy before the resource exists.
+    #
+    # Excluding it is safe because the controller fills a path parameter from spec OR
+    # status, and `additionalStatusFields: [id]` puts it in status: findby matches on
+    # `name`, learns the id, and every later get/update/delete binds {id} from there.
+    #
+    # NOTE excludedSpecFields is IMMUTABLE -- it cannot be changed once the CRD has been
+    # generated, so delete and recreate the RestDefinition if you edit this list.
+    excludedSpecFields:
+      - id
+      - status
+      - createdAt
+      - updatedAt
+      - metadata
     verbsDescription:
       - action: create
         method: POST

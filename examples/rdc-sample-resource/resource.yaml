@@ -22,7 +22,8 @@ spec:
         namespace: demo-system
         key: token
 ---
-apiVersion: sample.krateo.io/v1alpha1
+# v1-0, not v1alpha1: derived from the OAS document's info.version ("1.0").
+apiVersion: sample.krateo.io/v1-0
 kind: Sample
 metadata:
   name: sample-1

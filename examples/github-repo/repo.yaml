@@ -1,6 +1,7 @@
 # A Repo instance: creates a real repository in the given GitHub org.
 # Edit `org` (an org your token can create repos in) before applying.
-apiVersion: github.ogen.krateo.io/v1alpha1
+# v1-1-4, not v1alpha1: derived from the OAS document's info.version ("1.1.4").
+apiVersion: github.ogen.krateo.io/v1-1-4
 kind: Repo
 metadata:
   name: gh-repo-1

@@ -1,0 +1,144 @@
+# The OpenAPI document the RestDefinition points at (oasPath:
+# configmap://gh-wf-system/gh-workflow/openapi.yaml).
+#
+# A CURATED document over two GitHub endpoints, not GitHub's published one, for one
+# reason that matters to this example: GitHub types `inputs` as a free-form object
+# (`additionalProperties: true`), and a correlation token must resolve to a field that
+# EXISTS in the generated spec schema — generation refuses a token the CR cannot carry.
+# So the input carrying the token is declared by name here. Everything else is the
+# vendor's own shape, field for field.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gh-workflow
+  namespace: gh-wf-system
+data:
+  openapi.yaml: |
+    openapi: 3.0.3
+    info:
+      title: GitHub Actions — workflow dispatch
+      version: "1.0"
+      description: >-
+        The two endpoints a correlated dispatch needs: the trigger (which answers 204
+        with an empty body, so nothing comes back to key on) and the collection in
+        which the triggered run becomes visible.
+    servers:
+      - url: https://api.github.com
+    paths:
+      /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches:
+        post:
+          operationId: createWorkflowDispatch
+          summary: Trigger a workflow run
+          parameters:
+            - name: owner
+              in: path
+              required: true
+              schema:
+                type: string
+            - name: repo
+              in: path
+              required: true
+              schema:
+                type: string
+            - name: workflow_id
+              in: path
+              required: true
+              description: The workflow file name (e.g. "build.yml") or its numeric id.
+              schema:
+                type: string
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  required:
+                    - ref
+                    - inputs
+                  properties:
+                    ref:
+                      type: string
+                      description: The git reference the workflow run is created from.
+                    inputs:
+                      type: object
+                      description: >-
+                        Inputs declared by the workflow's workflow_dispatch trigger. The
+                        workflow must put correlationId into its run-name — see README.
+                      required:
+                        - correlationId
+                      properties:
+                        correlationId:
+                          type: string
+                          description: >-
+                            The correlation token. The CR supplies it, the workflow
+                            echoes it back through run-name, and the controller finds
+                            this run again by it. Changing it is a NEW invocation.
+          responses:
+            '204':
+              description: Accepted. No body — this is the shape that makes correlation necessary.
+      /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs:
+        get:
+          operationId: listWorkflowRuns
+          summary: List runs of one workflow
+          parameters:
+            - name: owner
+              in: path
+              required: true
+              schema:
+                type: string
+            - name: repo
+              in: path
+              required: true
+              schema:
+                type: string
+            - name: workflow_id
+              in: path
+              required: true
+              schema:
+                type: string
+          responses:
+            '200':
+              description: The runs of this workflow, newest first.
+              content:
+                application/json:
+                  schema:
+                    type: object
+                    properties:
+                      total_count:
+                        type: integer
+                      workflow_runs:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: integer
+                              format: int64
+                            name:
+                              type: string
+                            display_title:
+                              type: string
+                              description: >-
+                                The run's title — the workflow's run-name when it sets
+                                one. This is where the echoed token is read from.
+                            run_number:
+                              type: integer
+                            event:
+                              type: string
+                            status:
+                              type: string
+                            conclusion:
+                              type: string
+                              nullable: true
+                            html_url:
+                              type: string
+                            created_at:
+                              type: string
+                              format: date-time
+    components:
+      securitySchemes:
+        bearerAuth:
+          type: http
+          scheme: bearer
+    security:
+      - bearerAuth: []

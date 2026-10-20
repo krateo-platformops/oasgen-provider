@@ -12,6 +12,12 @@ timestamp: 2026-08-07T00:00:00Z
 Generates a `Repo` CRD + controller for GitHub repositories from the sample OAS document
 shipped in this repo, then creates a repository declaratively.
 
+> **The resource CRD's version is derived from the OAS document.** `info.version` is
+> normalized into a legal CRD version name (lowercased, every run of non-alphanumerics
+> becomes `-`, a leading digit gets a `v`), so GitHub's `1.1.4` becomes
+> `v1-1-4` — *not* `v1alpha1`. Only the `*Configuration` CRD is always `v1alpha1`.
+> `kubectl get restdefinition <name> -o wide` prints the one in force.
+
 **Preconditions**
 
 - oasgen-provider installed (stock Krateo installer deploy, or the direct

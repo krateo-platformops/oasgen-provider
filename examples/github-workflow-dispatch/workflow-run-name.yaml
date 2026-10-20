@@ -1,0 +1,25 @@
+# THE VENDOR-SIDE HALF of the correlation, and the part that is easy to forget: this is
+# the workflow file that must exist in the target repository at .github/workflows/build.yml.
+#
+# GitHub does not echo workflow_dispatch inputs in the runs list. What it does echo is
+# run-name, so the workflow has to put the token there itself — then it arrives as each
+# run's display_title, which is what correlation.echoedAt reads.
+#
+# Without this, the token never appears, and the controller reports
+# DispatchedButNotObserved after 5 checks rather than dispatching again.
+name: build
+run-name: ${{ inputs.correlationId }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      correlationId:
+        description: Correlation token supplied by the WorkflowRun CR.
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "building for correlation ${{ inputs.correlationId }}"
