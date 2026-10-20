@@ -806,6 +806,15 @@ This indicates that the teamrepo was deleted successfully from GitHub. You can m
 
 To troubleshoot Krateo controllers, add the annotation `krateo.io/connector-verbose: "true"` to the CR you want to debug. This enables verbose logging for the controller and helps you understand what's happening under the hood.
 
+> **Below 0.26.1 this writes credentials to the pod log.** The verbose dump printed
+> `Authorization: Bearer <token>` in cleartext: the redactor only replaced values it had
+> been told were sensitive, and a bearer token applied from the resource's own
+> Configuration was never registered, so a log that looked sanitised was not. Fixed in
+> **0.26.1** (#166) by redacting credential headers *by name* — the fix is **not** in
+> 0.26.0. On an older provider, treat any log written with this annotation on as
+> containing the credential, and rotate it.
+
+
 **Examples:**
 - Adding this annotation to a `RestDefinition` will help you understand what happens when the controller tries to create the CRD and controller for the RestDefinition
 - Adding it to a `Repo` or `TeamRepo` CR will help you understand what happens when the controller tries to create, update, or delete the external resource, and will log any HTTP requests and responses made to the external API
