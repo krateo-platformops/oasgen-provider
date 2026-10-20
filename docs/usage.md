@@ -4,7 +4,7 @@ title: oasgen-provider — usage
 description: How to install oasgen-provider — the installer pin or direct OCI helm install — and how to consume it by authoring RestDefinitions.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, install, helm]
-timestamp: 2026-08-10T00:00:00Z
+timestamp: 2026-10-20T00:00:00Z
 ---
 
 # Usage
@@ -12,7 +12,10 @@ timestamp: 2026-08-10T00:00:00Z
 ## Requirements
 
 - A Kubernetes cluster.
-- An OpenAPI Specification 3.0/3.1 document for each API you want to manage (see the
+- An OpenAPI Specification document for each API you want to manage — 3.1, 3.0 or
+  Swagger 2.0 (2.0 since 0.32.0, read by its own adapter: it is **not** converted to 3.x,
+  because `status.oasHash` must keep hashing the document the vendor actually published)
+  (see the
   [USAGE_GUIDE](./USAGE_GUIDE.md#what-to-do-when-the-openapi-specification-oas-is-missingincomplete-or-not-at-version-30)
   when the OAS is missing or incomplete).
 - Network access from inside the cluster to the API endpoints being managed.

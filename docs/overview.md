@@ -4,14 +4,15 @@ title: oasgen-provider — overview
 description: What KOG does and how it works — the generate → deploy → reconcile pipeline, the actions/verbs model, the mount-and-render RDC mechanism, and when a plugin is needed.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, architecture, restdefinition]
-timestamp: 2026-09-22T00:00:00Z
+timestamp: 2026-10-20T00:00:00Z
 ---
 
 # Overview
 
 The OASGen Provider is a Kubernetes controller that generates Custom Resource Definitions
 (CRDs) and controllers to manage resources directly from OpenAPI Specification (OAS)
-3.0/3.1 documents. It makes any (sufficiently consistent) OpenAPI-described REST API
+documents — 3.1, 3.0 and, since 0.32.0, Swagger 2.0, each read by its own adapter rather
+than converted. It makes any (sufficiently consistent) OpenAPI-described REST API
 manageable as a first-class Kubernetes resource without writing a custom operator.
 
 ## Glossary
@@ -78,15 +79,22 @@ With a plugin, step 5 goes through the wrapper web service for the endpoints who
 
 ## Verbs and actions
 
-Krateo controllers implement four reconcile verbs; a RestDefinition maps them onto five
+Krateo controllers implement four reconcile verbs; a RestDefinition maps them onto six
 **actions** bound to HTTP endpoints of the OAS:
 
 | Verb | Action(s) | Purpose |
 |---|---|---|
 | Observe | `findby`, `get` | Fetch current external state (`findby` searches a collection by human-friendly identifiers; `get` fetches one resource by technical id). |
-| Create | `create` | Create the external resource. |
+| Create | `create`, `dispatch` | Create the external resource — or, for `dispatch`, trigger an invocation of a non-idempotent action endpoint. |
 | Update | `update` | Update it on drift. |
 | Delete | `delete` | Delete it (must be idempotent). |
+
+`dispatch` (0.32.0) is the one that is not CRUD: an ArgoCD sync, a GitHub
+`workflow_dispatch`, a Jenkins build. Two POSTs are two runs and the trigger typically
+answers `204` with an empty body, so it carries a mandatory **correlation token** —
+CR-supplied, echoed back by the API, looked up in a collection — and observe becomes
+that lookup: found ⇒ `Ready` and nothing fires, absent ⇒ the dispatch fires. The token is
+the resource's identity, so it also replaces `compareScope`, which is refused alongside it.
 
 The action semantics, when each is needed, and the newer per-verb tuning surface
 (field mappings, transforms, async polling, status-code overrides) are specified in
@@ -126,7 +134,9 @@ resource contract (identifiers, additionalStatusFields, compareScope). The CR's
 `spec.configurationRef` supplies per-instance configuration and credentials, which are
 read from Secrets and whitespace-trimmed.
 
-- **Observe** — `get` when the identifier is known, else `findby` (list + identifier
+- **Observe** — for a `dispatch` resource, the correlation lookup, which takes precedence
+  over any `get`/`findby` the resource also declares. Otherwise `get` when the identifier
+  is known, else `findby` (list + identifier
   match under `identifiersMatchPolicy`, optional `pageNumber` or `continuationToken`
   pagination — a paginated search that cannot conclude says so rather than reporting
   absence, because the reconciler creates on absence).
