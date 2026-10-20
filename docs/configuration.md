@@ -128,3 +128,13 @@ It is **per-object HTTP logging, not a log level.** It does not change what the 
 itself logs, so it does not surface the controller's own `Debug` lines (the drift-comparison
 reason, for one) — those need `REST_CONTROLLER_DEBUG` on the generated controller, set
 through the chart's `rdc.env`, which restarts every RDC instance.
+
+> **Set it in the provider chart's values, not on the generated ConfigMap.** The
+> `<name>-configmap` next to each generated controller is **rendered and owned by the
+> provider** from the template mounted into its pod, so a key added to it by hand is
+> dropped the next time that RestDefinition reconciles — silently, and with the controller
+> still reporting `"debug": false` at startup. The supported path is
+> `rdc.env.REST_CONTROLLER_DEBUG: "true"` in the oasgen-provider chart's values followed by
+> `helm upgrade`: the provider re-renders every generated ConfigMap, and because it hashes
+> the result it restarts each generated Deployment so the new environment is actually
+> picked up.

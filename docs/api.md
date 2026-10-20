@@ -103,6 +103,41 @@ The API endpoints must be **consistent** across actions (same field names/casing
 same nesting); the declarative surface below absorbs much inconsistency, and a plugin
 web service absorbs the rest (see [overview](./overview.md#when-a-plugin-wrapper-web-service-is-needed)).
 
+### When the request and response shapes differ
+
+A vendor that describes the same concept differently on the way in and the way out is
+common, and it matters here because **the drift comparison compares the CR's spec against
+the observed response directly**. Where the two shapes disagree, drift can be reported
+that no update can fix — and the reconciler answers drift by issuing the update, so the
+result is a write per poll interval, forever.
+
+The comparison already tolerates one half of this: it iterates the **spec's** keys and
+skips any key **absent** from the response (which is why `configurationRef` is not drift).
+So a response that renames a field, spells it with different casing, or simply omits it
+costs nothing.
+
+What it cannot tolerate is a key present on **both** sides with a different *type* — the
+request sends `instance: "K2A4"` and the response returns `instance: {name, cpu, ram}`.
+That compares unequal on every reconcile.
+
+`responseTransform` is the fix, and the reason it runs where it does: it is applied to the
+raw response **before** per-field mapping, status population **and** the drift comparison,
+so reshaping the response into the request's shape makes the comparison meaningful again.
+
+```yaml
+- action: get
+  method: GET
+  path: /kaas/{id}
+  responseTransform:
+    inline: |
+      .nodePools |= map(.instance = .instance.name | .dataCenter = .dataCenter.name)
+```
+
+Per-field `fieldMapping` with `inResponse` does the same for one field at a time.
+`compareScope` is **not** a fix for this: narrowing the scope helps only if the offending
+field falls outside it, and the field a vendor reshapes is often exactly the one its update
+verb accepts — in which case `updatable` still includes it.
+
 ## Dispatch and correlation
 
 A `dispatch` verb fires an **action** endpoint rather than writing a resource: an ArgoCD
