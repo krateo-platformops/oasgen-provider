@@ -107,6 +107,9 @@ metadata:
   name: test-repo1
   namespace: default
   annotations:
+    # Dumps this resource's HTTP exchanges. On a provider below 0.26.1 that dump
+    # included `Authorization: Bearer <token>` in cleartext (#166) -- see the note
+    # in docs/configuration.md before enabling it on an older install.
     krateo.io/connector-verbose: "true"
 spec:
   configurationRef:

@@ -4,7 +4,7 @@ title: oasgen-provider — configuration
 description: The whole config surface — both charts' values, the provider's env/flags, the hand-maintained RDC image pin, and the env contract of every generated RDC instance.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, helm, values, env]
-timestamp: 2026-08-10T00:00:00Z
+timestamp: 2026-10-20T00:00:00Z
 ---
 
 # Configuration
@@ -115,3 +115,16 @@ via `spec.resource.configurationFields`). That contract is documented in
 Add the annotation `krateo.io/connector-verbose: "true"` to a RestDefinition (provider
 behaviour) or to a generated CR (RDC behaviour, including HTTP request/response logging)
 to enable verbose logging for that object only.
+
+> **Below 0.26.1 this writes credentials to the pod log.** The verbose dump printed
+> `Authorization: Bearer <token>` in cleartext: the redactor only replaced values it had
+> been told were sensitive, and a bearer token applied from the resource's own
+> Configuration was never registered, so a log that looked sanitised was not. Fixed in
+> **0.26.1** (#166) by redacting credential headers *by name* — the fix is **not** in
+> 0.26.0. On an older provider, treat any log written with this annotation on as
+> containing the credential, and rotate it.
+
+It is **per-object HTTP logging, not a log level.** It does not change what the controller
+itself logs, so it does not surface the controller's own `Debug` lines (the drift-comparison
+reason, for one) — those need `REST_CONTROLLER_DEBUG` on the generated controller, set
+through the chart's `rdc.env`, which restarts every RDC instance.

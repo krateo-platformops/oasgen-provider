@@ -4,7 +4,7 @@ title: oasgen-provider — local development workflow
 description: The kind dev loop, the in-repo chart and RDC templates (mount-and-render), and CRD regeneration.
 resource: github.com/krateo-platformops/oasgen-provider
 tags: [kog, development, kind]
-timestamp: 2026-08-10T00:00:00Z
+timestamp: 2026-10-20T00:00:00Z
 ---
 
 # Local development workflow
@@ -101,7 +101,18 @@ go run ./internal/controllers/mockserver   # listens on :30007
 ```
 
 Per-CR HTTP debugging is enabled with the `krateo.io/connector-verbose: "true"` annotation
-on a managed CR, independently of `-debug`.
+on a managed CR, independently of `-debug`. The two are not interchangeable: the annotation
+dumps that object's HTTP exchanges, `-debug` (`REST_CONTROLLER_DEBUG`) sets the controller's
+own log level and is what surfaces its `Debug` lines.
+
+> **Below 0.26.1 this writes credentials to the pod log.** The verbose dump printed
+> `Authorization: Bearer <token>` in cleartext: the redactor only replaced values it had
+> been told were sensitive, and a bearer token applied from the resource's own
+> Configuration was never registered, so a log that looked sanitised was not. Fixed in
+> **0.26.1** (#166) by redacting credential headers *by name* — the fix is **not** in
+> 0.26.0. On an older provider, treat any log written with this annotation on as
+> containing the credential, and rotate it.
+
 
 ## Regenerating CRDs
 
