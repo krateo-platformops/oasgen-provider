@@ -7,6 +7,9 @@ metadata:
   name: gh-repo-1
   namespace: gh-system
   annotations:
+    # Dumps the GitHub HTTP exchange. Requires provider >= 0.26.1: below that, the
+    # dump includes `Authorization: Bearer <token>` in cleartext (#166). Drop this line
+    # if you are on an older provider.
     krateo.io/connector-verbose: "true"
 spec:
   configurationRef:

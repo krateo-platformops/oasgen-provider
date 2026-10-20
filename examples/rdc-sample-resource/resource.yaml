@@ -29,6 +29,10 @@ metadata:
   name: sample-1
   namespace: demo-system
   annotations:
+    # On by default here because watching the HTTP exchange is the point of this example.
+    # Safe against the local mock API, and redacted since 0.26.1 (#166) -- but on a
+    # provider BELOW 0.26.1 this dump writes `Authorization: Bearer <token>` to the pod
+    # log in cleartext, so do not copy it onto a CR holding a real credential there.
     krateo.io/connector-verbose: "true"
 spec:
   name: sample-1
