@@ -1,0 +1,27 @@
+# One invocation. The token is the resource's identity:
+#   token found in the collection   => Ready, and nothing fires
+#   token absent                    => the resource does not exist => the dispatch fires
+#
+# So changing inputs.correlationId is a NEW invocation, not drift — and editing any
+# other field is neither (a dispatch is compared on its token alone, which is why
+# compareScope is refused on it).
+# v1-0, not v1alpha1: the resource CRD's version is derived from the OAS document's
+# info.version ("1.0") — see README. The Configuration CRD is always v1alpha1.
+apiVersion: github.ogen.krateo.io/v1-0
+kind: WorkflowRun
+metadata:
+  name: nightly-build-2026-10-20
+  namespace: gh-wf-system
+spec:
+  configurationRef:
+    name: gh-workflow-config
+    namespace: gh-wf-system
+  # Path parameters of both endpoints — edit these.
+  owner: my-org
+  repo: my-repo
+  workflow_id: build.yml
+  ref: main
+  inputs:
+    # Unique PER INVOCATION. Reusing a token means "that run already happened", so the
+    # dispatch will not fire; a UID, a timestamp or a release name all work.
+    correlationId: nightly-build-2026-10-20

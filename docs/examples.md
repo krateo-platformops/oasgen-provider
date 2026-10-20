@@ -4,7 +4,7 @@ title: oasgen-provider — examples
 description: Index of the runnable examples under examples/ and where the deeper sample material lives.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, examples]
-timestamp: 2026-08-10T00:00:00Z
+timestamp: 2026-10-20T00:00:00Z
 ---
 
 # Examples
@@ -13,6 +13,12 @@ timestamp: 2026-08-10T00:00:00Z
   repositories from an in-repo OAS document (ConfigMap-served), plus the
   `RepoConfiguration` and a `Repo` CR. Preconditions: oasgen-provider installed, a GitHub
   token.
+- [github-workflow-dispatch](../examples/github-workflow-dispatch/README.md) — the
+  **`dispatch`** action (0.32.0): triggering a GitHub Actions workflow and finding that run
+  again by a CR-supplied **correlation token**. Includes the vendor-side half that is easy
+  to miss — GitHub does not echo `workflow_dispatch` inputs, so the workflow must put the
+  token into its own `run-name`. Preconditions: oasgen-provider ≥ 0.32.0, a GitHub token
+  with `actions:write`.
 - [rdc-sample-resource](../examples/rdc-sample-resource/README.md) — the whole
   `RestDefinition` → RDC → CR chain against a **mock API you can run locally**, mirroring
   the rest-dynamic-controller integration testdata. Needs no external credentials, which

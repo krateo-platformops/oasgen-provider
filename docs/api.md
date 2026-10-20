@@ -4,7 +4,7 @@ title: oasgen-provider — api
 description: The RestDefinition CRD contract — actions, the full spec surface (mappings, transforms, async, delegated verbs), immutability, generated resources and supported authentication.
 resource: restdefinitions.ogen.krateo.io
 tags: [kog, crd, restdefinition]
-timestamp: 2026-09-22T00:00:00Z
+timestamp: 2026-10-20T00:00:00Z
 ---
 
 # API
@@ -39,18 +39,24 @@ the CRDs it generates from it. Sources of truth:
 | `identifiers[]` | ✖︎ | ✔︎ | Human-friendly unique fields `findby` matches on; surfaced in status. Only meaningful with a `findby` verb. |
 | `additionalStatusFields[]` | ✖︎ | ✔︎ | Extra response fields surfaced in status (typically technical ids used by `get`). |
 | `excludedSpecFields[]` | ✖︎ | ✔︎ | Fields excluded from the generated spec (server-generated ids etc.). Dots inside a single field name are escaped bracket-style: `'["searchCriteria.title"]'`. |
+| `includedSpecFields[]` | ✖︎ | append-only | The **allowlist** counterpart: when set, the generated spec keeps only these fields. Mutually exclusive with `excludedSpecFields` (CEL — an allowlist and a blocklist over the same fields is a contradiction, not a merge). Max 256 entries, dot-notation; naming a parent keeps its whole subtree, naming a child keeps the parent and only the listed children. A listed field that does **not** exist is fatal, where `excludedSpecFields` only warns — a typo in a blocklist leaves a field in, where it is visible; a typo in an allowlist leaves one out, and the author sees a CR rejected on a field they believed they had included. Four things are kept whether listed or not, because the resource cannot function without them: `configurationRef`, spec fields derived from **required** OAS parameters, and the identifier selectors materialised into a create-less resource's spec. |
 | `configurationFields[]` | ✖︎ | ✔︎ | OAS parameters lifted into the generated `*Configuration` CRD: `fromOpenAPI.{name,in}` + `fromRestDefinition.actions` (`["*"]` = all actions, min 1 item). |
 | `compareScope` | ✖︎ | mutable | Drift-comparison scope. `fullSpec` (default) compares every spec field against the observed response. `identifiersAndStatus` compares only identifiers + additionalStatusFields (requires at least one of them; CEL-enforced). `updatable` compares only the fields the **update verb's request body can express**, derived from the OAS rather than declared by hand — a field the update cannot send is one the controller cannot fix, so comparing it would loop forever; requires an update verb (CEL-enforced). |
 | `observeApiRef` / `createApiRef` / `updateApiRef` / `deleteApiRef` | ✖︎ | mutable | Delegate a whole verb to a snowplow RESTAction (below). |
 
 **Immutability** is CEL-enforced (`self == oldSelf`) on `resourceGroup`, `kind`,
 `identifiers`, `additionalStatusFields`, `excludedSpecFields` and `configurationFields`:
-changing them means deleting and recreating the RestDefinition.
+changing them means deleting and recreating the RestDefinition. `includedSpecFields` is
+**append-only** instead of immutable (as is `additionalStatusFields`' sibling rule):
+widening the allowlist only adds fields to the CRD, while narrowing it would remove fields
+live CRs may be setting — which is what immutability actually protects against. Existing
+entries cannot be removed, renamed or reordered.
 
 ## Actions
 
-Five actions implement the four reconcile verbs (Observe ← `findby`/`get`, Create ←
-`create`, Update ← `update`, Delete ← `delete`):
+Six actions implement the four reconcile verbs (Observe ← `findby`/`get`, or a
+`dispatch`'s correlation lookup; Create ← `create` or `dispatch`; Update ← `update`;
+Delete ← `delete`):
 
 - **`findby`** — searches a **collection** endpoint using `identifiers`. Used on the
   first reconcile, before the external id exists. `identifiersMatchPolicy: OR` (default)
@@ -88,20 +94,145 @@ Five actions implement the four reconcile verbs (Observe ← `findby`/`get`, Cre
   from `create`).
 - **`delete`** — must be idempotent (deleting an absent resource returns success); any
   2xx is accepted.
+- **`dispatch`** — fires an **action** endpoint that is not a CRUD write: an ArgoCD sync, a
+  GitHub `workflow_dispatch`, a Jenkins build, an Argo resubmit. It replaces `create`
+  rather than joining it, and requires `correlation` (next section). Available from
+  **0.32.0**.
 
 The API endpoints must be **consistent** across actions (same field names/casing at the
 same nesting); the declarative surface below absorbs much inconsistency, and a plugin
 web service absorbs the rest (see [overview](./overview.md#when-a-plugin-wrapper-web-service-is-needed)).
 
+## Dispatch and correlation
+
+A `dispatch` verb fires an **action** endpoint rather than writing a resource: an ArgoCD
+sync, a GitHub `workflow_dispatch`, a Jenkins build, an Argo resubmit. Two POSTs are two
+runs, so the call is not idempotent, and the canonical case answers `204` with an empty
+body, so there is nothing in the response to key on. In a level-based reconciler that is a
+POST on every resync.
+
+It is **not** the async case. `async`/`operationRef` extract a handle *from the trigger
+response* and poll it; where such a handle exists, async already covers the endpoint and no
+dispatch verb is needed. The correlation token travels the other way: the CR supplies it,
+the API echoes it back, and the controller finds it again in a collection. That is the only
+loop available when the trigger tells you nothing — which is why `async` and `dispatch` are
+mutually exclusive.
+
+**The token is the resource's identity**, and that is what answers "what does drift mean
+for an action":
+
+| | |
+|---|---|
+| token found in the observe collection | the invocation happened ⇒ `Ready`, nothing fires |
+| token absent | the resource does not exist ⇒ the dispatch fires |
+
+So changing the token is a *new invocation*, not drift, and firing for it happens exactly
+once because its own run is what then stops it. Comparison is scoped to that one field and
+never `fullSpec` — an unrelated spec edit must not read as drift on a resource whose only
+available response to drift would be to POST again.
+
+`correlation` is **required** on a dispatch and permitted nowhere else.
+
+| Field | Description |
+|---|---|
+| `correlation.fromSpec` | Dot-path of the spec field the CR supplies as the token (e.g. `inputs.correlationId`). Must be unique per invocation — reusing a token means "that run already happened". |
+| `correlation.observe.method` | `GET` or `POST` (some APIs expose search as a POST). |
+| `correlation.observe.path` | The collection endpoint, spelled exactly as the OAS document spells it (paths are matched by exact string, so a differing parameter name is a miss). |
+| `correlation.observe.itemsPath` | The property holding the array when the response is an **envelope** rather than a bare array (`workflow_runs` for `{"total_count": 3, "workflow_runs": [...]}`). Optional while the envelope has exactly one array property; **required** as soon as it has more, on both sides — guessing searches the wrong list, reports not-found, and here that means firing the dispatch a second time. |
+| `correlation.echoedAt` | The path, **per item** of that collection, at which the token comes back (`.display_title`). Same path dialect as `itemsPath` and `async.poll.statusPath`. |
+
+```yaml
+verbsDescription:
+  - action: dispatch
+    method: POST
+    path: /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches
+    correlation:
+      fromSpec: inputs.correlationId
+      observe:
+        method: GET
+        path: /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs
+        itemsPath: workflow_runs
+      echoedAt: .display_title
+```
+
+Whether a given vendor really echoes the token is exactly what `echoedAt` forces the author
+to establish before the RestDefinition is accepted. In the example above it does not echo
+the input directly — the workflow has to put the token into its own `run-name`, which then
+arrives as the run's `display_title`. Runnable, with that workflow:
+[examples/github-workflow-dispatch](../examples/github-workflow-dispatch/README.md).
+
+### Composition rules (CEL, at admission)
+
+A dispatch cannot be combined with:
+
+- **`create` or `update`** — the dispatch *is* the create, and there is nothing an update of
+  a past invocation could mean.
+- **another `dispatch`** — at most one per kind: two have no defined order and no way to
+  tell which one a correlated invocation came from.
+- **`compareScope`** — see above; any other scope makes an unrelated edit read as drift.
+- **`async`** — see above; there is no handle to poll.
+- **any `*ApiRef`** — delegating to a Snowplow RESTAction and declaring a correlated
+  dispatch are two alternative answers to the same problem; declaring both would leave
+  which one runs decided by the order of checks in the controller rather than by the author.
+
+A `get`/`findby` may be declared, but **observe still goes through the correlation lookup**:
+the token is what decides whether this invocation happened, which is the only question whose
+answer can make the reconciler POST.
+
+### What is checked, and where
+
+Three layers, because a dispatch that cannot be correlated is the one failure mode that
+causes duplicate runs rather than an error:
+
+- **Admission (CEL)** — the composition rules above, and `correlation` present on a dispatch
+  and absent everywhere else.
+- **Generation** — `observe.path` must be a declared OAS path and `observe.method` an
+  operation on it; `echoedAt`'s root segment must be a property the collection's items
+  declare (skipped only when the item declares no properties, or allows additional ones);
+  `fromSpec`'s root segment must exist in the generated spec schema. Each is reported
+  against its own field, and each refuses rather than warns.
+- **Runtime** — the backstop for what generation cannot see, e.g. a path into a free-form
+  object.
+
+### Runtime behaviour
+
+- **No token in the spec** — the resource is **held**, not dispatched: firing an invocation
+  that can never be found again is the one thing this verb exists to prevent. The same
+  applies to a `fromSpec` whose nested segments name nothing (only the *root* segment is
+  checked at generation), so a nested typo surfaces as a resource that never fires, not as
+  one that fires repeatedly.
+- **Fire-once is enforced, not merely intended** — `krateo.io/dispatched-token` records the
+  token that was successfully POSTed, and observe then refuses to report not-exists for it
+  again. Written only **after** the POST succeeds, so a dispatch that never actually
+  happened is still retried: fire-once applies to invocations that occurred, not to attempts.
+- **Waiting, then diagnosing** — `krateo.io/dispatch-observe-misses` counts reconciles since
+  the dispatch fired in which the token has not appeared. Eventual consistency is normal and
+  tolerated (`Creating`); after 5 checks the CR goes `Unavailable` with reason
+  `DispatchedButNotObserved`, naming `echoedAt` as the likeliest cause. Nothing is
+  re-POSTed — it is a diagnosis deadline, not a retry budget.
+- **Ambiguity is a hard error** — two items echoing the same token means the token does not
+  identify an invocation; the controller never picks the first.
+- **A missing collection is an error, not absence** — a 404 on `observe.path` is not the
+  same as the token being absent, and treating it as absence would dispatch against an
+  endpoint that just said it is not there.
+- **Status comes from the matched item**, not the collection — the same shape `findby`
+  projects, so `identifiers` and `additionalStatusFields` resolve against the run that was
+  correlated. This is also why a dispatch kind's status schema is generated from an item of
+  that collection.
+- **`delete` is a no-op that releases the finalizer** — the invocation a token names is
+  immutable history, not an object, so there is nothing to tear down and a delete that tried
+  would invent a semantic the vendor does not have.
+
 ## Per-verb tuning (`verbsDescription[]` items)
 
 | Field | Description |
 |---|---|
-| `action` / `method` / `path` | Required. `action` ∈ create/update/get/delete/findby; `method` ∈ GET/POST/PUT/DELETE/PATCH; `path` must be an exact key of the OAS `paths` object. |
+| `action` / `method` / `path` | Required. `action` ∈ create/update/get/delete/findby/dispatch; `method` ∈ GET/POST/PUT/DELETE/PATCH; `path` must be an exact key of the OAS `paths` object. |
 | `fieldMapping[]` | Unified request/response value relocation + optional transform. Exactly one API-side anchor per entry: `inPath`/`inQuery`/`inBody` (request direction) or `inResponse` (response direction, normalizing the observed body before status population and drift comparison). `inCustomResource` is the CR-side JSONPath; array elements can be addressed positionally (`[0]`) or by content predicate (`[?type=password]`, must match exactly one). Optional `valueMapping` (`alias`: bidirectional value pairs; `jq`: a one-directional gojq program), `resolver` (`secretRef`: substitute a Secret value, same-namespace only, request direction only), and `defaultIfAbsent` (response direction: inject a default when the API omits the field). |
 | `requestFieldMapping[]` | **Deprecated** — the request-direction-only predecessor of `fieldMapping` (`inPath`/`inQuery`/`inBody` + `inCustomResource`, no transforms). Still accepted; each entry is treated as an equivalent request-direction `fieldMapping` entry at load time. |
 | `requestTransform` / `responseTransform` | Whole-document gojq programs. `requestTransform` runs on the assembled request body after per-field mapping (create/update/delete; no-op on bodyless verbs; requires rest-dynamic-controller ≥ 0.17.0). `responseTransform` runs on the raw response body before per-field mapping, status population and drift comparison. jq programs are `inline` or `ref` (a `.jq` module at `configmap://`/`http(s)://`, optional `entrypoint`). |
 | `identifiersMatchPolicy`, `pagination` | `findby` only (CEL-enforced). |
+| `correlation` | `dispatch` only, and **required** on it (CEL-enforced). How one invocation is identified afterwards — see [Dispatch and correlation](#dispatch-and-correlation). |
 | `successCodes[]` | Extra HTTP codes treated as success, merged with the OAS-declared 2xx codes. |
 | `tolerateCodes[]` | Codes treated as a successful **empty** response (e.g. 404 on an optional sub-collection) — beware masking real deletions. |
 | `notFoundCodes[]` | Codes remapped to "resource does not exist" (e.g. 410, or 204 on an existence check). Intended for get/findby. |
@@ -127,12 +258,22 @@ requires the RDC's `URL_SNOWPLOW`/`URL_AUTHN` env to be set
 
 ## Generated resources
 
-For `kind: Repo` in group `github.ogen.krateo.io`, the provider generates:
+For `kind: Repo` in group `github.ogen.krateo.io`, from a document whose `info.version`
+is `1.1.4`, the provider generates:
 
 | Kind | When |
 |---|---|
-| `Repo` (`github.ogen.krateo.io/v1alpha1`) | Always — spec from the `create` request body (minus `excludedSpecFields`, plus path/query parameters), status from `identifiers` + `additionalStatusFields`. |
-| `RepoConfiguration` (same group/version) | When the OAS declares security schemes and/or `configurationFields` are set. |
+| `Repo` (`github.ogen.krateo.io/v1-1-4`) | Always — spec from the `create` request body (minus `excludedSpecFields`, plus path/query parameters, or kept by `includedSpecFields`), status from `identifiers` + `additionalStatusFields`. |
+| `RepoConfiguration` (`github.ogen.krateo.io/v1alpha1`) | When the OAS declares security schemes and/or `configurationFields` are set. |
+
+**The resource CRD's version comes from the OAS document, not from `v1alpha1`.**
+`info.version` is normalized into a legal CRD version name — lowercased, every run of
+non-alphanumerics replaced by `-`, a leading digit prefixed with `v` — so `1.1.4` becomes
+`v1-1-4` and `1.0` becomes `v1-0`. A document that declares no version falls back to
+`v1alpha1`, and the **`*Configuration` CRD is always `v1alpha1`** regardless. This is the
+version CRs must be written against: `kubectl get restdefinition <name> -o wide` prints the
+one in force (the `API VERSION` column), and writing a CR against `v1alpha1` out of habit
+fails with `no matches for kind`.
 
 Every generated CR carries a `configurationRef` (name/namespace) pointing at its
 Configuration instance. The Configuration spec holds:

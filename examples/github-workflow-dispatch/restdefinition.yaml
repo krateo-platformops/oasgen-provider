@@ -1,0 +1,46 @@
+apiVersion: ogen.krateo.io/v1alpha1
+kind: RestDefinition
+metadata:
+  name: gh-workflow-run
+  namespace: gh-wf-system
+spec:
+  # The OAS document served from the ConfigMap in oas-configmap.yaml.
+  oasPath: configmap://gh-wf-system/gh-workflow/openapi.yaml
+  resourceGroup: github.ogen.krateo.io
+  resource:
+    kind: WorkflowRun
+    # Status comes from the CORRELATED RUN — the matched item of the observe
+    # collection, not the collection — so these are run fields.
+    additionalStatusFields:
+      - id
+      - display_title
+      - status
+      - conclusion
+      - html_url
+    verbsDescription:
+      # One dispatch, and nothing else. A dispatch cannot be combined with create or
+      # update (the dispatch IS the create, and there is no update of a past run),
+      # with compareScope, with async, or with any *ApiRef — all CEL-enforced.
+      - action: dispatch
+        method: POST
+        path: /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches
+        correlation:
+          # The spec field the CR supplies as the token. Must exist in the generated
+          # spec schema; generation refuses otherwise, because a token the CR cannot
+          # carry can never be matched — and an unmatchable token means firing on
+          # every reconcile.
+          fromSpec: inputs.correlationId
+          # Where the invocation becomes visible.
+          observe:
+            method: GET
+            path: /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs
+            # The response is an envelope ({total_count, workflow_runs}), so the array
+            # is named rather than guessed: guessing searches the wrong list, reports
+            # not-found, and fires the dispatch a second time.
+            itemsPath: workflow_runs
+          # Where the token comes back, PER ITEM of that collection. Here it arrives
+          # via the workflow's run-name (see README) — which is exactly the vendor
+          # fact this field forces you to establish before the RestDefinition is
+          # accepted, instead of discovering it as a resource that reports Ready and
+          # never converges.
+          echoedAt: .display_title

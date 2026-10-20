@@ -12,8 +12,16 @@ timestamp: 2026-08-10T00:00:00Z
 The whole chain end-to-end: `oas-configmap.yaml` hosts the OpenAPI document of a small
 CRUD API, `restdefinition.yaml` makes oasgen-provider generate the `Sample` /
 `SampleConfiguration` CRDs and deploy a `rest-dynamic-controller` instance for
-`samples.sample.krateo.io/v1alpha1`, and `resource.yaml` creates a bearer-authenticated
-`Sample` whose lifecycle RDC drives against the API.
+`samples.sample.krateo.io/v1-0`, and `resource.yaml` creates a bearer-authenticated
+`Sample` whose lifecycle RDC drives against the API. The generated spec is
+`{name, description, configurationRef}`, matching the integration fixture.
+
+> **The resource CRD's version is derived from the OAS document.** `info.version` is
+> normalized into a legal CRD version name (lowercased, every run of non-alphanumerics
+> becomes `-`, a leading digit gets a `v`), so this document's `1.0` becomes
+> `v1-0` — *not* `v1alpha1`. Only the `*Configuration` CRD is always `v1alpha1`.
+> `kubectl get restdefinition <name> -o wide` prints the one in force.
+
 
 ## Preconditions
 
