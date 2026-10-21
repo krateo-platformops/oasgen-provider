@@ -807,3 +807,101 @@ func TestCompareExisting_EmptySliceIsAnOpinion(t *testing.T) {
 		})
 	}
 }
+
+// --- field paths (#213) ---
+//
+// The reason a difference is reported at all is to say WHICH field differs. Before these, a nested
+// difference was reported with the enclosing container's values and no field name, so the one piece of
+// information a reader needs was the one piece discarded.
+
+func TestReportsTheLeafPathNotTheEnclosingMap(t *testing.T) {
+	cr := map[string]interface{}{"properties": map[string]interface{}{"size": "small", "name": "n"}}
+	rm := map[string]interface{}{"properties": map[string]interface{}{"size": "large", "name": "n"}}
+
+	res, err := CompareExisting(cr, rm)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.IsEqual {
+		t.Fatal("expected a difference")
+	}
+	if got := res.Reason.FieldPath(); got != "properties.size" {
+		t.Errorf("FieldPath() = %q, want %q", got, "properties.size")
+	}
+	if res.Reason.FirstValue != "small" || res.Reason.SecondValue != "large" {
+		t.Errorf("values = %v/%v, want the LEAF's scalars, not the enclosing maps",
+			res.Reason.FirstValue, res.Reason.SecondValue)
+	}
+}
+
+func TestReportsTheSliceElementIndex(t *testing.T) {
+	cr := map[string]interface{}{"pools": []interface{}{
+		map[string]interface{}{"instance": "a"},
+		map[string]interface{}{"instance": "b"},
+	}}
+	rm := map[string]interface{}{"pools": []interface{}{
+		map[string]interface{}{"instance": "a"},
+		map[string]interface{}{"instance": "CHANGED"},
+	}}
+
+	res, _ := CompareExisting(cr, rm)
+
+	if res.IsEqual {
+		t.Fatal("expected a difference")
+	}
+	if got := res.Reason.FieldPath(); got != "pools[1].instance" {
+		t.Errorf("FieldPath() = %q, want %q — without the index both elements report the same location", got, "pools[1].instance")
+	}
+}
+
+func TestScalarInRequestObjectInResponseIsReportedAgainstTheField(t *testing.T) {
+	// The shape a vendor can ship in its own spec: request takes a name, response returns the object.
+	cr := map[string]interface{}{"nodePools": []interface{}{map[string]interface{}{"instance": "K2A4"}}}
+	rm := map[string]interface{}{"nodePools": []interface{}{map[string]interface{}{
+		"instance": map[string]interface{}{"name": "K2A4", "cpu": float64(4)},
+	}}}
+
+	res, _ := CompareExisting(cr, rm)
+
+	if res.IsEqual {
+		t.Fatal("expected a difference")
+	}
+	if got := res.Reason.FieldPath(); got != "nodePools[0].instance" {
+		t.Errorf("FieldPath() = %q, want %q", got, "nodePools[0].instance")
+	}
+}
+
+func TestAKeyTheResponseDoesNotEchoIsNotADifference(t *testing.T) {
+	// Recased, renamed and omitted keys are all absent-from-response, which the walk skips by design —
+	// the same rule that stops configurationRef counting as drift. Pinned because the fix for the case
+	// above must not turn these into drift.
+	cr := map[string]interface{}{
+		"properties":       map[string]interface{}{"nodeCidr": map[string]interface{}{"name": "d"}},
+		"securityGroup":    map[string]interface{}{"name": "sg"},
+		"configurationRef": map[string]interface{}{"name": "c", "namespace": "n"},
+	}
+	rm := map[string]interface{}{
+		"properties":    map[string]interface{}{"nodecidr": map[string]interface{}{"address": "10.0.0.0/16"}},
+		"securityGroup": map[string]interface{}{"uri": "/sg/1"},
+	}
+
+	res, err := CompareExisting(cr, rm)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsEqual {
+		t.Errorf("expected equal, got a difference at %q (%s)", res.Reason.FieldPath(), res.Reason.Reason)
+	}
+}
+
+func TestFieldPathIsNilSafeAndEmptyWhenUnattributable(t *testing.T) {
+	var r *Reason
+	if got := r.FieldPath(); got != "" {
+		t.Errorf("nil receiver FieldPath() = %q, want empty", got)
+	}
+	if got := (&Reason{Reason: "mg is nil"}).FieldPath(); got != "" {
+		t.Errorf("pathless FieldPath() = %q, want empty", got)
+	}
+}

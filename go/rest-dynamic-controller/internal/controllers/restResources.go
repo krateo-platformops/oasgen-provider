@@ -457,14 +457,89 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			return controller.ExternalObservation{}, err
 		}
 		if !res.IsEqual {
+			field := res.Reason.FieldPath()
+			// The VALUES go to the log; the condition gets the field and the kind of difference. A
+			// condition is readable by anyone who can get the resource, and the response side of a
+			// comparison is not otherwise visible there, so putting observed values in it would publish
+			// them -- and an array or object value would publish a lot of them.
+			log.Debug("External resource not up-to-date", "kind", mg.GetKind(), "field", field, "reason", res.String())
+
+			sig := driftSignature(mg, res)
+			repeats, rerr := h.recordDriftRepeat(ctx, mg, sig)
+			if rerr != nil {
+				return controller.ExternalObservation{}, rerr
+			}
+
+			if repeats >= maxDriftRepeats {
+				// The same difference, this many times running, means the update issued for it is not
+				// resolving it -- so issuing it again only repeats a write that has already been shown
+				// not to work. Reported as not-Ready with the field named, and NOT as drift, because
+				// reporting drift is what makes the reconciler call Update.
+				//
+				// This is the only place the controller declines to act on a difference it can see. It
+				// is recoverable without operator action on the CR: observe still runs every poll, and
+				// a different difference, or an edited spec (generation), produces a new signature and
+				// a fresh attempt.
+				detail := fmt.Sprintf("%s; the update has been issued %d times without resolving it, so it will not be issued again for this difference. "+
+					"The usual cause is a request/response shape divergence in the API description, fixable with responseTransform on the observe verb",
+					res.Reason.Reason, repeats)
+				if serr := unstructuredtools.SetConditions(mg, customcondition.DriftNotConverging(field, detail)); serr != nil {
+					log.Error(serr, "Setting condition")
+					return controller.ExternalObservation{}, serr
+				}
+				h.eventRecorder.Event(mg, event.Warning(reasonUpdated, "Update", fmt.Errorf(
+					"not updating %s again: field %s has differed for %d consecutive checks and the update does not resolve it",
+					mg.GetName(), field, repeats)))
+				log.Info("Drift is not converging; no longer issuing the update for it",
+					"kind", mg.GetKind(), "field", field, "checks", repeats)
+				// Persisted here, not left to the caller. The runtime RE-FETCHES the object as soon as
+				// Observe returns, so a condition that is only set in memory is discarded whichever
+				// branch it then takes -- which is the other half of why the drift reason never reached
+				// a CR (#213).
+				if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+					Pluralizer:    h.pluralizer,
+					DynamicClient: h.dynamicClient,
+				}); uerr != nil {
+					log.Error(uerr, "Updating status")
+					return controller.ExternalObservation{}, uerr
+				}
+				// exists=true, upToDate=true so no Update is queued. Not a claim that the resource
+				// matches its spec -- the Ready condition just persisted says it does not.
+				return controller.ExternalObservation{
+					ResourceExists:   true,
+					ResourceUpToDate: true,
+				}, nil
+			}
+
 			cond := condition.Unavailable()
-			cond.Reason = fmt.Sprintf("Resource is not up-to-date due to %s", res.String())
-			unstructuredtools.SetConditions(mg, cond)
-			log.Debug("External resource not up-to-date", "kind", mg.GetKind(), "reason", res.String())
+			cond.Reason = "ResourceNotUpToDate"
+			cond.Message = fmt.Sprintf("field %s: %s", field, res.Reason.Reason)
+			if field == "" {
+				cond.Message = res.Reason.Reason
+			}
+			if serr := unstructuredtools.SetConditions(mg, cond); serr != nil {
+				log.Error(serr, "Setting condition")
+				return controller.ExternalObservation{}, serr
+			}
+			// Persisted here, because the caller does not: the runtime answers !ResourceUpToDate by
+			// queueing an Update and returning, with no status write on that path. Without this the
+			// reason was computed, set on an in-memory object and dropped, so a resource looping here
+			// showed only whatever the Update leg last wrote (#213).
+			if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+				Pluralizer:    h.pluralizer,
+				DynamicClient: h.dynamicClient,
+			}); uerr != nil {
+				log.Error(uerr, "Updating status")
+				return controller.ExternalObservation{}, uerr
+			}
 			return controller.ExternalObservation{
 				ResourceExists:   true,
 				ResourceUpToDate: false,
 			}, nil
+		}
+		// The comparison agrees, so any recorded non-convergence is stale.
+		if cerr := h.clearDriftRepeats(ctx, mg); cerr != nil {
+			return controller.ExternalObservation{}, cerr
 		}
 	}
 	log.Debug("Setting condition", "kind", mg.GetKind())
@@ -823,8 +898,11 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 			log.Error(err, "Setting condition")
 			return err
 		}
-	} else { // Set creating condition if not pending (using Creating condition for updates as well since no Update condition exists)
-		err = unstructuredtools.SetConditions(mg, condition.Creating())
+	} else {
+		// Updating, not Creating. A resource that has existed for days is not being created, and saying
+		// it is sends whoever reads the condition looking for a creation that already happened -- which
+		// is exactly how a permanent drift loop came to look like a slow create (#213).
+		err = unstructuredtools.SetConditions(mg, customcondition.Updating())
 		if err != nil {
 			log.Error(err, "Setting condition")
 			return err

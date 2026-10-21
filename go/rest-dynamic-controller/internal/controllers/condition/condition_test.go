@@ -41,3 +41,42 @@ func TestReasonPendingConstant(t *testing.T) {
 		t.Errorf("Expected ReasonPending to be %s, got %s", expected, ReasonPending)
 	}
 }
+
+func TestUpdatingIsNotReadyAndSaysUpdating(t *testing.T) {
+	c := Updating()
+
+	if c.Type != condition.TypeReady {
+		t.Errorf("Type = %q, want %q", c.Type, condition.TypeReady)
+	}
+	if c.Status != metav1.ConditionFalse {
+		t.Errorf("Status = %q, want False: an issued update is not evidence the resource matches its spec", c.Status)
+	}
+	if c.Reason != ReasonUpdating {
+		t.Errorf("Reason = %q, want %q", c.Reason, ReasonUpdating)
+	}
+	if c.Reason == "Creating" {
+		t.Error("a post-update state must not report Creating; that is what made a drift loop look like a slow create")
+	}
+}
+
+func TestDriftNotConvergingNamesTheFieldAndIsNotReady(t *testing.T) {
+	c := DriftNotConverging("nodePools[0].instance", "values differ; tried 5 times")
+
+	if c.Status != metav1.ConditionFalse {
+		t.Errorf("Status = %q, want False: the resource genuinely does not match its spec", c.Status)
+	}
+	if c.Reason != ReasonDriftNotConverging {
+		t.Errorf("Reason = %q, want %q", c.Reason, ReasonDriftNotConverging)
+	}
+	if want := "field nodePools[0].instance: values differ; tried 5 times"; c.Message != want {
+		t.Errorf("Message = %q, want %q", c.Message, want)
+	}
+}
+
+func TestDriftNotConvergingOmitsAnEmptyField(t *testing.T) {
+	c := DriftNotConverging("", "slice lengths differ")
+
+	if c.Message != "slice lengths differ" {
+		t.Errorf("Message = %q, want the bare detail with no empty field prefix", c.Message)
+	}
+}
