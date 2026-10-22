@@ -13,6 +13,18 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-10-22 — no category named after the kind
+
+A generated CRD's categories were `[<kind lowercased>, restresources, rr]`, and its Configuration
+CRD's `[<kind lowercased>, restconfigs, rc]`, so `kubectl get <kind>` listed both. kubectl expands a
+category before it looks up a resource name, so a kind named like another resource takes that
+name over. github-provider-kog's `Deployment` and `DeploymentConfiguration` both declare the
+category `deployment`, and `kubectl get deployment <name>` then fails on the whole cluster with
+"you must specify only one resource". The categories are now `[restresources, rr]` and
+`[restconfigs, rc]`. Existing CRDs follow: different categories on a live CRD are drift, and Update
+writes the generated ones. `kubectl get <kind>` lists only the resource now; `kubectl get rr` or
+`rc` list them by role.
+
 ## 2026-10-19 — 0.32.0
 
 Three features — an allowlist, Swagger 2.0 documents, and the first non-CRUD verb — plus a new
