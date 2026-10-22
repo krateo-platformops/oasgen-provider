@@ -605,6 +605,17 @@ func TestController(t *testing.T) {
 				return ctx
 			}
 
+			// Re-read before updating, which is what the controller does: the runtime fetches the
+			// object again in handleUpdate rather than passing on the one Observe was given. It matters
+			// now that Observe PERSISTS its drift finding (#213) -- the annotation and condition it
+			// writes bump resourceVersion, so reusing the pre-Observe object here fails with a conflict
+			// against a controller that is behaving correctly.
+			u, err = k.Get(ctx, resourceName, metav1.GetOptions{})
+			if err != nil {
+				t.Error("Error getting resource before update", "error", err)
+				return ctx
+			}
+
 			err = handler.Update(ctx, u)
 			if err != nil {
 				t.Error("Error updating resource", "error", err)
