@@ -13,7 +13,6 @@
         "kind": "RepoConfiguration",
         "listKind": "RepoConfigurationList",
         "categories": [
-          "repo",
           "restconfigs",
           "rc"
         ]
@@ -120,7 +119,6 @@
         "kind": "Repo",
         "listKind": "RepoList",
         "categories": [
-          "repo",
           "restresources",
           "rr"
         ]

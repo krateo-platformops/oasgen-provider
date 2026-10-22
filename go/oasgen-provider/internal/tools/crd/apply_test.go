@@ -343,3 +343,21 @@ func TestApplyOrUpdateCRD_MalformedOwnerAnnotationIsAdopted(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyOrUpdateCRD_TakesTheGeneratedCategories(t *testing.T) {
+	// live: categories from an older generator, one named after the kind.
+	live := genCRD("g", "K", "widgets", "v1-0-0", "A")
+	live.Spec.Names.Categories = []string{"k", "restresources", "rr"}
+	cli := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(live).Build()
+
+	for _, version := range []string{"v1-0-0", "v1-1-0"} { // in place, then append
+		gen := genCRD("g", "K", "widgets", version, "A")
+		gen.Spec.Names.Categories = []string{"restresources", "rr"}
+		_, err := ApplyOrUpdateCRD(context.Background(), cli, gen, "demo/rd")
+		require.NoError(t, err)
+
+		got, err := Get(context.Background(), cli, schema.GroupResource{Group: "g", Resource: "widgets"})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"restresources", "rr"}, got.Spec.Names.Categories, version)
+	}
+}

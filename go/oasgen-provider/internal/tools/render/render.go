@@ -86,6 +86,15 @@ type Result struct {
 	AuthenticationGenerated bool
 }
 
+// ResourceCategories and ConfigurationCategories are the categories of a generated resource CRD and
+// of its Configuration CRD. None is named after the kind: kubectl expands a category before a
+// resource name, so a category equal to another resource's name (deployment, serviceaccount) takes
+// `kubectl get` of that resource over.
+var (
+	ResourceCategories      = []string{"restresources", "rr"}
+	ConfigurationCategories = []string{"restconfigs", "rc"}
+)
+
 // CRDs renders cr against docs into the resource CRD and, when needed, the Configuration CRD. gvk and
 // hasSecuritySchemes are the caller's (see TargetGVK and HasSecuritySchemes). An error means the controller
 // would refuse to apply anything; a *FieldError among them names the offending RestDefinition field.
@@ -194,7 +203,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 		Group:        gvk.Group,
 		Version:      gvk.Version,
 		Kind:         gvk.Kind,
-		Categories:   []string{strings.ToLower(cr.Spec.Resource.Kind), "restresources", "rr"},
+		Categories:   ResourceCategories,
 		SpecSchema:   result.SpecSchema,
 		StatusSchema: result.StatusSchema,
 		Managed:      true,
@@ -217,7 +226,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 			Group:      cfgGVK.Group,
 			Version:    cfgGVK.Version,
 			Kind:       cfgGVK.Kind,
-			Categories: []string{strings.ToLower(cr.Spec.Resource.Kind), "restconfigs", "rc"},
+			Categories: ConfigurationCategories,
 			SpecSchema: result.ConfigurationSchema,
 			Managed:    false,
 		})

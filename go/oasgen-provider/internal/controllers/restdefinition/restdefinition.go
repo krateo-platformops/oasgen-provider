@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"os"
@@ -526,6 +527,13 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		}, nil
 	}
 
+	if e.staleCategories(ctx, gvr, configurationGVR) {
+		return reconciler.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
 	err = manageFinalizers(ctx, e.kube, cr, e.log.Debug)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("managing finalizers: %w", err)
@@ -966,12 +974,15 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	// Regenerate and re-apply the target CRD when the OAS content changed (same version → in-place schema
 	// replace, breaking allowed). This is what makes an edited OAS ConfigMap reach the CRD — previously Update
 	// only redeployed the RDC. Gated on the OAS content hash so a drift triggered by anything else (e.g. the
-	// deployment digest) does not needlessly re-run the crd generator.
+	// deployment digest) does not needlessly re-run the crd generator. Stale categories regenerate too:
+	// Observe reports them as drift, and nothing else writes them.
 	resHash := resourceHash(cr)
-	if oasHash != cr.Status.OASHash || resHash != cr.Status.ResourceHash {
+	stale := e.staleCategories(ctx, gvr, getConfigurationGVR(cr, hasSecuritySchemes))
+	if oasHash != cr.Status.OASHash || resHash != cr.Status.ResourceHash || stale {
 		e.log.Debug("Regenerating CRD",
 			"oasChanged", oasHash != cr.Status.OASHash,
-			"resourceChanged", resHash != cr.Status.ResourceHash)
+			"resourceChanged", resHash != cr.Status.ResourceHash,
+			"categoriesStale", stale)
 		if gerr := e.generateAndApplyCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); gerr != nil {
 			return fmt.Errorf("regenerating CRD: %w", gerr)
 		}
@@ -1315,6 +1326,33 @@ func (e *external) noteAdoption(cr *definitionv1alpha1.RestDefinition, crdName s
 		crdName, outcome.AdoptedFrom)
 	e.log.Info("adopted CRD from a deleted RestDefinition",
 		"crd", crdName, "previousOwner", outcome.AdoptedFrom, "newOwner", cr.Namespace+"/"+cr.Name)
+}
+
+// staleCategories says a live CRD of the RestDefinition, the resource's or its Configuration's, has
+// categories other than the generated ones. A failure to read is not staleness, as for the other
+// drift checks: a transient error must not flap a healthy resource.
+func (e *external) staleCategories(ctx context.Context, gvr, configurationGVR schema.GroupVersionResource) bool {
+	for _, c := range []struct {
+		gr   schema.GroupResource
+		want []string
+	}{
+		{gvr.GroupResource(), render.ResourceCategories},
+		{configurationGVR.GroupResource(), render.ConfigurationCategories},
+	} {
+		if c.gr.Resource == "" {
+			continue
+		}
+		live, err := crd.Get(ctx, e.kube, c.gr)
+		if err != nil {
+			e.log.Debug("Could not read CRD for the categories check; skipping", "crd", c.gr.String(), "error", err)
+			continue
+		}
+		if live != nil && !slices.Equal(live.Spec.Names.Categories, c.want) {
+			e.log.Debug("CRD categories are stale", "crd", c.gr.String(), "live", live.Spec.Names.Categories, "generated", c.want)
+			return true
+		}
+	}
+	return false
 }
 
 // guardAgainstBuiltInCollision refuses to mint a CRD whose plural or singular a built-in resource

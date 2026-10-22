@@ -196,6 +196,8 @@ func ApplyOrUpdateCRD(ctx context.Context, kubecli client.Client, newcrd *apiext
 			cur.Spec = merged.Spec
 			generation.SetServedStorage(cur, gvr.Version, true, false)
 		}
+		// Categories are the generator's alone, so a live CRD takes the generated ones.
+		cur.Spec.Names.Categories = newcrd.Spec.Names.Categories
 		setNoneConversion(cur)
 		generation.AddVersionColumn(cur)
 		return nil
