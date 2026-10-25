@@ -153,8 +153,12 @@ func (h *handler) externalResourceStillExists(ctx context.Context, cli restclien
 	// not, which is the same shape as every other bug on this path: two code paths that must agree, and
 	// one was not updated. Consulting it here makes the observe verb's notion of absence a single
 	// definition rather than two.
+	// body.ResponseBody, not body: getCall is an APIFuncDef returning the restclient.Response WRAPPER, and
+	// jqengine.Program.Run canonicalizes its output but not its input, so handing it the struct gives gojq
+	// something it cannot index and the predicate errors every time (#218). The observe call site gets this
+	// right; this one did not, which made the whole tombstone check dead code from the commit that added it.
 	if prog := notFoundBodyForAction(clientInfo.Resource.VerbsDescription, string(apiaction.Get)); prog != nil {
-		gone, perr := evalNotFoundBody(ctx, prog, body)
+		gone, perr := evalNotFoundBody(ctx, prog, body.ResponseBody)
 		if perr != nil {
 			// A mistyped predicate must not read as "still present" and hold the finalizer forever, nor
 			// as "gone" and orphan the resource: report it unverifiable so the delete result governs.
