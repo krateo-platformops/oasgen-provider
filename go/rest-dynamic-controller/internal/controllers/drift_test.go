@@ -159,3 +159,43 @@ func TestClearDriftRepeatsDoesNotWriteWhenThereIsNothingRecorded(t *testing.T) {
 	assert.Empty(t, dyn.Actions(),
 		"the agreeing case is the common one and must not cost an apiserver write per reconcile")
 }
+
+// TestDriftSignatureIsStableWhenSiblingsDrift is the property the non-convergence budget rests on: the
+// same unconvergeable resource must produce the SAME signature on every observe, or driftRepeats resets
+// and the budget never reaches maxDriftRepeats by any bounded number of polls.
+//
+// It drives the real Aruba Kaas shape, where two siblings of nodePools[0] both drift (string in the CR,
+// object in the response) and either is a legitimate "first difference". Before CompareExisting walked
+// keys in sorted order this flipped per call, so a budget meant to halt after 5 futile updates halted
+// only when the reported field happened to repeat 5 times running.
+func TestDriftSignatureIsStableWhenSiblingsDrift(t *testing.T) {
+	mg := driftMG(7, nil)
+
+	sigs := map[string]int{}
+	for i := 0; i < 100; i++ {
+		spec := map[string]interface{}{
+			"nodePools": []interface{}{map[string]interface{}{
+				"instance":   "A4",
+				"dataCenter": "ITBG-Bergamo",
+				"name":       "pool-1",
+			}},
+		}
+		resp := map[string]interface{}{
+			"nodePools": []interface{}{map[string]interface{}{
+				"instance":   map[string]interface{}{"id": "A4"},
+				"dataCenter": map[string]interface{}{"id": "ITBG-Bergamo"},
+				"name":       "pool-1",
+			}},
+		}
+		res, err := comparison.CompareExisting(spec, resp)
+		require.NoError(t, err)
+		require.False(t, res.IsEqual, "the Kaas shape must register as drift")
+		sigs[driftSignature(mg, res)]++
+	}
+
+	require.Len(t, sigs, 1, "the signature must be identical on every observe, got %v", sigs)
+	for sig := range sigs {
+		assert.Contains(t, sig, "gen=7", "the generation keeps a spec edit from inheriting the old budget")
+		assert.Contains(t, sig, "nodePools[0].dataCenter", "and the field path is the deterministic one")
+	}
+}
