@@ -246,6 +246,49 @@ func stopMockServer() {
 	}
 }
 
+// recordedLogs captures every message the handler emits, so a test can assert WHICH branch decided an
+// outcome rather than only what the outcome was. Several delete branches reach the same release/hold
+// decision for different reasons -- that is exactly how #218 stayed green for ten releases, with the
+// predicate dead and the fallback quietly producing the right answer.
+var recordedLogs []string
+
+// teeLogger forwards to the real logger and records the message. WithValues/WithName must keep teeing,
+// or everything logged after the handler decorates its logger disappears from the record.
+type teeLogger struct{ inner logging.Logger }
+
+func (l teeLogger) Info(msg string, kv ...any) {
+	recordedLogs = append(recordedLogs, msg)
+	l.inner.Info(msg, kv...)
+}
+func (l teeLogger) Debug(msg string, kv ...any) {
+	recordedLogs = append(recordedLogs, msg)
+	l.inner.Debug(msg, kv...)
+}
+func (l teeLogger) Warn(msg string, kv ...any) {
+	recordedLogs = append(recordedLogs, msg)
+	l.inner.Warn(msg, kv...)
+}
+func (l teeLogger) Error(err error, msg string, kv ...any) {
+	recordedLogs = append(recordedLogs, msg)
+	l.inner.Error(err, msg, kv...)
+}
+func (l teeLogger) WithValues(kv ...any) logging.Logger {
+	return teeLogger{inner: l.inner.WithValues(kv...)}
+}
+func (l teeLogger) WithName(n string) logging.Logger { return teeLogger{inner: l.inner.WithName(n)} }
+
+// loggedAny reports whether any recorded message contains one of these fragments.
+func loggedAny(fragments ...string) bool {
+	for _, m := range recordedLogs {
+		for _, f := range fragments {
+			if strings.Contains(m, f) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // dispatchGVR is the generated group/version/resource for the dispatch sample. v1-0 rather than
 // v1alpha1 because a resource CRD's version is derived from the OAS document's info.version
 // ("1.0" -> "v1-0"); only the Configuration CRD is always v1alpha1.
@@ -431,7 +474,7 @@ func TestController(t *testing.T) {
 				log.Debug("Creating chart url info getter.", "error", err)
 			}
 
-			handler = NewHandler(cfg.Client().RESTConfig(), log, swg, pluralizer, true)
+			handler = NewHandler(cfg.Client().RESTConfig(), teeLogger{inner: log}, swg, pluralizer, true)
 
 			return ctx
 		}).
@@ -1008,27 +1051,43 @@ func TestController(t *testing.T) {
 				seedFirst   bool
 				serverCfg   string
 				wantRelease bool // true => Delete returns nil and the finalizer is released
-				why         string
+				// wantFetchable asks the VENDOR, not the controller: does a plain authenticated GET still
+				// answer 200 for this id after the delete? This is the only column that can catch a release
+				// that orphaned a live resource (#77), because `released` is the controller's own report and
+				// a wrong controller reports it confidently. Note the tombstone row: a tombstone API answers
+				// 200 for a deleted record, so raw fetchability is deliberately NOT a synonym for presence
+				// there -- which is the whole reason notFoundBody exists.
+				wantFetchable bool
+				// wantVerified asks HOW the decision was reached: true when the observe verb established the
+				// answer, false when it fell through to "the delete result is the only signal there is".
+				// Without this a dead predicate reaching the right outcome by fallback is invisible, which is
+				// precisely what happened for ten releases (#218).
+				wantVerified bool
+				why          string
 			}{
 				{
 					name: "success/gone/verifiable", kind: "Sample", id: "mx-a", seedFirst: true,
 					serverCfg:   `{"lingerOnDelete": false, "deleteErrorsButRemoves": false}`,
-					wantRelease: true, why: "the ordinary case",
+					wantRelease: true, wantFetchable: false, wantVerified: true,
+					why: "the ordinary case",
 				},
 				{
 					name: "success/still-present/verifiable", kind: "Sample", id: "mx-b", seedFirst: true,
 					serverCfg:   `{"lingerOnDelete": true}`,
-					wantRelease: false, why: "#77: a 2xx means requested, not completed -- releasing here orphans it",
+					wantRelease: false, wantFetchable: true, wantVerified: true,
+					why: "#77: a 2xx means requested, not completed -- releasing here orphans it",
 				},
 				{
 					name: "404/gone/verifiable", kind: "Sample", id: "mx-c", seedFirst: false,
 					serverCfg:   `{"lingerOnDelete": false, "deleteErrorsButRemoves": false}`,
-					wantRelease: true, why: "#98: 404 IS the success condition; every retry after a real delete hits this",
+					wantRelease: true, wantFetchable: false, wantVerified: true,
+					why: "#98: 404 IS the success condition; every retry after a real delete hits this",
 				},
 				{
 					name: "error/gone/verifiable", kind: "Sample", id: "mx-d", seedFirst: true,
 					serverCfg:   `{"deleteErrorsButRemoves": true}`,
-					wantRelease: true, why: "#101: the observe verb outranks the delete status code",
+					wantRelease: true, wantFetchable: false, wantVerified: true,
+					why: "#101: the observe verb outranks the delete status code",
 				},
 				{
 					// #111: the get answers 200 with a tombstone. The status code says present, notFoundBody
@@ -1036,12 +1095,14 @@ func TestController(t *testing.T) {
 					// Deleting forever. Observe already resolved absence this way; the delete probe did not.
 					name: "success/200-tombstone/verifiable", kind: "Tombstonesample", id: "mx-f", seedFirst: true,
 					serverCfg:   `{"tombstoneOnDelete": true}`,
-					wantRelease: true, why: "#111: a 200 tombstone is absence, not presence",
+					wantRelease: true, wantFetchable: true, wantVerified: true,
+					why: "#111: a 200 tombstone is absence, not presence",
 				},
 				{
 					name: "error/still-present/unverifiable", kind: "Nogetsample", id: "mx-e", seedFirst: true,
 					serverCfg:   `{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": true}`,
-					wantRelease: false, why: "no get verb: absence cannot be established, so the delete error governs -- retry, never assume gone",
+					wantRelease: false, wantFetchable: true, wantVerified: false,
+					why: "no get verb: absence cannot be established, so the delete error governs -- retry, never assume gone",
 				},
 			}
 
@@ -1054,12 +1115,35 @@ func TestController(t *testing.T) {
 					configure(tc.serverCfg)
 					defer configure(`{"lingerOnDelete": false, "deleteErrorsButRemoves": false, "simulateErrors": false, "tombstoneOnDelete": false}`)
 
+					recordedLogs = nil
 					err := handler.Delete(ctx, cr(tc.kind, tc.id))
 					released := err == nil
 
 					if released != tc.wantRelease {
-						t.Errorf("release=%v want=%v (%s)\n  delete error: %v\n  resource still present upstream: %v",
+						t.Errorf("release=%v want=%v (%s)\n  delete error: %v\n  resource still fetchable upstream: %v",
 							released, tc.wantRelease, tc.why, err, present(tc.id))
+					}
+
+					// How the decision was reached, from the handler's own branch messages. Asserted
+					// separately from the outcome because the two can disagree: the outcome was right for
+					// the tombstone case throughout #218 while the mechanism was dead code.
+					verified := !loggedAny(
+						"No get verb to verify deletion", // no observe verb at all
+						"cannot be verified",             // probe failed, delete result governs
+						"treating as unverifiable",       // predicate errored
+					)
+					if verified != tc.wantVerified {
+						t.Errorf("verified=%v want=%v (%s)\n  branch messages: %v",
+							verified, tc.wantVerified, tc.why, recordedLogs)
+					}
+
+					// Ground truth, asked of the vendor rather than the controller. The mock is returned to a
+					// truthful state first: a case running with simulateErrors would make every probe answer
+					// non-200 and this assertion would read presence as absence.
+					configure(`{"simulateErrors": false, "authFailures": false}`)
+					if got := present(tc.id); got != tc.wantFetchable {
+						t.Errorf("vendor still answers 200 for %s: %v, want %v (%s)\n  the controller reported release=%v",
+							tc.id, got, tc.wantFetchable, tc.why, released)
 					}
 				})
 			}
