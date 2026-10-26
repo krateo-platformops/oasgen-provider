@@ -3,6 +3,7 @@ package oas2jsonschema
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	pathparsing "github.com/krateo-platformops/oasgen-provider/internal/tools/pathparsing"
@@ -13,7 +14,7 @@ import (
 func (g *OASSchemaGenerator) BuildStatusSchema() ([]byte, []error, error) {
 	var warnings []error
 
-	allStatusFields := append(g.resourceConfig.Identifiers, g.resourceConfig.AdditionalStatusFields...)
+	allStatusFields := statusFieldsFor(g.resourceConfig)
 	if len(allStatusFields) == 0 {
 		return nil, []error{SchemaGenerationError{Code: CodeNoStatusSchema, Message: "no identifiers or additional status fields defined, skipping status schema generation"}}, nil
 	}
@@ -56,7 +57,7 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 	for _, fieldName := range allStatusFields {
 		pathSegments, err := pathparsing.ParsePath(fieldName)
 		if err != nil {
-			warnings = append(warnings, SchemaGenerationError{Path: statusFieldPath(fieldName), Code: CodeFieldNotFound, Message: fmt.Sprintf("invalid path format for status field '%s': %v", fieldName, err)})
+			warnings = append(warnings, SchemaGenerationError{Path: g.statusFieldPath(fieldName), Code: CodeFieldNotFound, Message: fmt.Sprintf("invalid path format for status field '%s': %v", fieldName, err)})
 			continue
 		}
 		leaf := pathSegments[len(pathSegments)-1]
@@ -66,7 +67,7 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 		if m, ok := respMappings[fieldName]; ok {
 			if m.ValueMappingType == "jq" {
 				// A jq transform's output type is not statically analyzable: default to string.
-				warnings = append(warnings, SchemaGenerationError{Path: statusFieldPath(fieldName), Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' is produced by a jq value transform (inResponse '%s'); type is not statically known, defaulting to string", fieldName, m.InResponse)})
+				warnings = append(warnings, SchemaGenerationError{Path: g.statusFieldPath(fieldName), Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' is produced by a jq value transform (inResponse '%s'); type is not statically known, defaulting to string", fieldName, m.InResponse)})
 				g.addPropertyByPath(statusSchema, pathSegments, Property{Name: leaf, Schema: &Schema{Type: []string{"string"}}})
 				continue
 			}
@@ -84,7 +85,7 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 				}
 			}
 			// Mapping declared but its source path is unresolvable: warn and fall back to string.
-			warnings = append(warnings, SchemaGenerationError{Path: statusFieldPath(fieldName), Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' maps from response path '%s' which was not found, defaulting to string", fieldName, m.InResponse)})
+			warnings = append(warnings, SchemaGenerationError{Path: g.statusFieldPath(fieldName), Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' maps from response path '%s' which was not found, defaulting to string", fieldName, m.InResponse)})
 			g.addPropertyByPath(statusSchema, pathSegments, Property{Name: leaf, Schema: &Schema{Type: []string{"string"}}})
 			continue
 		}
@@ -96,7 +97,7 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 			g.addPropertyByPath(statusSchema, pathSegments, foundProp)
 		} else {
 			// Fallback for fields not found in the response schema.
-			warnings = append(warnings, SchemaGenerationError{Path: statusFieldPath(fieldName), Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' not found in response, defaulting to string", fieldName)})
+			warnings = append(warnings, SchemaGenerationError{Path: g.statusFieldPath(fieldName), Code: CodeStatusFieldNotFound, Message: fmt.Sprintf("status field '%s' not found in response, defaulting to string", fieldName)})
 			fallbackProp := Property{Name: leaf, Schema: &Schema{Type: []string{"string"}}} // Fallback to string type
 			g.addPropertyByPath(statusSchema, pathSegments, fallbackProp)
 		}
@@ -235,9 +236,41 @@ func (g *OASSchemaGenerator) addPropertyByPathRec(ctx context.Context, schema *S
 	g.addPropertyByPathRec(ctx, nextSchema, remainingPath, propToAdd, guard, depth+1)
 }
 
+// statusFieldsFor returns the field names the status schema is built from: identifiers first, then
+// additionalStatusFields. The order matters -- statusFieldPath reports a name present in both stanzas
+// against identifiers, matching the entry reached first.
+//
+// slices.Concat, NOT append(Identifiers, AdditionalStatusFields...): appending onto a slice the caller
+// still owns writes into ITS backing array whenever that array has spare capacity, replacing whatever
+// the owner had after the append point. Nothing depends on that today, because Identifiers arrives from
+// JSON unmarshalling with cap == len so the append always allocates -- but that is a property of the
+// caller, not of this function, and one appended-to Identifiers anywhere upstream would turn this into
+// silent corruption of the resource config. Same class as the childPath fix in
+// rest-dynamic-controller#216.
+func statusFieldsFor(rc *ResourceConfig) []string {
+	if rc == nil {
+		return nil
+	}
+	return slices.Concat(rc.Identifiers, rc.AdditionalStatusFields)
+}
+
 // statusFieldPath names where a status-field warning came from, so the rendered message locates itself.
-// These warnings are read by someone holding a RestDefinition, and "identifiers or additionalStatusFields,
-// entry <name>" is the coordinate they can act on.
-func statusFieldPath(fieldName string) string {
+// These warnings are read by someone holding a RestDefinition, and the stanza plus the entry name is the
+// coordinate they can act on.
+//
+// The status schema is built from identifiers AND additionalStatusFields combined, so a warning could
+// always have come from either. This hardcoded "additionalStatusFields.", which sent anyone whose
+// IDENTIFIER failed to resolve searching a stanza that does not contain the name. Observed while
+// generating a dispatch resource: `workflowId` is an identifier and a path parameter, so it is absent
+// from the correlated-run response and warned -- and removing it from additionalStatusFields, where it
+// had never been, changed nothing and the warning persisted. The doc comment above already said the
+// coordinate should name either stanza; only the implementation disagreed.
+func (g *OASSchemaGenerator) statusFieldPath(fieldName string) string {
+	// Nil-safe: composeStatusSchema takes the field list as an argument, so it is reachable from a
+	// generator built without a resource config (several tests do exactly that). Falling back to the
+	// additionalStatusFields label there keeps the previous behaviour rather than panicking.
+	if g.resourceConfig != nil && slices.Contains(g.resourceConfig.Identifiers, fieldName) {
+		return "identifiers." + fieldName
+	}
 	return "additionalStatusFields." + fieldName
 }
