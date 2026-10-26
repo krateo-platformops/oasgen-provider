@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -43,6 +44,45 @@ type MockServer struct {
 	// tombstoneOnDelete reproduces an API that answers GET for a deleted resource with 200 and a
 	// record carrying status "deleted", rather than 404 (#111, Aruba security/Kmip).
 	tombstoneOnDelete bool
+
+	// --- dispatch (fire-and-correlate) ---
+	//
+	// These reproduce GitHub Actions workflow_dispatch, which is the shape the dispatch verb was built
+	// for and the one the shipped example documents:
+	//
+	//   POST /workflows/{id}/dispatches -> 204 with NO BODY and no identifier of any kind. The trigger
+	//   tells you nothing about what it started, which is the entire reason correlation exists.
+	//
+	//   GET /workflows/{id}/runs -> {"workflow_runs": [...]}. GitHub does NOT echo the dispatch inputs
+	//   onto the run, so a caller cannot find its own invocation by the token it sent. The token
+	//   arrives instead in display_title, because the workflow sets run-name from the input.
+	//
+	// Getting that asymmetry wrong in either direction is what an integration case has to catch: a mock
+	// that echoes the inputs would let a broken correlation implementation pass.
+	runs []*WorkflowRun
+	// dispatchCount counts triggers, so a test can prove the fire-once annotation is honoured rather
+	// than merely that the CR looks right afterwards.
+	dispatchCount int
+	// swallowDispatch accepts the trigger and records NO run, reproducing a dispatch whose invocation
+	// never becomes observable -- a workflow deleted, disabled, or filtered out by its own `on:`
+	// conditions. This is what drives the observe-miss budget to DispatchedButNotObserved.
+	swallowDispatch bool
+	// echoTokenInOutputs puts the token somewhere a correlated lookup should NOT find it, so a test can
+	// show the match is made on the configured echoedAt path and not by scanning the document.
+	echoTokenInOutputs bool
+}
+
+// WorkflowRun mirrors the subset of GitHub's workflow-run object the dispatch verb reads.
+type WorkflowRun struct {
+	ID           int64  `json:"id"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion,omitempty"`
+	DisplayTitle string `json:"display_title"`
+	HTMLURL      string `json:"html_url,omitempty"`
+	CreatedAt    string `json:"created_at,omitempty"`
+	// Outputs is not a GitHub field. It exists only so echoTokenInOutputs can place the token off the
+	// configured echoedAt path.
+	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
 func NewMockServer(port int) *MockServer {
@@ -421,6 +461,99 @@ func (ms *MockServer) healthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /workflows/{id}/dispatches - trigger a workflow run.
+//
+// Answers 204 with an EMPTY body, exactly as GitHub does. Nothing in the response identifies the run
+// that was started; the correlation token the caller put in the request body is not echoed back and is
+// not attached to the run. The workflow itself is what surfaces it, via run-name -> display_title.
+func (ms *MockServer) dispatchWorkflow(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Ref    string                 `json:"ref"`
+		Inputs map[string]interface{} `json:"inputs"`
+	}
+	// Read the body by LENGTH OF WHAT ARRIVED, never by r.ContentLength. The controller sends this
+	// request chunked -- measured: content-length=-1, transfer-encoding=[chunked] -- so a guard of
+	// `if r.ContentLength > 0` is false for every single dispatch and silently skips the decode. That
+	// cost an afternoon: the body was always correct and this fixture dropped it, which presented as
+	// "the request never carries the correlation token" and was very nearly filed as a product bug.
+	rawBody, _ := io.ReadAll(r.Body)
+	// Log the RAW bytes, not the decoded struct: decoding first makes an unexpected shape and an empty
+	// body look identical, which is what hid the guard above from me in the first place.
+	log.Printf("DISPATCH received: path=%s content-type=%q content-length=%d transfer-encoding=%v raw=%s",
+		r.URL.Path, r.Header.Get("Content-Type"), r.ContentLength, r.TransferEncoding, string(rawBody))
+
+	// A malformed body is a client error; an EMPTY one is not -- ref/inputs are both optional here.
+	if len(rawBody) > 0 {
+		if err := json.Unmarshal(rawBody, &body); err != nil {
+			ms.writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+	}
+
+	ms.mutex.Lock()
+	ms.dispatchCount++
+	if !ms.swallowDispatch {
+		// The token reaches the run ONLY through display_title. Read it from the inputs the caller sent
+		// to simulate the workflow's own `run-name: ${{ inputs.correlationId }}`.
+		title := ""
+		if body.Inputs != nil {
+			if v, ok := body.Inputs["correlationId"]; ok {
+				title = fmt.Sprintf("%v", v)
+			}
+		}
+		run := &WorkflowRun{
+			ID:           int64(100 + ms.dispatchCount),
+			Status:       "completed",
+			Conclusion:   "success",
+			DisplayTitle: title,
+			HTMLURL:      fmt.Sprintf("https://example.invalid/runs/%d", 100+ms.dispatchCount),
+			CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		}
+		if ms.echoTokenInOutputs {
+			// Token present in the document but NOT at echoedAt: a correlated lookup must miss it.
+			run.DisplayTitle = "some unrelated run name"
+			run.Outputs = map[string]string{"correlationId": title}
+		}
+		log.Printf("DISPATCH recorded run: id=%d display_title=%q", run.ID, run.DisplayTitle)
+		ms.runs = append(ms.runs, run)
+	}
+	ms.mutex.Unlock()
+
+	// 204, no body. Deliberately no Content-Type and nothing written.
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /workflows/{id}/runs - list runs, wrapped as GitHub wraps them.
+func (ms *MockServer) listWorkflowRuns(w http.ResponseWriter, r *http.Request) {
+	ms.mutex.RLock()
+	out := make([]*WorkflowRun, len(ms.runs))
+	copy(out, ms.runs)
+	ms.mutex.RUnlock()
+
+	titles := make([]string, 0, len(out))
+	for _, r := range out {
+		titles = append(titles, r.DisplayTitle)
+	}
+	log.Printf("RUNS listed: path=%s count=%d display_titles=%v", r.URL.Path, len(out), titles)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"total_count":   len(out),
+		"workflow_runs": out,
+	})
+}
+
+// GET /admin/dispatch-count - how many triggers the server has accepted, so a test can assert
+// fire-once from the SERVER's side rather than from the CR's annotations.
+func (ms *MockServer) dispatchCountHandler(w http.ResponseWriter, r *http.Request) {
+	ms.mutex.RLock()
+	n := ms.dispatchCount
+	ms.mutex.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int{"dispatchCount": n})
+}
+
 // POST /admin/config - Configura comportamento del server per i test
 func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 	var config struct {
@@ -432,6 +565,9 @@ func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 		LingerOnDelete         *bool `json:"lingerOnDelete,omitempty"`
 		DeleteErrorsButRemoves *bool `json:"deleteErrorsButRemoves,omitempty"`
 		TombstoneOnDelete      *bool `json:"tombstoneOnDelete,omitempty"`
+		SwallowDispatch        *bool `json:"swallowDispatch,omitempty"`
+		EchoTokenInOutputs     *bool `json:"echoTokenInOutputs,omitempty"`
+		ResetDispatch          *bool `json:"resetDispatch,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
@@ -453,6 +589,18 @@ func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 
 		}
 		ms.pending = make(map[string]*Resource)
+		ms.mutex.Unlock()
+	}
+	if config.SwallowDispatch != nil {
+		ms.swallowDispatch = *config.SwallowDispatch
+	}
+	if config.EchoTokenInOutputs != nil {
+		ms.echoTokenInOutputs = *config.EchoTokenInOutputs
+	}
+	if config.ResetDispatch != nil && *config.ResetDispatch {
+		ms.mutex.Lock()
+		ms.runs = nil
+		ms.dispatchCount = 0
 		ms.mutex.Unlock()
 	}
 	if config.LingerOnDelete != nil {
@@ -537,8 +685,14 @@ func (ms *MockServer) router(w http.ResponseWriter, r *http.Request) {
 		ms.healthCheck(w, r)
 	case r.URL.Path == "/admin/config" && r.Method == http.MethodPost:
 		ms.configureServer(w, r)
+	case r.URL.Path == "/admin/dispatch-count" && r.Method == http.MethodGet:
+		ms.dispatchCountHandler(w, r)
 	case strings.HasPrefix(r.URL.Path, "/status/"):
 		ms.statusCode(w, r)
+	case strings.HasPrefix(r.URL.Path, "/workflows/") && strings.HasSuffix(r.URL.Path, "/dispatches") && r.Method == http.MethodPost:
+		ms.dispatchWorkflow(w, r)
+	case strings.HasPrefix(r.URL.Path, "/workflows/") && strings.HasSuffix(r.URL.Path, "/runs") && r.Method == http.MethodGet:
+		ms.listWorkflowRuns(w, r)
 	case r.URL.Path == "/resource":
 		switch r.Method {
 		case http.MethodGet:
@@ -585,6 +739,9 @@ func (ms *MockServer) Start() error {
 	log.Printf("  PATCH  /resource/{id}")
 	log.Printf("  DELETE /resource/{id}")
 	log.Printf("  GET    /status/{code} (return specific status code)")
+	log.Printf("  POST   /workflows/{id}/dispatches (204, no body -- GitHub workflow_dispatch)")
+	log.Printf("  GET    /workflows/{id}/runs (list runs; token arrives in display_title)")
+	log.Printf("  GET    /admin/dispatch-count")
 
 	return http.ListenAndServe(addr, nil)
 }

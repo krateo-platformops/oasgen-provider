@@ -5,6 +5,7 @@ package restResources
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -243,6 +244,77 @@ func stopMockServer() {
 	if err := reclaimPort(30007); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}
+}
+
+// dispatchGVR is the generated group/version/resource for the dispatch sample. v1-0 rather than
+// v1alpha1 because a resource CRD's version is derived from the OAS document's info.version
+// ("1.0" -> "v1-0"); only the Configuration CRD is always v1alpha1.
+var dispatchGVR = schema.GroupVersionResource{
+	Group:    "sample.krateo.io",
+	Version:  "v1-0",
+	Resource: "dispatchsamples",
+}
+
+// resetDispatchMock configures the mock vendor and clears any runs from a previous case.
+func resetDispatchMock(t *testing.T, payload string) {
+	t.Helper()
+	resp, err := http.Post("http://localhost:30007/admin/config", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("configuring the dispatch mock: %v", err)
+	}
+	defer resp.Body.Close()
+}
+
+// readyCondition returns the Ready condition's reason and message, or empty strings when absent.
+func readyCondition(t *testing.T, u *unstructured.Unstructured) (string, string) {
+	t.Helper()
+	conds, found, err := unstructured.NestedSlice(u.Object, "status", "conditions")
+	if err != nil || !found {
+		return "", ""
+	}
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if m["type"] == "Ready" {
+			reason, _ := m["reason"].(string)
+			msg, _ := m["message"].(string)
+			return reason, msg
+		}
+	}
+	return "", ""
+}
+
+// mustGet re-reads the CR. Every handler call is given a FRESH object because the handlers patch
+// annotations and write status, so a stale copy means a 409 -- the same reason handleObserve and
+// handleUpdate each fetch their own copy in the runtime rather than passing one along.
+func mustGet(ctx context.Context, t *testing.T, k dynamic.ResourceInterface, name string) *unstructured.Unstructured {
+	t.Helper()
+	u, err := k.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting %s: %v", name, err)
+	}
+	return u
+}
+
+// dispatchCount asks the VENDOR how many triggers it received. Asserting on the CR's annotations
+// alone cannot distinguish "fired once" from "fired twice and recorded once", which is the failure
+// that actually matters: the trigger is not idempotent on the vendor side.
+func dispatchCount(t *testing.T) int {
+	t.Helper()
+	resp, err := http.Get("http://localhost:30007/admin/dispatch-count")
+	if err != nil {
+		t.Fatalf("reading the dispatch count: %v", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		DispatchCount int `json:"dispatchCount"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decoding the dispatch count: %v", err)
+	}
+	return out.DispatchCount
 }
 
 func TestMain(m *testing.M) {
@@ -1018,6 +1090,173 @@ func TestController(t *testing.T) {
 
 			if err := handler.Delete(ctx, u); err != nil {
 				t.Error("Delete of a never-created resource must release the finalizer, got error", "error", err)
+			}
+			return ctx
+		}).
+		// The dispatch verb shipped in 0.32.0 with 14 unit tests over its helpers and NOTHING driving the
+		// wiring -- the same gap that let #218 and #220 ship. These cases drive the real handler against a
+		// mock vendor replicating GitHub Actions workflow_dispatch: a bodiless 204 trigger, and runs that
+		// do NOT echo the dispatch inputs, so the token comes back only in display_title.
+		//
+		// What they must NOT assert on is ResourceExists. Both observe outcomes -- "correlated" and
+		// "dispatched but not yet visible" -- deliberately return {exists: true, upToDate: true}, the first
+		// because the run was found and the second so Create is not re-issued. ResourceExists therefore
+		// carries no information about whether correlation succeeded. The signals that do are the status
+		// projection, the observe-miss annotation, and the condition.
+		Assess("DispatchFiresOnceAndCorrelates", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			// simulateErrors and authFailures are cleared explicitly: the DeleteRuleMatrix cases above leave
+			// simulateErrors ON, and a mock still in that state fails every dispatch with a 500 that has
+			// nothing to do with dispatch. Server state does not reset between Assess blocks.
+			resetDispatchMock(t, `{"resetDispatch": true, "swallowDispatch": false, "echoTokenInOutputs": false, "simulateErrors": false, "authFailures": false}`)
+
+			k := cli.Resource(dispatchGVR).Namespace(namespace)
+			u, err := k.Get(ctx, "dispatch-1", metav1.GetOptions{})
+			if err != nil {
+				t.Error("Getting DispatchSample.", "error", err)
+				return ctx
+			}
+
+			// Nothing dispatched yet, so the invocation cannot exist and Create must be invited.
+			obs, err := handler.Observe(ctx, u)
+			if err != nil {
+				t.Error("Error during initial observe", "error", err)
+				return ctx
+			}
+			if obs.ResourceExists {
+				t.Error("before any dispatch, observe must report not-exists so the runtime calls Create")
+				return ctx
+			}
+			if n := dispatchCount(t); n != 0 {
+				t.Errorf("observe must never trigger the dispatch; vendor saw %d", n)
+			}
+
+			u = mustGet(ctx, t, k, "dispatch-1")
+			if err := handler.Create(ctx, u); err != nil {
+				t.Error("Error during dispatch create", "error", err)
+				return ctx
+			}
+			if n := dispatchCount(t); n != 1 {
+				t.Errorf("create must trigger exactly one dispatch, vendor saw %d", n)
+				return ctx
+			}
+			u = mustGet(ctx, t, k, "dispatch-1")
+			if got := u.GetAnnotations()["krateo.io/dispatched-token"]; got != "tok-dispatch-1" {
+				t.Errorf("create must record the token it fired for, got %q", got)
+				return ctx
+			}
+
+			// The run is now visible, and must be found by the token -- which reached it ONLY through
+			// display_title, because this API does not echo the inputs.
+			if _, err := handler.Observe(ctx, mustGet(ctx, t, k, "dispatch-1")); err != nil {
+				t.Error("Error observing after dispatch", "error", err)
+				return ctx
+			}
+			u = mustGet(ctx, t, k, "dispatch-1")
+			// Correlated: status is projected FROM THE MATCHED ITEM, and the miss counter is cleared.
+			if got, _, _ := unstructured.NestedString(u.Object, "status", "status"); got != "completed" {
+				t.Errorf("a correlated run must project its fields into status; status.status = %q", got)
+			}
+			if got, _, _ := unstructured.NestedString(u.Object, "status", "conclusion"); got != "success" {
+				t.Errorf("status.conclusion = %q, want \"success\" from the correlated item", got)
+			}
+			if got, found := u.GetAnnotations()["krateo.io/dispatch-observe-misses"]; found {
+				t.Errorf("correlation succeeded, so the miss counter must be cleared, got %q", got)
+			}
+
+			// Fire-once: the guard is in OBSERVE, not in Create. Once the token is recorded, observe never
+			// reports not-exists again, so the runtime never issues a second Create and the non-idempotent
+			// vendor trigger is never re-POSTed. Driving Create directly would bypass the guard, which is
+			// why this asserts through observe.
+			for i := 0; i < 3; i++ {
+				obs, err = handler.Observe(ctx, mustGet(ctx, t, k, "dispatch-1"))
+				if err != nil {
+					t.Error("Error on repeat observe", "error", err)
+					return ctx
+				}
+				if !obs.ResourceExists {
+					t.Fatalf("observe %d reported not-exists after a successful dispatch, which would re-fire the trigger", i+1)
+				}
+			}
+			if n := dispatchCount(t); n != 1 {
+				t.Errorf("repeated observes must not cause another dispatch, vendor saw %d", n)
+			}
+			return ctx
+		}).
+		// A token present in the document but NOT at the configured echoedAt path must not match --
+		// otherwise correlation degrades into "find my token anywhere" and a CR binds to a run that merely
+		// mentions it. Asserted on the miss counter and the absent status projection, because exists=true
+		// is returned either way.
+		Assess("DispatchCorrelationHonoursEchoedAt", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			resetDispatchMock(t, `{"resetDispatch": true, "swallowDispatch": false, "echoTokenInOutputs": true, "simulateErrors": false, "authFailures": false}`)
+
+			k := cli.Resource(dispatchGVR).Namespace(namespace)
+			if err := handler.Create(ctx, mustGet(ctx, t, k, "dispatch-2")); err != nil {
+				t.Error("Error during dispatch create", "error", err)
+				return ctx
+			}
+			if n := dispatchCount(t); n != 1 {
+				t.Errorf("expected one trigger, vendor saw %d", n)
+				return ctx
+			}
+
+			if _, err := handler.Observe(ctx, mustGet(ctx, t, k, "dispatch-2")); err != nil {
+				t.Error("Error observing", "error", err)
+				return ctx
+			}
+			u := mustGet(ctx, t, k, "dispatch-2")
+			if got, found, _ := unstructured.NestedString(u.Object, "status", "status"); found {
+				t.Errorf("the token is off the echoedAt path, so nothing should have correlated, yet status was projected (status.status = %q) -- correlation is scanning the document rather than reading the configured path", got)
+			}
+			if got := u.GetAnnotations()["krateo.io/dispatch-observe-misses"]; got != "1" {
+				t.Errorf("a non-matching run must count as an observe MISS, annotation = %q, want \"1\"", got)
+			}
+			return ctx
+		}).
+		// The safety property that matters most and had never been executed: an invocation that never
+		// becomes observable must NOT be re-dispatched. The budget runs out, the condition says so and
+		// names the likely cause, and the vendor still sees exactly one trigger -- because the invocation
+		// may well have happened, and re-POSTing a non-idempotent trigger to find out is the one thing
+		// this verb must never do.
+		Assess("DispatchNeverObservedDoesNotRefire", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			resetDispatchMock(t, `{"resetDispatch": true, "swallowDispatch": true, "echoTokenInOutputs": false, "simulateErrors": false, "authFailures": false}`)
+
+			k := cli.Resource(dispatchGVR).Namespace(namespace)
+			if err := handler.Create(ctx, mustGet(ctx, t, k, "dispatch-3")); err != nil {
+				t.Error("Error during dispatch create", "error", err)
+				return ctx
+			}
+			if n := dispatchCount(t); n != 1 {
+				t.Errorf("expected one trigger, vendor saw %d", n)
+				return ctx
+			}
+
+			// maxDispatchObserveMisses observes, none of which can ever find the invocation.
+			for i := 0; i < maxDispatchObserveMisses; i++ {
+				obs, err := handler.Observe(ctx, mustGet(ctx, t, k, "dispatch-3"))
+				if err != nil {
+					t.Error("Error observing a swallowed dispatch", "error", err)
+					return ctx
+				}
+				if !obs.ResourceExists {
+					t.Fatalf("observe %d reported not-exists, which would RE-FIRE a dispatch that may already have happened", i+1)
+				}
+			}
+
+			u := mustGet(ctx, t, k, "dispatch-3")
+			if got := u.GetAnnotations()["krateo.io/dispatch-observe-misses"]; got != strconv.Itoa(maxDispatchObserveMisses) {
+				t.Errorf("miss counter = %q, want %q", got, strconv.Itoa(maxDispatchObserveMisses))
+			}
+			reason, msg := readyCondition(t, u)
+			if reason != "DispatchedButNotObserved" {
+				t.Errorf("after %d fruitless checks the Ready reason must be DispatchedButNotObserved, got %q (message %q)", maxDispatchObserveMisses, reason, msg)
+			}
+			// The message has to name the likely cause, because the operator cannot see the vendor's
+			// collection and "not observed" alone gives them nothing to act on.
+			if !strings.Contains(msg, "echoedAt") {
+				t.Errorf("the condition must point at correlation.echoedAt as the likely cause, got %q", msg)
+			}
+			if n := dispatchCount(t); n != 1 {
+				t.Errorf("a dispatch that was never observed must NOT be re-fired; vendor saw %d triggers", n)
 			}
 			return ctx
 		}).Feature()

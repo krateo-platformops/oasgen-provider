@@ -1,0 +1,34 @@
+# A dispatch resource for the integration suite. The verb had 14 unit tests covering its helpers and
+# nothing driving the wiring, which is the same gap that let #218 and #220 ship.
+apiVersion: ogen.krateo.io/v1alpha1
+kind: RestDefinition
+metadata:
+  name: sample-dispatch
+  namespace: demo-system
+spec:
+  oasPath: configmap://demo-system/sample/openapi.yaml
+  resourceGroup: sample.krateo.io
+  resource:
+    kind: DispatchSample
+    identifiers:
+    - workflowId
+    # Only fields the correlated run actually carries. workflowId is a path parameter, not part of
+    # the response, and listing it here makes the generator warn and default it to string.
+    additionalStatusFields:
+    - id
+    - status
+    - conclusion
+    verbsDescription:
+    - action: dispatch
+      method: POST
+      path: /workflows/{workflowId}/dispatches
+      correlation:
+        # The token the CR supplies...
+        fromSpec: inputs.correlationId
+        # ...comes back HERE, on one item of the collection below. Not in the trigger's response,
+        # which is a bodiless 204, and not as an echo of the inputs, which this API does not provide.
+        echoedAt: display_title
+        observe:
+          method: GET
+          path: /workflows/{workflowId}/runs
+          itemsPath: workflow_runs
