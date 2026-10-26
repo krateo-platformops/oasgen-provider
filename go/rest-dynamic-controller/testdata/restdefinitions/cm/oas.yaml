@@ -255,6 +255,84 @@ paths:
             application/json:
               schema:
                 type: object
+  # --- dispatch (fire-and-correlate) ---
+  #
+  # Modelled on GitHub Actions workflow_dispatch, the shape the dispatch verb exists for. The trigger
+  # answers 204 with NO body and no identifier, so the only way back to the invocation it started is
+  # the correlation token -- which this API, like GitHub, does NOT echo onto the run. The token
+  # reaches the run through display_title, because the workflow sets run-name from its own input.
+  /workflows/{workflowId}/dispatches:
+    post:
+      summary: Trigger a workflow run
+      operationId: dispatchWorkflow
+      parameters:
+        - name: workflowId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ref:
+                  type: string
+                  description: The git ref to run against.
+                inputs:
+                  type: object
+                  description: >
+                    Workflow inputs. correlationId is declared BY NAME rather than left free-form:
+                    the token has to exist in the generated spec schema for an author to be able to
+                    set it, which is the same reason the shipped github-workflow-dispatch example
+                    declares it explicitly.
+                  properties:
+                    correlationId:
+                      type: string
+      responses:
+        '204':
+          description: Trigger accepted. No body, and nothing identifying the run it started.
+  /workflows/{workflowId}/runs:
+    get:
+      summary: List workflow runs
+      operationId: listWorkflowRuns
+      parameters:
+        - name: workflowId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The runs of this workflow, in GitHub's envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_count:
+                    type: integer
+                  workflow_runs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          format: int64
+                        status:
+                          type: string
+                        conclusion:
+                          type: string
+                        display_title:
+                          type: string
+                          description: Where the correlation token actually arrives.
+                        html_url:
+                          type: string
+                        created_at:
+                          type: string
 components:
   schemas:
     Resource:

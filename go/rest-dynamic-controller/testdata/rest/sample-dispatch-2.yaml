@@ -1,0 +1,14 @@
+# Second dispatch CR, for the case where the token comes back somewhere other than echoedAt.
+kind: DispatchSample
+apiVersion: sample.krateo.io/v1-0
+metadata:
+  name: dispatch-2
+  namespace: default
+spec:
+  workflowId: wf-2
+  ref: main
+  inputs:
+    correlationId: tok-dispatch-2
+  configurationRef:
+    name: my-dispatch-config
+    namespace: default

@@ -1,0 +1,16 @@
+# The correlation token is supplied BY THE CR, which is the whole point: the trigger's response is a
+# bodiless 204, so nothing the API returns can identify the invocation. The CR has to name it in
+# advance and then go looking for it.
+kind: DispatchSample
+apiVersion: sample.krateo.io/v1-0
+metadata:
+  name: dispatch-1
+  namespace: default
+spec:
+  workflowId: wf-1
+  ref: main
+  inputs:
+    correlationId: tok-dispatch-1
+  configurationRef:
+    name: my-dispatch-config
+    namespace: default

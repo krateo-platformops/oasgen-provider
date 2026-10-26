@@ -1,0 +1,15 @@
+# Third dispatch CR: its invocation NEVER becomes observable (the mock swallows the trigger), which is
+# what drives the observe-miss budget to DispatchedButNotObserved.
+kind: DispatchSample
+apiVersion: sample.krateo.io/v1-0
+metadata:
+  name: dispatch-3
+  namespace: default
+spec:
+  workflowId: wf-3
+  ref: main
+  inputs:
+    correlationId: tok-dispatch-3
+  configurationRef:
+    name: my-dispatch-config
+    namespace: default
