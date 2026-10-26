@@ -38,8 +38,10 @@ func TestSchemaGenerationErrorOmitsAnEmptyLocation(t *testing.T) {
 // The status-field warnings now carry a location, because the person reading them is holding a
 // RestDefinition and needs the coordinate they can act on.
 func TestStatusFieldWarningsCarryALocation(t *testing.T) {
+	// statusFieldPath is a method now: the stanza it names depends on which one the field is in.
+	g := &OASSchemaGenerator{resourceConfig: &ResourceConfig{AdditionalStatusFields: []string{"metadata.tags"}}}
 	e := SchemaGenerationError{
-		Path:    statusFieldPath("metadata.tags"),
+		Path:    g.statusFieldPath("metadata.tags"),
 		Code:    CodeStatusFieldNotFound,
 		Message: "status field 'metadata.tags' not found in response, defaulting to string",
 	}
