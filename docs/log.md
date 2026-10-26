@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-19T09:00:00Z
+timestamp: 2026-10-26T09:00:00Z
 ---
 
 # Log
@@ -12,6 +12,150 @@ timestamp: 2026-10-19T09:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-26 — 0.33.0
+
+Two fixes to paths that could never succeed, both found by running the thing rather than reading it,
+and both of which **change what the controller does** rather than only what it reports. Plus the
+first end-to-end execution of the `dispatch` verb, which had shipped with no test that drove it.
+
+### SECURITY-adjacent: `notFoundBody` was never evaluated when verifying a delete
+
+A tombstone API — one that answers `GET` for a deleted resource with 200 and a record saying
+`status: Deleted`, rather than 404 — could not have its deletion verified at all. The delete path
+handed the `notFoundBody` predicate the whole `restclient.Response` **wrapper** instead of the
+response body, and `jqengine.Program.Run` canonicalizes its output but not its input, so gojq was
+given a Go struct it cannot index. The predicate errored on every call, landed in the deliberately
+forgiving "unverifiable" branch, and the delete result governed.
+
+Introduced by the commit that added the feature (#116, "a 200 tombstone is absence, not presence",
+closes #111), so it never worked in any release carrying it — **0.23.0 through 0.32.0**. The comment
+already sitting above the call site described its own bug: *"the same shape as every other bug on
+this path: two code paths that must agree, and one was not updated."*
+
+Three outcomes change:
+
+| situation | before | now |
+|---|---|---|
+| tombstone, `DELETE` succeeded | unverifiable → delete trusted (right outcome, never verified) | verified gone |
+| tombstone, `DELETE` failed | finalizer held **forever** | verified gone → released |
+| 200 the predicate does *not* match | unverifiable → successful delete trusted → released | verifiably present → held and retried |
+
+The second row is the wedge #111 was filed to remove, still fully in force until now. The third is
+the one to weigh before upgrading: a predicate that has been dead since 0.23.0 becomes load-bearing,
+so one that fails to match a real tombstone will now hang a delete that previously fell through. That
+follows from #111's premise — a 2xx means the deletion was *requested*, not completed — and from the
+priority table in `resolveDeleteOutcome`.
+
+**Verified on live infrastructure** by the Aruba KOG side, against `security/Kmip`, the resource #111
+was filed from. The `:164` debug line — *"Get returned 200 but notFoundBody reports the resource
+absent"* — was emitted for the first time in the feature's life, exactly once, against 355 prior
+holds, and the finalizer released by that path:
+
+```
+Get returned 200 but notFoundBody reports the resource absent; treating as deleted
+Delete returned an error but the external resource is verifiably absent; releasing finalizer
+                     deleteError: "unexpected status: 400: ..."
+```
+
+A 400 `DELETE` releasing the finalizer can only be the verified-absent branch; the fallback requires
+either a successful delete or no get verb. **To be exact about the order: that run confirmed the fix
+after it had merged, on green CI and unit evidence. The live evidence did not gate the merge**, and
+is recorded here so nobody infers that it did.
+
+That run also measured why the priority table is right. One Kmip went
+`InCreation` → `CertificateAvailable` → `Deleting` → tombstone over 102 minutes, with `DELETE`
+answering **400** in the wrong state and then **500** twice in the right one before the resource
+proceeded to delete anyway; a sibling KMS took three `DELETE`s over 23 minutes, each answering 202
+while staying `Active`. The delete status code carries almost no information about whether the delete
+took, which is #111's premise from the other direction. Note also that a healthy Kmip's state is
+`CertificateAvailable`, not `Active` — anything treating `Active` as a universal success value is
+wrong. The predicate's `(.status | type) == "string"` guard is load-bearing by design, not
+decoration: this API omits declared fields conditionally (#152).
+
+Nothing in the suite distinguished the two shapes, because the existing `notFoundBody` tests all call
+the helper directly with a map — they covered the helper and neither caller. Six tests now drive
+`externalResourceStillExists` and `resolveDeleteOutcome` instead.
+
+### Correction to the 0.23.0 entry
+
+The 0.23.0 entry for #111 ends *"the delete path now consults the same predicate, so absence has one
+definition instead of two."* **That was not true when written** and becomes true only with this
+release. For 0.23.0 through 0.32.0, deletion of a tombstone resource was verified only by the
+trusted-delete fallback, and the predicate was never consulted on that path whatever it said.
+
+### A drift that cannot converge now says which field, and stops
+
+A resource whose spec can never match the API's response sat in a permanent observe → update loop
+reporting `Ready=False` with `reason=Creating` and no indication of which field was at fault. The
+drift comparison computed a reason and discarded it, for two independent causes: nothing wrote status
+on that branch, and the runtime re-fetches the object immediately after `Observe` returns, so an
+in-memory condition is dropped. The only condition that survived came from the Update leg.
+
+Now: every difference carries the field path it was found at (`nodePools[0].instance`, slice index as
+its own segment), the condition names it, and after `maxDriftRepeats` observations of the *same*
+difference the controller stops issuing the update that cannot fix it — `Ready=False` with
+`DriftNotConverging`, the field named, and a pointer to `responseTransform`, which is the usual
+remedy for a request/response shape divergence. The budget is keyed on generation, so editing the
+spec restarts it. New condition reasons: `Updating` (replacing the runtime's `Creating` on the update
+path — a resource that has existed for days is not being created) and `DriftNotConverging`.
+
+Cost: one extra `PATCH` per poll on a drifting resource, to maintain the counter. That buys
+termination after a fixed number of futile updates instead of an unbounded loop.
+
+**The budget was very nearly not a bound.** `CompareExisting` returns on the first difference it
+finds, so key order decides *which* difference is reported — and Go randomizes map iteration. A
+resource drifting on two sibling keys reported a different field path per observe (measured on the
+real Aruba Kaas shape: 2 distinct paths over 200 comparisons, split 173/27), the signature flipped,
+the counter reset, and the halt fired only when the reported field happened to repeat five times
+running. Keys are now walked in sorted order, which makes the reported difference a deterministic
+function of the two documents without changing what counts as a difference. It was independently
+wrong for the condition: `Ready` named a different field to each reader on each poll, for drift that
+had not changed. Caught by the Aruba KOG side reading the branch before running it.
+
+### The `dispatch` verb is now executed end to end
+
+`dispatch` shipped in 0.32.0 with 14 unit tests over its helpers and **nothing driving the wiring** —
+`grep -c dispatch` over the integration suite returned 0. There is now a mock vendor replicating
+GitHub Actions `workflow_dispatch`: a bodiless 204 trigger that identifies nothing, and runs that do
+**not** echo the dispatch inputs, so the correlation token arrives only in `display_title`. A mock
+that echoed the inputs back would let a broken correlation implementation pass.
+
+Three cases, none of which had ever run: correlation by a token that reached the run only through
+`display_title`, with status projected from the matched item; a token present in the document but off
+the configured `echoedAt` path **not** matching, so correlation cannot degrade into "find my token
+anywhere"; and — the one that matters most — an invocation that never becomes observable exhausting
+its budget, reporting `DispatchedButNotObserved` naming `correlation.echoedAt`, and leaving the
+vendor on **exactly one** trigger. Re-POSTing a non-idempotent trigger to discover whether the first
+one happened is the single thing this verb must never do.
+
+Two notes for anyone extending that suite. `ResourceExists` cannot be asserted on: `observeDispatch`
+returns `{exists: true, upToDate: true}` on **both** paths — on a match because the run was found, on
+a miss so `Create` is not re-issued — so the distinction lives in the status projection, the
+observe-miss annotation and the condition. And fire-once lives in `Observe`; `createDispatch` does
+not check `alreadyDispatched`, so calling `Create` twice directly fires twice and is a sequence no
+caller performs.
+
+The dispatch verb still has **not** been driven against a live vendor API.
+
+### Documentation
+
+- **The two runnable examples' CRs had never resolved** (#211). A resource CRD's version comes from
+  the OAS document's `info.version`, normalized — `1.1.4` → `v1-1-4`, `1.0` → `v1-0` — and only the
+  `*Configuration` CRD is always `v1alpha1`; both examples wrote their CRs against `v1alpha1`. The
+  sample also required `spec.id`, a response-only field that no author can supply before the resource
+  exists. Rendering both at 0.28.0 produced the same output, so neither manifest had *ever* applied.
+  A RestDefinition validates against a CRD that ships in the repo; a CR validates against one that
+  only exists after generation runs, and the cheap check is the one that passes. Also ships the first
+  `dispatch` example, including the vendor-side half that is easy to miss: GitHub does not echo
+  `workflow_dispatch` inputs, so the workflow must put the token into its own `run-name`.
+- **The verbose dump leaked credentials below 0.26.1, which is where we recommend it** (#214). Every
+  page suggesting `krateo.io/connector-verbose` now states the floor, and that the annotation is
+  per-object HTTP logging rather than a log level. The fix is in **0.26.1**, not 0.26.0.
+- **`responseTransform` is what request/response shape divergence is for** (#215), with a worked
+  example checked against a real divergent shape, and why `compareScope` is not the fix. Also: the
+  generated per-controller ConfigMap is provider-owned, so a hand-added key is dropped silently on
+  the next generation — set `rdc.env` in the chart values instead.
 
 ## 2026-10-19 — 0.32.0
 
@@ -750,6 +894,12 @@ vendor API, not by inspection.
   "still there" and never released the finalizer. `notFoundBody` already expressed exactly this and
   Observe already honoured it; the delete path now consults the same predicate, so absence has one
   definition instead of two.
+
+  > **Correction (2026-10-26, #218).** That last sentence was **not true when written**. The delete
+  > path passed the `restclient.Response` wrapper to the predicate instead of the response body, so
+  > it errored on every call and the check degraded silently to "unverifiable". Through 0.32.0,
+  > deletion of a tombstone resource was verified only by the trusted-delete fallback. Fixed in
+  > 0.33.0 — see that entry.
 
 - **One arbiter decides the finalizer** (#103). Three delete bugs in three releases (#77, #98, #101)
   were a single defect: the authoritative existence check sat at the *end* of `Delete()`, so any
