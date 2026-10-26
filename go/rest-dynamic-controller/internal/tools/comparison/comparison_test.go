@@ -807,3 +807,179 @@ func TestCompareExisting_EmptySliceIsAnOpinion(t *testing.T) {
 		})
 	}
 }
+
+// --- field paths (#213) ---
+//
+// The reason a difference is reported at all is to say WHICH field differs. Before these, a nested
+// difference was reported with the enclosing container's values and no field name, so the one piece of
+// information a reader needs was the one piece discarded.
+
+func TestReportsTheLeafPathNotTheEnclosingMap(t *testing.T) {
+	cr := map[string]interface{}{"properties": map[string]interface{}{"size": "small", "name": "n"}}
+	rm := map[string]interface{}{"properties": map[string]interface{}{"size": "large", "name": "n"}}
+
+	res, err := CompareExisting(cr, rm)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.IsEqual {
+		t.Fatal("expected a difference")
+	}
+	if got := res.Reason.FieldPath(); got != "properties.size" {
+		t.Errorf("FieldPath() = %q, want %q", got, "properties.size")
+	}
+	if res.Reason.FirstValue != "small" || res.Reason.SecondValue != "large" {
+		t.Errorf("values = %v/%v, want the LEAF's scalars, not the enclosing maps",
+			res.Reason.FirstValue, res.Reason.SecondValue)
+	}
+}
+
+func TestReportsTheSliceElementIndex(t *testing.T) {
+	cr := map[string]interface{}{"pools": []interface{}{
+		map[string]interface{}{"instance": "a"},
+		map[string]interface{}{"instance": "b"},
+	}}
+	rm := map[string]interface{}{"pools": []interface{}{
+		map[string]interface{}{"instance": "a"},
+		map[string]interface{}{"instance": "CHANGED"},
+	}}
+
+	res, _ := CompareExisting(cr, rm)
+
+	if res.IsEqual {
+		t.Fatal("expected a difference")
+	}
+	if got := res.Reason.FieldPath(); got != "pools[1].instance" {
+		t.Errorf("FieldPath() = %q, want %q — without the index both elements report the same location", got, "pools[1].instance")
+	}
+}
+
+func TestScalarInRequestObjectInResponseIsReportedAgainstTheField(t *testing.T) {
+	// The shape a vendor can ship in its own spec: request takes a name, response returns the object.
+	cr := map[string]interface{}{"nodePools": []interface{}{map[string]interface{}{"instance": "K2A4"}}}
+	rm := map[string]interface{}{"nodePools": []interface{}{map[string]interface{}{
+		"instance": map[string]interface{}{"name": "K2A4", "cpu": float64(4)},
+	}}}
+
+	res, _ := CompareExisting(cr, rm)
+
+	if res.IsEqual {
+		t.Fatal("expected a difference")
+	}
+	if got := res.Reason.FieldPath(); got != "nodePools[0].instance" {
+		t.Errorf("FieldPath() = %q, want %q", got, "nodePools[0].instance")
+	}
+}
+
+func TestAKeyTheResponseDoesNotEchoIsNotADifference(t *testing.T) {
+	// Recased, renamed and omitted keys are all absent-from-response, which the walk skips by design —
+	// the same rule that stops configurationRef counting as drift. Pinned because the fix for the case
+	// above must not turn these into drift.
+	cr := map[string]interface{}{
+		"properties":       map[string]interface{}{"nodeCidr": map[string]interface{}{"name": "d"}},
+		"securityGroup":    map[string]interface{}{"name": "sg"},
+		"configurationRef": map[string]interface{}{"name": "c", "namespace": "n"},
+	}
+	rm := map[string]interface{}{
+		"properties":    map[string]interface{}{"nodecidr": map[string]interface{}{"address": "10.0.0.0/16"}},
+		"securityGroup": map[string]interface{}{"uri": "/sg/1"},
+	}
+
+	res, err := CompareExisting(cr, rm)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsEqual {
+		t.Errorf("expected equal, got a difference at %q (%s)", res.Reason.FieldPath(), res.Reason.Reason)
+	}
+}
+
+func TestFieldPathIsNilSafeAndEmptyWhenUnattributable(t *testing.T) {
+	var r *Reason
+	if got := r.FieldPath(); got != "" {
+		t.Errorf("nil receiver FieldPath() = %q, want empty", got)
+	}
+	if got := (&Reason{Reason: "mg is nil"}).FieldPath(); got != "" {
+		t.Errorf("pathless FieldPath() = %q, want empty", got)
+	}
+}
+
+// kaasShape returns the real Aruba Kaas divergence: NodePoolsDto declares instance and dataCenter as
+// strings, NodePoolsResponseDto returns them as objects, so BOTH siblings of nodePools[0] drift and both
+// are reportable as "the first difference".
+func kaasShape() (map[string]interface{}, map[string]interface{}) {
+	mg := map[string]interface{}{
+		"nodePools": []interface{}{map[string]interface{}{
+			"instance":   "A4",
+			"dataCenter": "ITBG-Bergamo",
+			"name":       "pool-1",
+		}},
+	}
+	rm := map[string]interface{}{
+		"nodePools": []interface{}{map[string]interface{}{
+			"instance":   map[string]interface{}{"id": "A4"},
+			"dataCenter": map[string]interface{}{"id": "ITBG-Bergamo"},
+			"name":       "pool-1",
+		}},
+	}
+	return mg, rm
+}
+
+// TestSiblingDifferencesReportAStableField is the regression test for a non-convergence budget that was
+// not a bound. CompareExisting returns on the FIRST difference, so with Go's randomized map iteration two
+// drifting siblings reported a different field path per call -- measured at a 173/27 split over 200
+// comparisons before keys were sorted. driftSignature keys on that path and driftRepeats resets when it
+// changes, so the budget halted when the coin landed the same way five times running rather than after a
+// fixed number of futile updates.
+//
+// A single comparison cannot catch this; only repetition can, which is why the bug survived the original
+// test suite.
+func TestSiblingDifferencesReportAStableField(t *testing.T) {
+	seen := map[string]int{}
+	for i := 0; i < 200; i++ {
+		mg, rm := kaasShape() // rebuilt each iteration: identical maps, freshly randomized iteration order
+		res, err := CompareExisting(mg, rm)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.IsEqual {
+			t.Fatal("expected a difference between a string and an object")
+		}
+		seen[res.Reason.FieldPath()]++
+	}
+
+	if len(seen) != 1 {
+		t.Fatalf("the reported field must be a deterministic function of the two documents, got %d distinct over 200 comparisons: %v", len(seen), seen)
+	}
+	if _, ok := seen["nodePools[0].dataCenter"]; !ok {
+		t.Errorf("expected the lexicographically first drifting key, got %v", seen)
+	}
+}
+
+// TestSortedWalkDoesNotChangeWhatCountsAsADifference guards the one thing the sort must not do: alter
+// equality itself. Sorting picks WHICH difference is reported first, nothing more.
+func TestSortedWalkDoesNotChangeWhatCountsAsADifference(t *testing.T) {
+	// Equal documents stay equal whatever the key order.
+	mg := map[string]interface{}{"b": "2", "a": "1", "c": map[string]interface{}{"z": "9", "y": "8"}}
+	rm := map[string]interface{}{"a": "1", "b": "2", "c": map[string]interface{}{"y": "8", "z": "9"}}
+	res, err := CompareExisting(mg, rm)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsEqual {
+		t.Errorf("expected equal, got %s", res.String())
+	}
+
+	// A key the response does not echo is still not a difference (the configurationRef case).
+	mg2 := map[string]interface{}{"aaa": "only-in-cr", "zzz": "same"}
+	rm2 := map[string]interface{}{"zzz": "same"}
+	res2, err := CompareExisting(mg2, rm2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res2.IsEqual {
+		t.Errorf("a key absent from the response is not drift, got %s", res2.String())
+	}
+}
