@@ -457,6 +457,27 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		}, nil
 	}
 
+	// spec.resource can change the generated schema while the OAS is byte-identical -- additionalStatusFields
+	// and includedSpecFields are append-only rather than immutable, precisely so a KOG chart adding a status
+	// field is upgradable in place. status.resourceHash exists for this, Create stores it and Update compares
+	// it and regenerates. Nothing reached that comparison: Update only runs when Observe reports drift, and
+	// Observe checked the OAS content, the auth-secret references and the DEPLOYMENT digest (RBAC, ConfigMap,
+	// Deployment -- never the CRD), so an append was accepted, reported "up to date", and did nothing. The CRD
+	// kept its old status schema while its own RestDefinition described a different one, with no event and no
+	// warning, and the only route to the new schema was deleting the RestDefinition -- which destroys the CRD
+	// and every CR of that kind (#224).
+	//
+	// Deliberately hashes the whole of spec.resource rather than only the schema-shaping fields: including a
+	// field that cannot change the CRD costs one redundant regenerate-and-redeploy, while omitting one that
+	// can reintroduces exactly this silence. Same trade the OAS-content check above already makes.
+	if rh := resourceHash(cr); cr.Status.ResourceHash != rh {
+		e.log.Debug("spec.resource changed", "status", cr.Status.ResourceHash, "current", rh)
+		return reconciler.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
 	// A Configuration instance's usernameRef/passwordRef/tokenRef can change (or an instance can appear/
 	// disappear) independently of the RestDefinition's own spec, so re-collect and re-hash on every
 	// reconcile and treat a change as drift, same pattern as the OAS-content check above. Gated on
