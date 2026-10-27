@@ -60,6 +60,17 @@ own fields, and generation reports no diagnostic at all. For Aruba's AiKey that 
 `PUT {"metadata":{"name":"…"}}` and silently drop the `properties` object holding the key's quotas.
 Until that is fixed, such a resource is safe to adopt and read, not to update.
 
+> **Correction (2026-10-27).** "the `properties` object holding the key's quotas" is wrong, and was
+> wrong when written. Tracing the document's reference graph while fixing #236:
+> `ApiKeyQuotasDto` is referenced **0 times** out of its 99 `$ref`s and `ApiKeyQuotasDto+QuotaValue`
+> only by `ApiKeyQuotasDto` itself, so the pair is an orphan island in `components` mentioned nowhere
+> under `paths`. That is consistent with the fix above rather than contrary to it — libopenapi resolves
+> every component, not only reachable ones, which is exactly why an unreachable schema could fail the
+> whole model build — but it means the quotas are in no request or response shape. The request's own
+> `AiKeyPropertiesDto` declares no fields at all. What the update actually omitted was
+> `metadata.location` and `metadata.tags`. Same defect, different fields: the names in the original
+> sentence were inferred from a component name that was never traced.
+
 ## 2026-10-27 — 0.34.0
 
 Three fixes to paths that could not work, and the async engine driven end to end for the first time.
