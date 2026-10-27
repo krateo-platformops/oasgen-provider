@@ -4,7 +4,6 @@ metadata:
   name: asyncrq-1
   namespace: default
 spec:
-  id: asyncrq-1
   name: asyncrq-1
   description: polled across reconciles
   configurationRef: {name: my-asyncrq-config, namespace: default}

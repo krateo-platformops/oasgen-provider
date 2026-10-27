@@ -519,7 +519,14 @@ func (ms *MockServer) asyncCreateResource(w http.ResponseWriter, r *http.Request
 	// Operation-Location as well as the body handle, so a definition can read the handle from either.
 	w.Header().Set("Operation-Location", "http://localhost:30007/operations/"+opID)
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]string{"operationId": opID})
+	// The handle AND the resource's id. Real async APIs do this -- the create knows what it allocated even
+	// though it has not finished provisioning it -- and it is what makes a postGet keyed by a
+	// server-assigned id possible at all: the id is projected into status from this response (#229).
+	//
+	// An API that returned the handle ALONE, with the id nowhere until the resource is fetched, cannot be
+	// re-read by id by any mechanism: you would need the id to fetch the thing that would tell you the id.
+	// That shape needs findby, which matches on identifiers the CR already has.
+	_ = json.NewEncoder(w).Encode(map[string]string{"operationId": opID, "id": resource.ID})
 }
 
 // GET /operations/{id} - report an operation's status, "running" until it has been polled enough times.

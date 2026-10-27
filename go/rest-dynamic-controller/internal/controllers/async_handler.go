@@ -11,6 +11,7 @@ import (
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/apiaction"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/fieldmapping"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pathparsing"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -100,6 +101,26 @@ func driveAsync(ctx context.Context, cli restclient.UnstructuredClientInterface,
 	if getCall == nil || getInfo == nil {
 		return triggerResp, fmt.Errorf("async postGet requested but no get action is defined")
 	}
+	// Project the trigger response into status BEFORE building the re-read.
+	//
+	// This is an ORDERING fix, not a new data path. A get keyed by a server-assigned identifier resolves
+	// through the mechanism that already exists -- additionalStatusFields puts the response's fields in
+	// status, and BuildCallConfig populates path parameters from spec OR status -- but postGet ran before
+	// anything had projected the trigger response, so status was empty and the parameter unresolvable
+	// (#229). The caller projects the same response after this function returns, which is too late to help
+	// the re-read it performs.
+	//
+	// In memory only: BuildCallConfig reads mg directly, so nothing needs persisting here, and the caller
+	// still writes status from whatever response this returns.
+	if triggerBody, ok := triggerResp.ResponseBody.(map[string]interface{}); ok {
+		if nerr := fieldmapping.NormalizeResponseBody(ctx, clientInfo.Resource.VerbsDescription, []string{action}, triggerBody); nerr != nil {
+			return triggerResp, fmt.Errorf("async postGet: normalizing the trigger response: %w", nerr)
+		}
+		if perr := populateStatusFields(clientInfo, mg, triggerBody); perr != nil {
+			return triggerResp, fmt.Errorf("async postGet: projecting the trigger response into status: %w", perr)
+		}
+	}
+
 	getReq := builder.BuildCallConfig(ctx, getInfo, mg, clientInfo.ConfigurationSpec, nil)
 	getResp, gerr := getCall(ctx, &http.Client{Timeout: async.RequestTimeout}, getInfo.Path, getReq)
 	if gerr != nil {

@@ -357,13 +357,18 @@ paths:
                 - name
       responses:
         '202':
-          description: Operation accepted. Carries a handle and NO resource body.
+          description: >
+            Operation accepted. Carries the operation handle and the id the API allocated -- not the
+            resource itself, which is not provisioned yet. The id is what makes a postGet keyed by a
+            server-assigned identifier possible: it is projected into status from this response (#229).
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   operationId:
+                    type: string
+                  id:
                     type: string
   /operations/{operationId}:
     get:

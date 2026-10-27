@@ -41,7 +41,6 @@ spec:
             type: object
             required:
             - configurationRef
-            - id
             - name
             properties:
               configurationRef:
@@ -59,9 +58,6 @@ spec:
                       not provided, the same namespace will be used.
                     type: string
               description:
-                type: string
-              id:
-                description: 'PARAMETER: path'
                 type: string
               name:
                 type: string
