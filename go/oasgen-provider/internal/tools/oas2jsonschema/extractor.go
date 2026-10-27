@@ -50,45 +50,92 @@ func (g *OASSchemaGenerator) findParameterInOAS(field ConfigurationField) (*Para
 	return nil, fmt.Errorf("parameter '%s' in '%s' not found for any of the specified actions", field.FromOpenAPI.Name, field.FromOpenAPI.In)
 }
 
-// getBaseSchemaForSpec returns the base schema for the spec, which is the request body of the 'create' action.
-// TODO: what about no create action but only update? (maybe this could be configured in the GeneratorConfig)
+// getBaseSchemaForSpec returns the base schema for the spec: the request body of the verb that DEFINES
+// the resource.
 //
-// Resolved against the CREATE verb's own document, which is the whole of #108's motivating case: Aruba's
-// CloudServer has findby/get/delete in compute-provider.json (1.0.0) and create alone in
-// compute-provider_v1.1.json (1.1.0), where the 1.1 document holds exactly that one path. Reading the
-// default document here meant the create body -- the CRD's entire spec -- came from the document that
-// does not contain it.
+// Precedence is explicit -- create, then dispatch, then update -- rather than whichever happens to be
+// declared first. That distinction is the whole reason this is not a single loop with a widened
+// condition: a resource declaring update before create in its verbsDescription would otherwise derive
+// its spec from the update body, silently, on the strength of YAML ordering.
+//
+// The update fallback exists because a document with no create endpoint is not necessarily a read-only
+// resource (#236). Aruba's CMP profile declares PUT/GET/DELETE for aiKeys and no POST at all; treating
+// that as read-only gave it a spec of nothing but parameters and identifiers, so the declared update
+// PUT a body missing every vendor field it was supposed to carry -- and generation reported nothing,
+// because each half was behaving as written.
+//
+// The fallback is taken only when NO create or dispatch verb is DECLARED. A create verb that is
+// declared but carries no body in an accepted MIME type keeps its existing behaviour (an empty base),
+// because borrowing the update body there would inject fields into the spec of a resource that defines
+// itself differently.
 func (g *OASSchemaGenerator) getBaseSchemaForSpec() (*Schema, error) {
-	for _, verb := range g.resourceConfig.Verbs {
-		// create OR dispatch. A dispatch resource has no create verb at all -- CEL refuses the
-		// combination, because the dispatch IS its create -- so without this the entire spec of a
-		// dispatch kind would be empty and the correlation token would have nowhere to live.
-		if verb.Action != ActionCreate && verb.Action != ActionDispatch {
-			continue
-		}
-		path, ok := g.docFor(verb.Action).FindPath(verb.Path)
-		if !ok {
-			return nil, fmt.Errorf("path '%s' not found in OpenAPI spec", verb.Path)
-		}
-		ops := path.GetOperations()
-		op, ok := ops[strings.ToLower(verb.Method)]
-		if !ok {
-			return nil, fmt.Errorf("operation '%s' not found for path '%s'", verb.Method, verb.Path)
-		}
+	schema, err := g.requestBodySchemaFor(ActionCreate, ActionDispatch)
+	if err != nil {
+		return nil, err
+	}
+	if schema != nil {
+		return schema, nil
+	}
 
-		rb := op.GetRequestBody()
-		for _, mimeType := range g.generatorConfig.AcceptedMIMETypes {
-			if schema, ok := rb.Content[mimeType]; ok {
-				if getPrimaryType(schema.Type) == "array" {
-					//log.Printf("Warning: 'create' action schema is of type 'array', wrapping it into an object with an 'items' property")
-					schema.Properties = append(schema.Properties, Property{Name: "items", Schema: &Schema{Type: []string{"array"}, Items: schema.Items}})
-					schema.Type = []string{"object"}
-				}
-				return schema.deepCopy(), nil
+	// Declared but bodyless: not the #236 case, so do not fall back.
+	if g.declaresAnyAction(ActionCreate, ActionDispatch) {
+		return &Schema{}, nil
+	}
+
+	schema, err = g.requestBodySchemaFor(ActionUpdate)
+	if err != nil {
+		return nil, err
+	}
+	if schema != nil {
+		return schema, nil
+	}
+	return &Schema{}, nil
+}
+
+// declaresAnyAction reports whether the resource declares a verb for any of the given actions.
+func (g *OASSchemaGenerator) declaresAnyAction(actions ...string) bool {
+	for _, verb := range g.resourceConfig.Verbs {
+		for _, action := range actions {
+			if strings.EqualFold(verb.Action, action) {
+				return true
 			}
 		}
 	}
-	return &Schema{}, nil
+	return false
+}
+
+// requestBodySchemaFor returns the request body schema of the first of the given actions that declares
+// one, trying the actions IN THE ORDER GIVEN rather than in verb-declaration order. A nil schema with a
+// nil error means none of them contributed a body.
+func (g *OASSchemaGenerator) requestBodySchemaFor(actions ...string) (*Schema, error) {
+	for _, action := range actions {
+		for _, verb := range g.resourceConfig.Verbs {
+			if !strings.EqualFold(verb.Action, action) {
+				continue
+			}
+			path, ok := g.docFor(verb.Action).FindPath(verb.Path)
+			if !ok {
+				return nil, fmt.Errorf("path '%s' not found in OpenAPI spec", verb.Path)
+			}
+			ops := path.GetOperations()
+			op, ok := ops[strings.ToLower(verb.Method)]
+			if !ok {
+				return nil, fmt.Errorf("operation '%s' not found for path '%s'", verb.Method, verb.Path)
+			}
+
+			rb := op.GetRequestBody()
+			for _, mimeType := range g.generatorConfig.AcceptedMIMETypes {
+				if schema, ok := rb.Content[mimeType]; ok {
+					if getPrimaryType(schema.Type) == "array" {
+						schema.Properties = append(schema.Properties, Property{Name: "items", Schema: &Schema{Type: []string{"array"}, Items: schema.Items}})
+						schema.Type = []string{"object"}
+					}
+					return schema.deepCopy(), nil
+				}
+			}
+		}
+	}
+	return nil, nil
 }
 
 // getBaseSchemaForStatus returns the base schema for the status, which is the response body of the 'get' or 'findby' action.

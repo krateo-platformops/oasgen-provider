@@ -38,7 +38,18 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 		addIdentifiersToSpec(baseSchema, g.resourceConfig.Identifiers)
 	}
 
-	// A READ-ONLY resource (no create verb) has no request body to derive its spec from, so the spec
+	// A resource with no create verb still needs its identifiers to be expressible.
+	//
+	// Since #236 the spec of such a resource is NOT necessarily empty: when an update verb is declared,
+	// getBaseSchemaForSpec derives the base from the update body, so the resource is adopt-then-update
+	// rather than read-only. The identifiers may therefore already be present, which
+	// addIdentifierSelectorsToSpec skips ("already expressible") -- this pass adds only the ones the
+	// body does not define.
+	//
+	// The original reasoning still holds for a genuinely read-only resource (no body-carrying write
+	// verb), which is the case the next paragraph describes:
+	//
+	// A READ-ONLY resource has no request body to derive its spec from, so the spec
 	// would otherwise contain nothing but path/query parameters and configurationRef. Its declared
 	// identifiers would then name fields that exist nowhere: findby compares each listed item against the
 	// CR and never matches, while get binds its {id} from a status field that only that findby could have
@@ -329,9 +340,19 @@ func (g *OASSchemaGenerator) addIdentifierSelectorsToSpec(schema *Schema) []erro
 		}
 		leaf := pathSegments[len(pathSegments)-1]
 
+		// The wording distinguishes the two reasons a resource has no create verb, because they mean
+		// different things to whoever reads the generated CRD. With no body-carrying write verb at all
+		// the resource really is read-only. With an update verb, the spec is derived from ITS body
+		// (#236) and the resource is adopt-then-update: the identifier still selects which object is
+		// meant, but calling the resource read-only would be wrong.
+		description := "SELECTOR: identifies which existing object this resource refers to. This resource declares no create verb, so this field selects an object rather than defining one."
+		if g.declaresAnyAction(ActionUpdate) {
+			description = "SELECTOR: identifies which existing object this resource refers to. This resource has no create verb, so it adopts an existing object and updates it; this field selects which one."
+		}
+
 		selector := &Schema{
 			Type:        []string{"string"},
-			Description: "SELECTOR: identifies which existing object this resource refers to. This resource declares no create verb, so this field selects an object rather than defining one.",
+			Description: description,
 		}
 
 		// Resolve the declared type by walking the SAME path through the observe response, so a nested
