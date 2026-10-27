@@ -323,8 +323,14 @@ type DependentLookup struct {
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z][a-zA-Z0-9]*$`
 	Name string `json:"name"`
 	// Method is the HTTP method of the lookup's operation.
+	//
+	// GET only, deliberately. A lookup is a READ, and the APIs that express a search as POST need a
+	// request body, which there is no field here to declare. Admitting POST without that would ship a
+	// discoverable value that cannot work -- the mistake apiLookup made. Neither known consumer needs it:
+	// GitRef chains two GETs, KeycloakClient lists with a GET. Widen it together with a way to declare
+	// the body, when something actually needs one.
 	// +required
-	// +kubebuilder:validation:Enum=GET;POST
+	// +kubebuilder:validation:Enum=GET
 	Method string `json:"method"`
 	// Path is the lookup's path, which MUST exist in the document under Method exactly as a verb's does --
 	// parameters are resolved against the document, so a path that is not declared there has no parameter

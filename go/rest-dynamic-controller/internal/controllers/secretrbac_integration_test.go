@@ -104,7 +104,7 @@ func TestEnsureSecretRefRBACAndResolve_ProvisionsAndResolves(t *testing.T) {
 		},
 	}
 
-	resolved, err := h.ensureSecretRefRBACAndResolve(context.Background(), clientInfo, mapping, mg, false)
+	resolved, err := h.ensureSecretRefRBACAndResolve(context.Background(), nil, clientInfo, mapping, mg, false)
 	if err != nil {
 		t.Fatalf("ensureSecretRefRBACAndResolve: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestEnsureSecretRefRBACAndResolve_UpdateHardFailsWhenRoleMissing(t *testing
 
 	// expectExisting=true (the Update path) with no prior Create must hard-fail (decision D), not silently
 	// provision the Role for the first time.
-	_, err := h.ensureSecretRefRBACAndResolve(context.Background(), clientInfo, mapping, mg, true)
+	_, err := h.ensureSecretRefRBACAndResolve(context.Background(), nil, clientInfo, mapping, mg, true)
 	if err == nil {
 		t.Fatal("expected a hard error when the Role is unexpectedly missing on the Update path")
 	}
@@ -156,7 +156,7 @@ func TestDeleteSecretRefRBAC_RemovesProvisionedRole(t *testing.T) {
 		},
 	}
 
-	if _, err := h.ensureSecretRefRBACAndResolve(context.Background(), clientInfo, mapping, mg, false); err != nil {
+	if _, err := h.ensureSecretRefRBACAndResolve(context.Background(), nil, clientInfo, mapping, mg, false); err != nil {
 		t.Fatalf("provisioning: %v", err)
 	}
 

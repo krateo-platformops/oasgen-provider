@@ -398,10 +398,16 @@ spec:
                           - whereField
                           type: object
                         method:
-                          description: Method is the HTTP method of the lookup's operation.
+                          description: |-
+                            Method is the HTTP method of the lookup's operation.
+
+                            GET only, deliberately. A lookup is a READ, and the APIs that express a search as POST need a
+                            request body, which there is no field here to declare. Admitting POST without that would ship a
+                            discoverable value that cannot work -- the mistake apiLookup made. Neither known consumer needs it:
+                            GitRef chains two GETs, KeycloakClient lists with a GET. Widen it together with a way to declare
+                            the body, when something actually needs one.
                           enum:
                           - GET
-                          - POST
                           type: string
                         name:
                           description: |-

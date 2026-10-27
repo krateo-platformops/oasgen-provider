@@ -21,7 +21,14 @@ import (
 //
 // expectExisting is false on Create (first provisioning; a missing Role is normal) and true on Update (the
 // Role should already exist from Create; if it doesn't, that is a hard error — see secretrbac.EnsureSecretRole).
-func (h *handler) ensureSecretRefRBACAndResolve(ctx context.Context, clientInfo *getter.Info, mapping []getter.FieldMappingItem, mg *unstructured.Unstructured, expectExisting bool) (map[string]interface{}, error) {
+//
+// Dependent lookups are executed HERE, not at the call sites, for the same reason the RBAC grant is: this
+// is the one choke point every request-building path already passes through. A lookup run at the call
+// sites instead would be three copies to keep in step, and a path that forgot one would send its request
+// with the field missing -- which builder.applyFieldMapping treats as "not applicable here" and skips
+// silently. Every defect this surface has produced came from helpers that were individually correct and
+// never driven together (#218, #220, #224, #229); one entry point is the structural answer to that.
+func (h *handler) ensureSecretRefRBACAndResolve(ctx context.Context, clients *clientSet, clientInfo *getter.Info, mapping []getter.FieldMappingItem, mg *unstructured.Unstructured, expectExisting bool) (map[string]interface{}, error) {
 	if secretNames := fieldmapping.CollectSecretRefNames(clientInfo.Resource.VerbsDescription, mg); len(secretNames) > 0 {
 		gvr, err := h.pluralizer.GVKtoGVR(mg.GroupVersionKind())
 		if err != nil {
@@ -33,7 +40,12 @@ func (h *handler) ensureSecretRefRBACAndResolve(ctx context.Context, clientInfo 
 		}
 	}
 
-	resolved, err := fieldmapping.ResolveRequestResolvers(ctx, h.dynamicClient, mapping, mg)
+	lookupValues, err := h.runDependentLookups(ctx, clients, clientInfo, mapping, mg)
+	if err != nil {
+		return nil, fmt.Errorf("running dependent lookups: %w", err)
+	}
+
+	resolved, err := fieldmapping.ResolveRequestResolvers(ctx, h.dynamicClient, mapping, mg, lookupValues)
 	if err != nil {
 		return nil, fmt.Errorf("resolving field mapping resolvers: %w", err)
 	}
