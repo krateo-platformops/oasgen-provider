@@ -45,6 +45,21 @@ type MockServer struct {
 	// record carrying status "deleted", rather than 404 (#111, Aruba security/Kmip).
 	tombstoneOnDelete bool
 
+	// --- async operations ---
+	//
+	// The RDC async engine had NO integration coverage before this: no testdata declared `async:`, so
+	// driveAsync (inline poll) and driveAsyncRequeue (poll across reconciles) were exercised only by unit
+	// tests over their helpers -- the same configuration that hid the whole dispatch verb being undriven.
+	//
+	// POST /async/resource stores the resource and answers 202 with an operation handle and NO resource
+	// body, which is the shape the engine exists for: the create tells you an operation started, not what
+	// it produced. GET /operations/{id} then answers "running" until it has been polled
+	// asyncPollsBeforeSuccess times, and "succeeded" after -- so a test can prove the controller actually
+	// polls rather than succeeding on the first look.
+	operationPolls          map[string]int
+	asyncPollsBeforeSuccess int
+	asyncOpSeq              int
+
 	// --- dispatch (fire-and-correlate) ---
 	//
 	// These reproduce GitHub Actions workflow_dispatch, which is the shape the dispatch verb was built
@@ -87,9 +102,11 @@ type WorkflowRun struct {
 
 func NewMockServer(port int) *MockServer {
 	return &MockServer{
-		resources: make(map[string]*Resource),
-		pending:   make(map[string]*Resource),
-		port:      port,
+		resources:               make(map[string]*Resource),
+		pending:                 make(map[string]*Resource),
+		operationPolls:          make(map[string]int),
+		asyncPollsBeforeSuccess: 2,
+		port:                    port,
 	}
 }
 
@@ -461,6 +478,90 @@ func (ms *MockServer) healthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /async/resource - create a resource asynchronously.
+//
+// Answers 202 with {"operationId": "..."} and NO resource body. The resource IS stored, so a postGet or
+// a status re-read can find it once the operation reports success.
+func (ms *MockServer) asyncCreateResource(w http.ResponseWriter, r *http.Request) {
+	// Authenticated like every other resource endpoint. Load-bearing for what this fixture is FOR: the
+	// async paths resolve their own client now (#220), and a client handed out without SetAuth would go
+	// out unauthenticated. An endpoint that skipped this check could not tell that apart from a correct
+	// one -- an assertion that cannot fail.
+	if !ms.authenticate(r) {
+		ms.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var resource Resource
+	if err := json.NewDecoder(r.Body).Decode(&resource); err != nil {
+		ms.writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if resource.Name == "" {
+		ms.writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	ms.mutex.Lock()
+	if resource.ID == "" {
+		resource.ID = resource.Name
+	}
+	resource.Status = "active"
+	resource.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	ms.resources[resource.ID] = &resource
+	ms.asyncOpSeq++
+	opID := fmt.Sprintf("op-%d", ms.asyncOpSeq)
+	ms.operationPolls[opID] = 0
+	ms.mutex.Unlock()
+
+	log.Printf("ASYNC create: id=%s operation=%s (202, no resource body)", resource.ID, opID)
+	w.Header().Set("Content-Type", "application/json")
+	// Operation-Location as well as the body handle, so a definition can read the handle from either.
+	w.Header().Set("Operation-Location", "http://localhost:30007/operations/"+opID)
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"operationId": opID})
+}
+
+// GET /operations/{id} - report an operation's status, "running" until it has been polled enough times.
+func (ms *MockServer) operationStatus(w http.ResponseWriter, r *http.Request) {
+	if !ms.authenticate(r) {
+		ms.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	id := strings.TrimPrefix(r.URL.Path, "/operations/")
+
+	ms.mutex.Lock()
+	seen, known := ms.operationPolls[id]
+	if !known {
+		ms.mutex.Unlock()
+		ms.writeError(w, http.StatusNotFound, "no such operation")
+		return
+	}
+	seen++
+	ms.operationPolls[id] = seen
+	status := "running"
+	if seen > ms.asyncPollsBeforeSuccess {
+		status = "succeeded"
+	}
+	ms.mutex.Unlock()
+
+	log.Printf("ASYNC poll: operation=%s poll=%d status=%s", id, seen, status)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"operationId": id, "status": status})
+}
+
+// GET /admin/operation-polls/{id} - how many times the VENDOR was polled for this operation. A test
+// asserting the controller polled cannot learn that from the CR.
+func (ms *MockServer) operationPollCount(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/admin/operation-polls/")
+	ms.mutex.RLock()
+	n := ms.operationPolls[id]
+	ms.mutex.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int{"polls": n})
+}
+
 // POST /workflows/{id}/dispatches - trigger a workflow run.
 //
 // Answers 204 with an EMPTY body, exactly as GitHub does. Nothing in the response identifies the run
@@ -557,17 +658,19 @@ func (ms *MockServer) dispatchCountHandler(w http.ResponseWriter, r *http.Reques
 // POST /admin/config - Configura comportamento del server per i test
 func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 	var config struct {
-		SimulateErrors         *bool `json:"simulateErrors,omitempty"`
-		ResponseDelay          *int  `json:"responseDelayMs,omitempty"`
-		AuthFailures           *bool `json:"authFailures,omitempty"`
-		AsyncOperations        *bool `json:"asyncOperations,omitempty"`
-		CompletePendingAsync   *bool `json:"completePendingAsync,omitempty"`
-		LingerOnDelete         *bool `json:"lingerOnDelete,omitempty"`
-		DeleteErrorsButRemoves *bool `json:"deleteErrorsButRemoves,omitempty"`
-		TombstoneOnDelete      *bool `json:"tombstoneOnDelete,omitempty"`
-		SwallowDispatch        *bool `json:"swallowDispatch,omitempty"`
-		EchoTokenInOutputs     *bool `json:"echoTokenInOutputs,omitempty"`
-		ResetDispatch          *bool `json:"resetDispatch,omitempty"`
+		SimulateErrors          *bool `json:"simulateErrors,omitempty"`
+		ResponseDelay           *int  `json:"responseDelayMs,omitempty"`
+		AuthFailures            *bool `json:"authFailures,omitempty"`
+		AsyncOperations         *bool `json:"asyncOperations,omitempty"`
+		CompletePendingAsync    *bool `json:"completePendingAsync,omitempty"`
+		LingerOnDelete          *bool `json:"lingerOnDelete,omitempty"`
+		DeleteErrorsButRemoves  *bool `json:"deleteErrorsButRemoves,omitempty"`
+		TombstoneOnDelete       *bool `json:"tombstoneOnDelete,omitempty"`
+		SwallowDispatch         *bool `json:"swallowDispatch,omitempty"`
+		EchoTokenInOutputs      *bool `json:"echoTokenInOutputs,omitempty"`
+		ResetDispatch           *bool `json:"resetDispatch,omitempty"`
+		AsyncPollsBeforeSuccess *int  `json:"asyncPollsBeforeSuccess,omitempty"`
+		ResetAsyncOperations    *bool `json:"resetAsyncOperations,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
@@ -589,6 +692,15 @@ func (ms *MockServer) configureServer(w http.ResponseWriter, r *http.Request) {
 
 		}
 		ms.pending = make(map[string]*Resource)
+		ms.mutex.Unlock()
+	}
+	if config.AsyncPollsBeforeSuccess != nil {
+		ms.asyncPollsBeforeSuccess = *config.AsyncPollsBeforeSuccess
+	}
+	if config.ResetAsyncOperations != nil && *config.ResetAsyncOperations {
+		ms.mutex.Lock()
+		ms.operationPolls = make(map[string]int)
+		ms.asyncOpSeq = 0
 		ms.mutex.Unlock()
 	}
 	if config.SwallowDispatch != nil {
@@ -685,6 +797,12 @@ func (ms *MockServer) router(w http.ResponseWriter, r *http.Request) {
 		ms.healthCheck(w, r)
 	case r.URL.Path == "/admin/config" && r.Method == http.MethodPost:
 		ms.configureServer(w, r)
+	case r.URL.Path == "/async/resource" && r.Method == http.MethodPost:
+		ms.asyncCreateResource(w, r)
+	case strings.HasPrefix(r.URL.Path, "/operations/") && r.Method == http.MethodGet:
+		ms.operationStatus(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/operation-polls/") && r.Method == http.MethodGet:
+		ms.operationPollCount(w, r)
 	case r.URL.Path == "/admin/dispatch-count" && r.Method == http.MethodGet:
 		ms.dispatchCountHandler(w, r)
 	case strings.HasPrefix(r.URL.Path, "/status/"):
@@ -748,6 +866,8 @@ func (ms *MockServer) Start() error {
 	log.Printf("  POST   /workflows/{id}/dispatches (204, no body -- GitHub workflow_dispatch)")
 	log.Printf("  GET    /workflows/{id}/runs (list runs; token arrives in display_title)")
 	log.Printf("  GET    /admin/dispatch-count")
+	log.Printf("  POST   /async/resource (202 + operation handle, no body)")
+	log.Printf("  GET    /operations/{id} (running until polled enough, then succeeded)")
 	log.Printf("  POST   /v2/resource (create; declared only in the SECOND OAS document)")
 
 	return http.ListenAndServe(addr, nil)

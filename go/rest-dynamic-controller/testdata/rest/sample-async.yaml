@@ -1,0 +1,10 @@
+kind: Asyncsample
+apiVersion: sample.krateo.io/v1-0
+metadata:
+  name: async-1
+  namespace: default
+spec:
+  id: async-1
+  name: async-1
+  description: created through an asynchronous operation
+  configurationRef: {name: my-async-config, namespace: default}

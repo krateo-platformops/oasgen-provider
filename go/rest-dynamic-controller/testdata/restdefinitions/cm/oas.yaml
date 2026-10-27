@@ -333,6 +333,60 @@ paths:
                           type: string
                         created_at:
                           type: string
+  # --- async operations ---
+  #
+  # The 202-with-a-handle shape the async engine exists for: the create reports that an operation
+  # started, not what it produced, so the controller must poll the operation and only then read the
+  # resource. Before this the engine had no integration coverage at all -- no testdata declared `async:`.
+  /async/resource:
+    post:
+      summary: Create a resource asynchronously
+      operationId: asyncCreateResource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+              required:
+                - name
+      responses:
+        '202':
+          description: Operation accepted. Carries a handle and NO resource body.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operationId:
+                    type: string
+  /operations/{operationId}:
+    get:
+      summary: Status of an asynchronous operation
+      operationId: getOperationStatus
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The operation's current status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operationId:
+                    type: string
+                  status:
+                    type: string
 components:
   schemas:
     Resource:

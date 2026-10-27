@@ -1,0 +1,9 @@
+apiVersion: sample.krateo.io/v1alpha1
+kind: AsyncrqsampleConfiguration
+metadata:
+  name: my-asyncrq-config
+  namespace: default
+spec:
+  authentication:
+    bearer:
+      tokenRef: {name: sample-auth-sec, namespace: default, key: token}
