@@ -17,7 +17,6 @@ import (
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/snowplow"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
-	"github.com/krateo-platformops/unstructured-runtime/pkg/meta"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
@@ -177,26 +176,14 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		return obs, oerr
 	}
 
-	cli, err := restclient.BuildClient(ctx, h.dynamicClient, clientInfo.URL)
-	if err != nil {
-		log.Error(err, "Building REST client")
-		return controller.ExternalObservation{}, err
-	}
-
-	// Set client properties
-	cli.Debug = meta.IsVerbose(mg)
-	cli.PrettyJSON = h.prettyJSONDebug
-	cli.Resource = mg
-	cli.SetAuth = clientInfo.SetAuth
-	cli.IdentifierFields = clientInfo.Resource.Identifiers // TODO: probably redundant since we pass the resource too (`cli.Resource = mg`)
-	// Loop VerbsDescription, if `findby` action set, then check if IdentifiersMatchPolicy is set, if so, set it in the client
-	for _, verb := range clientInfo.Resource.VerbsDescription {
-		if verb.Action == string(apiaction.FindBy) && verb.IdentifiersMatchPolicy != "" {
-			cli.IdentifiersMatchPolicy = verb.IdentifiersMatchPolicy
-			log.Debug("Found findby action and a IdentifiersMatchPolicy configured in RestDefinition", "policy", cli.IdentifiersMatchPolicy)
-			break
-		}
-	}
+	// One set per reconcile, resolving each verb to the document IT declares, with the per-reconcile client
+	// configuration applied inside it (#220).
+	//
+	// Observe needs more than one client in the general case, which is why nothing here resolves a single
+	// "the client" up front: IsResourceKnown below runs the GET verb, the observe branch runs get XOR
+	// findby, and the dispatch and async paths run their own verbs. A resource declaring get and findby in
+	// different documents is served correctly only because each use asks for its own action.
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug)
 
 	// A dispatch resource is observed by looking its correlation token up in the declared collection, which
 	// replaces the get/findby observe entirely (#199). BEFORE the async check, because the two are mutually
@@ -204,14 +191,17 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	// handle to extract -- that absence is what the correlation token exists to replace. CEL refuses async
 	// on a dispatch verb, so reaching the poll below with a dispatch declared would mean acting on a
 	// handle no dispatch could have produced.
-	if obs, handled, derr := h.observeDispatch(ctx, mg, cli, &http.Client{}, clientInfo, log); handled {
-		return obs, derr
+	if dcli, derr := cs.For(ctx, string(apiaction.Dispatch)); derr != nil {
+		log.Error(derr, "Building REST client for the dispatch verb")
+		return controller.ExternalObservation{}, derr
+	} else if obs, handled, oerr := h.observeDispatch(ctx, mg, dcli, &http.Client{}, clientInfo, log); handled {
+		return obs, oerr
 	}
 
 	// If a requeue-based (Model B) async operation is in flight, poll it once before the normal existence
 	// checks: stay pending until it terminates, then (on success) fall through to observe the real state.
 	if opID, action := asyncOperationInFlight(mg); opID != "" {
-		obs, handled, aerr := h.driveAsyncRequeue(ctx, cli, clientInfo, mg, opID, action, log)
+		obs, handled, aerr := h.driveAsyncRequeue(ctx, cs, clientInfo, mg, opID, action, log)
 		if handled {
 			return obs, aerr
 		}
@@ -223,7 +213,14 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	// A broken request-direction declaration must NOT read as "identity not known". That routes to findby
 	// and, with no findby declared, to assume-needs-creating -- a create issued because a jq program was
 	// wrong (#117). Surface it instead; the reconcile retries once the RestDefinition is corrected.
-	isKnown, knownErr := builder.IsResourceKnown(ctx, cli, clientInfo, mg)
+	// IsResourceKnown runs the GET verb, which is NOT necessarily the verb this observe will use: it is
+	// asked before the get-or-findby decision below. So it gets the get verb's own client.
+	gcli, gerr := cs.For(ctx, string(apiaction.Get))
+	if gerr != nil {
+		log.Error(gerr, "Building REST client for the get verb")
+		return controller.ExternalObservation{}, gerr
+	}
+	isKnown, knownErr := builder.IsResourceKnown(ctx, gcli, clientInfo, mg)
 	if knownErr != nil {
 		log.Error(knownErr, "Building the get request from the RestDefinition")
 		return controller.ExternalObservation{}, fmt.Errorf("building the get request: %w", knownErr)
@@ -233,7 +230,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	observeAction := "get"
 	if isKnown {
 		// Resource is known: getting the external resource by its identifier (e.g GET /resources/{id}).
-		apiCall, callInfo, err := builder.APICallBuilder(cli, clientInfo, apiaction.Get)
+		apiCall, callInfo, err := builder.APICallBuilder(gcli, clientInfo, apiaction.Get)
 		if apiCall == nil || callInfo == nil {
 			log.Error(fmt.Errorf("API action get not found"), "action", apiaction.Get)
 			return controller.ExternalObservation{}, fmt.Errorf("API action get not found for %s", apiaction.Get)
@@ -275,7 +272,12 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		// for instance before creation (in the first ever reconcile loop).
 
 		// This branch is also hit when the resource does not support a `get` action at all but supports only a `findby` action for the observe phase.
-		apiCall, callInfo, err := builder.APICallBuilder(cli, clientInfo, apiaction.FindBy)
+		fcli, ferr := cs.For(ctx, string(apiaction.FindBy))
+		if ferr != nil {
+			log.Error(ferr, "Building REST client for the findby verb")
+			return controller.ExternalObservation{}, ferr
+		}
+		apiCall, callInfo, err := builder.APICallBuilder(fcli, clientInfo, apiaction.FindBy)
 		if apiCall == nil {
 			if !unstructuredtools.IsConditionSet(mg, condition.Creating()) && !unstructuredtools.IsConditionSet(mg, condition.Available()) {
 				log.Debug("No get or findby action found for the resource.")
@@ -440,7 +442,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 				if !strings.EqualFold(v.Action, string(apiaction.Update)) {
 					continue
 				}
-				updatable, uerr = cli.UpdatableBodyPaths(v.Method, v.Path)
+				// The UPDATE verb's document: compareScope "updatable" asks which spec fields that verb's
+				// body can express, so asking the observe verb's document would answer about the wrong
+				// operation (#220).
+				var ucli restclient.UnstructuredClientInterface
+				ucli, uerr = cs.For(ctx, string(apiaction.Update))
+				if uerr != nil {
+					break
+				}
+				updatable, uerr = ucli.UpdatableBodyPaths(v.Method, v.Path)
 				break
 			}
 			if uerr != nil {
@@ -582,14 +592,15 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		return err
 	}
 
-	cli, err := restclient.BuildClient(ctx, h.dynamicClient, clientInfo.URL)
+	// One set per reconcile, resolving each verb to the document IT declares (#220). Configuration lives
+	// in the set, so every client it hands out carries SetAuth -- a second client for a second document
+	// would otherwise go out unauthenticated.
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug)
+	cli, err := cs.For(ctx, string(apiaction.Create))
 	if err != nil {
 		log.Error(err, "Building REST client")
 		return err
 	}
-	cli.Debug = meta.IsVerbose(mg)
-	cli.PrettyJSON = h.prettyJSONDebug
-	cli.SetAuth = clientInfo.SetAuth
 
 	// If create is delegated to a RESTAction, invoke the provisioning sequence instead of the create verb
 	// and mark the resource Creating; convergence is by re-invocation (the RESTAction must be idempotent)
@@ -774,14 +785,15 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		return err
 	}
 
-	cli, err := restclient.BuildClient(ctx, h.dynamicClient, clientInfo.URL)
+	// One set per reconcile, resolving each verb to the document IT declares (#220). Configuration lives
+	// in the set, so every client it hands out carries SetAuth -- a second client for a second document
+	// would otherwise go out unauthenticated.
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug)
+	cli, err := cs.For(ctx, string(apiaction.Update))
 	if err != nil {
 		log.Error(err, "Building REST client")
 		return err
 	}
-	cli.Debug = meta.IsVerbose(mg)
-	cli.PrettyJSON = h.prettyJSONDebug
-	cli.SetAuth = clientInfo.SetAuth
 
 	// If update is delegated to a RESTAction, invoke the re-apply sequence instead of the update verb (it
 	// forwards the whole spec — the desired state — and must be idempotent), project any composed result,
@@ -963,14 +975,16 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		return nil
 	}
 
-	cli, err := restclient.BuildClient(ctx, h.dynamicClient, clientInfo.URL)
+	// One set per reconcile, resolving each verb to the document IT declares. Delete is the clearest case
+	// for why a single client per entry point will not do: it verifies itself with the GET verb, so the
+	// verification read must address the get verb's document even when the delete verb declares another
+	// (#220).
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug)
+	cli, err := cs.For(ctx, string(apiaction.Delete))
 	if err != nil {
 		log.Error(err, "Building REST client")
 		return err
 	}
-	cli.Debug = meta.IsVerbose(mg)
-	cli.PrettyJSON = h.prettyJSONDebug
-	cli.SetAuth = clientInfo.SetAuth
 
 	// A dispatch resource's delete is a no-op that releases the finalizer: the invocation its token names
 	// is immutable history, not an object, so there is nothing to tear down and nothing to verify gone.
@@ -996,7 +1010,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		}
 		// One arbiter for every delete path (see resolveDeleteOutcome). The RESTAction reported success,
 		// so deleteErr is nil: an unverifiable resource falls back to trusting that result, as before.
-		if outcome := h.resolveDeleteOutcome(ctx, cli, clientInfo, mg, nil, log); outcome != nil {
+		if outcome := h.resolveDeleteOutcome(ctx, cs, clientInfo, mg, nil, log); outcome != nil {
 			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", outcome))
 			return outcome
 		}
@@ -1127,7 +1141,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// resolveDeleteOutcome reports "not verifiable" and we trust the delete result, as before.
 	// THE decision, for every native delete: success, 404, or any other error. resolveDeleteOutcome asks
 	// the observe verb and applies one rule, so no branch above needs to reason about the finalizer.
-	if outcome := h.resolveDeleteOutcome(ctx, cli, clientInfo, mg, deleteErr, log); outcome != nil {
+	if outcome := h.resolveDeleteOutcome(ctx, cs, clientInfo, mg, deleteErr, log); outcome != nil {
 		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", outcome))
 		return outcome
 	}

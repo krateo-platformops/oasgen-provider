@@ -308,6 +308,31 @@ func resetDispatchMock(t *testing.T, payload string) {
 	defer resp.Body.Close()
 }
 
+// configureMock posts a behaviour payload to the mock vendor. Package-level because more than one Assess
+// needs it; DeleteRuleMatrix has its own closure from before this existed.
+func configureMock(t *testing.T, payload string) {
+	t.Helper()
+	resp, err := http.Post("http://localhost:30007/admin/config", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("configuring the mock: %v", err)
+	}
+	defer resp.Body.Close()
+}
+
+// vendorHas asks the VENDOR whether a resource exists, rather than asking the controller whether it
+// thinks it created one. Those are different questions and only the first is ground truth.
+func vendorHas(t *testing.T, id string) bool {
+	t.Helper()
+	req, _ := http.NewRequest("GET", "http://localhost:30007/resource/"+id, nil)
+	req.Header.Set("Authorization", "Bearer test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
 // readyCondition returns the Ready condition's reason and message, or empty strings when absent.
 func readyCondition(t *testing.T, u *unstructured.Unstructured) (string, string) {
 	t.Helper()
@@ -454,6 +479,23 @@ func TestController(t *testing.T) {
 			err = r.Create(ctx, &cm)
 			if err != nil {
 				t.Error("Creating ConfigMap with OAS.", "error", err)
+				return ctx
+			}
+
+			// The SECOND document, for the per-verb oasPath case (#220). It declares POST /v2/resource and
+			// nothing else, so a resource whose create verb points here can only be created if that verb is
+			// executed against the document it declares.
+			b2, err := os.ReadFile(filepath.Join(testdataPath, "restdefinitions", "cm", "oas2.yaml"))
+			if err != nil {
+				t.Error("Reading the second OAS file.", "error", err)
+				return ctx
+			}
+			cm2 := corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "sample-v2", Namespace: altNamespace},
+				Data:       map[string]string{"openapi.yaml": string(b2)},
+			}
+			if err := r.Create(ctx, &cm2); err != nil {
+				t.Error("Creating the second ConfigMap with OAS.", "error", err)
 				return ctx
 			}
 
@@ -1341,6 +1383,57 @@ func TestController(t *testing.T) {
 			}
 			if n := dispatchCount(t); n != 1 {
 				t.Errorf("a dispatch that was never observed must NOT be re-fired; vendor saw %d triggers", n)
+			}
+			return ctx
+		}).
+		// #220: per-verb oasPath, driven as a CALL. The generator has resolved oasPath per verb since
+		// 0.25.0 and the RDC never read the field at all, so the CRD was correct and the verb that needed
+		// the second document could not be executed -- the feature worked at no released version.
+		//
+		// A test that renders proves nothing here: rendering is the half that already worked. This one
+		// creates the resource, which is only possible if the create verb reaches its own document.
+		Assess("PerVerbOASPathExecutesAgainstItsOwnDocument", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			configureMock(t, `{"simulateErrors": false, "authFailures": false, "lingerOnDelete": false, "deleteErrorsButRemoves": false, "tombstoneOnDelete": false}`)
+
+			k := cli.Resource(schema.GroupVersionResource{
+				Group: "sample.krateo.io", Version: "v1-0", Resource: "twodocsamples",
+			}).Namespace(namespace)
+
+			u, err := k.Get(ctx, "twodoc-1", metav1.GetOptions{})
+			if err != nil {
+				t.Error("Getting Twodocsample.", "error", err)
+				return ctx
+			}
+
+			// POST /v2/resource is declared ONLY in oas2. Before the fix this failed with
+			// "retrieving requested params: operation not found: POST" -- the create resolved against the
+			// primary document, where the path does not exist.
+			if err := handler.Create(ctx, u); err != nil {
+				t.Errorf("create must execute against the create verb's own document: %v", err)
+				return ctx
+			}
+
+			// Ground truth from the vendor: the resource exists upstream. Asking the controller whether it
+			// is satisfied would not distinguish "created" from "reported success".
+			u = mustGet(ctx, t, k, "twodoc-1")
+			id, found, _ := unstructured.NestedString(u.Object, "status", "id")
+			if !found || id == "" {
+				t.Error("create must project the new resource's id into status")
+				return ctx
+			}
+			if !vendorHas(t, id) {
+				t.Errorf("the vendor does not have %s: the create reported success without creating anything", id)
+			}
+
+			// And the OTHER verbs still resolve to the primary document: a get against oas2 would fail,
+			// since oas2 declares no GET at all.
+			obs, err := handler.Observe(ctx, mustGet(ctx, t, k, "twodoc-1"))
+			if err != nil {
+				t.Errorf("observe must execute against the get verb's document, not the create verb's: %v", err)
+				return ctx
+			}
+			if !obs.ResourceExists {
+				t.Error("the resource was just created and the vendor has it, so observe must find it")
 			}
 			return ctx
 		}).Feature()

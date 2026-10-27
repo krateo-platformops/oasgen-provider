@@ -1859,3 +1859,7 @@ func TestUnresolvedPathParams(t *testing.T) {
 		})
 	}
 }
+
+func (m *mockUnstructuredClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
+	return nil, nil
+}

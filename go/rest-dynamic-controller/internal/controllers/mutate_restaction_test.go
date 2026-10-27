@@ -55,6 +55,12 @@ func (m *mockGetClient) FindBy(ctx context.Context, cli *http.Client, path strin
 	return restclient.Response{}, nil
 }
 
+// setFor wraps a canned client in a clientSet keyed by the definition's own document path, which is what
+// every verb in these fixtures resolves to.
+func setFor(info *getter.Info, cli restclient.UnstructuredClientInterface) *clientSet {
+	return newClientSetWithClients(info, map[string]restclient.UnstructuredClientInterface{info.URL: cli})
+}
+
 // tombstoneInfo is a RestDefinition with a get verb carrying the notFoundBody predicate that Aruba
 // security/Kmip needs: a 200 whose body says the record is deleted (#111).
 func tombstoneInfo(predicate string) *getter.Info {
@@ -63,6 +69,9 @@ func tombstoneInfo(predicate string) *getter.Info {
 		v.NotFoundBody = &getter.JQProgram{Inline: predicate}
 	}
 	return &getter.Info{
+		// A real document path: the getter refuses a definition without spec.oasPath, so a fixture with an
+		// empty URL is not a shape production can produce.
+		URL: "configmap://krateo-system/aruba-security/security.json",
 		Resource: getter.Resource{
 			Kind:             "Kmip",
 			Identifiers:      []string{"id"},
@@ -92,8 +101,9 @@ func TestExternalResourceStillExistsHonoursTombstoneBody(t *testing.T) {
 		"deletionDate": "2026-10-23T00:00:00Z",
 	}}
 
+	info := tombstoneInfo(tombstonePredicate)
 	stillExists, verified, err := h.externalResourceStillExists(
-		context.Background(), cli, tombstoneInfo(tombstonePredicate), kmipCR(), logging.NewNopLogger())
+		context.Background(), setFor(info, cli), info, kmipCR(), logging.NewNopLogger())
 
 	require.NoError(t, err)
 	assert.False(t, stillExists, "a 200 tombstone the predicate matches is absence, not presence")
@@ -108,8 +118,9 @@ func TestExternalResourceStillExistsReportsLiveResource(t *testing.T) {
 	h := &handler{}
 	cli := &mockGetClient{body: map[string]interface{}{"status": "Active"}}
 
+	info := tombstoneInfo(tombstonePredicate)
 	stillExists, verified, err := h.externalResourceStillExists(
-		context.Background(), cli, tombstoneInfo(tombstonePredicate), kmipCR(), logging.NewNopLogger())
+		context.Background(), setFor(info, cli), info, kmipCR(), logging.NewNopLogger())
 
 	require.NoError(t, err)
 	assert.True(t, stillExists, "the predicate did not match, so the 200 means the resource is still there")
@@ -123,8 +134,9 @@ func TestExternalResourceStillExistsTolleratesBrokenPredicate(t *testing.T) {
 	h := &handler{}
 	cli := &mockGetClient{body: map[string]interface{}{"status": "Deleted"}}
 
+	info := tombstoneInfo(`.status`)
 	stillExists, verified, err := h.externalResourceStillExists(
-		context.Background(), cli, tombstoneInfo(`.status`), kmipCR(), logging.NewNopLogger())
+		context.Background(), setFor(info, cli), info, kmipCR(), logging.NewNopLogger())
 
 	require.NoError(t, err, "a mistyped predicate must not surface as a reconcile error")
 	assert.False(t, stillExists)
@@ -136,16 +148,17 @@ func TestExternalResourceStillExistsTolleratesBrokenPredicate(t *testing.T) {
 func TestExternalResourceStillExistsWithoutPredicate(t *testing.T) {
 	h := &handler{}
 
+	info := tombstoneInfo("")
 	stillExists, verified, err := h.externalResourceStillExists(
-		context.Background(), &mockGetClient{body: map[string]interface{}{"status": "Active"}},
-		tombstoneInfo(""), kmipCR(), logging.NewNopLogger())
+		context.Background(), setFor(info, &mockGetClient{body: map[string]interface{}{"status": "Active"}}),
+		info, kmipCR(), logging.NewNopLogger())
 	require.NoError(t, err)
 	assert.True(t, stillExists)
 	assert.True(t, verified)
 
 	stillExists, verified, err = h.externalResourceStillExists(
-		context.Background(), &mockGetClient{callErr: &restclient.StatusError{StatusCode: http.StatusNotFound}},
-		tombstoneInfo(""), kmipCR(), logging.NewNopLogger())
+		context.Background(), setFor(info, &mockGetClient{callErr: &restclient.StatusError{StatusCode: http.StatusNotFound}}),
+		info, kmipCR(), logging.NewNopLogger())
 	require.NoError(t, err)
 	assert.False(t, stillExists)
 	assert.True(t, verified, "a 404 is verifiably gone")
@@ -159,7 +172,8 @@ func TestResolveDeleteOutcomeReleasesOnTombstoneDespiteDeleteError(t *testing.T)
 	h := &handler{}
 	cli := &mockGetClient{body: map[string]interface{}{"status": "Deleted"}}
 
-	err := h.resolveDeleteOutcome(context.Background(), cli, tombstoneInfo(tombstonePredicate), kmipCR(),
+	info := tombstoneInfo(tombstonePredicate)
+	err := h.resolveDeleteOutcome(context.Background(), setFor(info, cli), info, kmipCR(),
 		fmt.Errorf("delete returned 500"), logging.NewNopLogger())
 
 	assert.NoError(t, err, "verifiably absent beats the delete error: release the finalizer")
@@ -174,9 +188,14 @@ func TestResolveDeleteOutcomeHoldsWhenResourceIsStillThere(t *testing.T) {
 	h := &handler{}
 	cli := &mockGetClient{body: map[string]interface{}{"status": "Active"}}
 
-	err := h.resolveDeleteOutcome(context.Background(), cli, tombstoneInfo(tombstonePredicate), kmipCR(),
+	info := tombstoneInfo(tombstonePredicate)
+	err := h.resolveDeleteOutcome(context.Background(), setFor(info, cli), info, kmipCR(),
 		nil, logging.NewNopLogger())
 
 	require.Error(t, err, "a successful delete is not proof; the get verb says it is still there")
 	assert.Contains(t, err.Error(), "still present")
+}
+
+func (m *mockGetClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
+	return nil, nil
 }

@@ -1,0 +1,48 @@
+# The SECOND document for the per-verb oasPath case (#220).
+#
+# It declares POST /v2/resource and NOTHING ELSE. That is the point: a RestDefinition whose create verb
+# points here, and whose other verbs use the primary document, can only work if each verb is executed
+# against the document IT declares. Before the fix the controller loaded one document for the whole
+# resource, so the create resolved against the primary -- where this operation does not exist -- and
+# failed with "operation not found: POST".
+openapi: 3.0.3
+info:
+  title: Mock Resource API (v2 create only)
+  version: "2.0"
+  description: Second document, used to prove per-verb oasPath reaches the controller.
+servers:
+  - url: http://localhost:30007
+paths:
+  /v2/resource:
+    post:
+      summary: Create a resource via the v2 endpoint
+      operationId: createResourceV2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+              required:
+                - name
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  description:
+                    type: string
+                  status:
+                    type: string
