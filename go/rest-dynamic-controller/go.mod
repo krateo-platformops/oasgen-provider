@@ -118,4 +118,4 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 )
 
-replace github.com/pb33f/libopenapi => github.com/krateoplatformops/libopenapi v0.21.8
+replace github.com/pb33f/libopenapi => github.com/krateo-platformops/libopenapi v0.21.9
