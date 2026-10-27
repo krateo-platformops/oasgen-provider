@@ -198,6 +198,76 @@ type FieldMappingItem struct {
 type FieldResolver struct {
 	Type      string             `json:"type"`
 	SecretRef *SecretRefResolver `json:"secretRef,omitempty"`
+	// DependentLookup names the pre-call read whose result is substituted for this field (used when Type
+	// is "dependentLookup"). The lookup itself is declared once, in Resource.DependentLookups.
+	DependentLookup *DependentLookupRef `json:"dependentLookup,omitempty"`
+}
+
+// DependentLookupRef names the lookup a resolver substitutes from, with an optional guard.
+type DependentLookupRef struct {
+	// Name is the Resource.DependentLookups entry to substitute from.
+	Name string `json:"name"`
+	// When, if set, skips the lookup when the value is already available on the CR, so an explicitly
+	// supplied value wins and costs no API calls.
+	When *LookupWhen `json:"when,omitempty"`
+}
+
+// LookupWhen guards a lookup against running unnecessarily.
+type LookupWhen struct {
+	// CustomResourceFieldAbsent runs the lookup only when this JSONPath is absent or null on the CR.
+	CustomResourceFieldAbsent string `json:"customResourceFieldAbsent"`
+}
+
+// DependentLookup is a named pre-call read against any endpoint in the document, whose selected value a
+// FieldResolver substitutes into the outgoing request.
+//
+// Exactly one of Select or Match is set, enforced at admission. Select reads a value out of a
+// single-object response; Match finds one item in a list response and takes a field off it.
+type DependentLookup struct {
+	Name string `json:"name"`
+	// Method and Path identify the operation, which must exist in the document under that method exactly
+	// as a verb's does -- parameters are resolved against the document.
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	// OASPath, when set, is the document THIS LOOKUP runs against, overriding the definition-level
+	// spec.oasPath, exactly as a verb's does.
+	OASPath string `json:"oasPath,omitempty"`
+	// Parameters binds the lookup's own path and query parameters, from the CR or from an earlier lookup.
+	Parameters []LookupParameter `json:"parameters,omitempty"`
+	// Select is a jq program over the response body yielding the value to substitute.
+	Select string `json:"select,omitempty"`
+	// Match finds exactly one item in a list response and takes a field off it.
+	Match *LookupMatch `json:"match,omitempty"`
+}
+
+// LookupParameter binds one of a lookup's own parameters. The value comes either from the CR or from an
+// EARLIER lookup's result, never both; "earlier" is enforced at admission, which is what makes a cycle
+// unrepresentable rather than something this code has to detect.
+type LookupParameter struct {
+	InPath           string        `json:"inPath,omitempty"`
+	InQuery          string        `json:"inQuery,omitempty"`
+	InCustomResource string        `json:"inCustomResource,omitempty"`
+	FromLookup       string        `json:"fromLookup,omitempty"`
+	ValueMapping     *ValueMapping `json:"valueMapping,omitempty"`
+}
+
+// LookupMatch finds exactly one item in a list response and takes a field off it.
+//
+// There is deliberately no "take the first match" option. The removed apiLookup resolver scoped its list
+// server-side and then took items[0]; against Keycloak, whose /authentication/flows ignores ?alias= and
+// returns every flow, that bound the WRONG id while reporting success. An ambiguous match is an error.
+type LookupMatch struct {
+	// ItemsAt is a jq program yielding the array to search; "." for a bare-array response.
+	ItemsAt string `json:"itemsAt,omitempty"`
+	// WhereField is the field on each item compared against the CR value.
+	WhereField string `json:"whereField"`
+	// EqualsFromCustomResource is a JSONPath into the CR yielding the value to match.
+	EqualsFromCustomResource string `json:"equalsFromCustomResource"`
+	// SelectField is the field taken off the matched item.
+	SelectField string `json:"selectField"`
+	// OnMissing is "requeue" (default) or "error": a referent that does not exist yet is the expected
+	// case, not a misconfiguration.
+	OnMissing string `json:"onMissing,omitempty"`
 }
 
 // SecretRefResolver substitutes a Kubernetes Secret's value for the field. There is no namespace field:
@@ -374,6 +444,9 @@ type Resource struct {
 	ConfigurationFields []ConfigurationField `json:"configurationFields,omitempty"`
 	// VerbsDescription: the list of verbs to use on this resource
 	VerbsDescription []VerbsDescription `json:"verbsDescription"`
+	// DependentLookups are the resource's named pre-call reads, referenced by a FieldResolver of type
+	// "dependentLookup". Resolution is in declaration order, and a lookup may only read an earlier one.
+	DependentLookups []DependentLookup `json:"dependentLookups,omitempty"`
 	// ObserveApiRef, when set, delegates observe to a Snowplow RESTAction (invoked via snowplow /call)
 	// whose composed .status is projected into this resource's status. Mirrors the oasgen CRD field.
 	ObserveApiRef *ApiRef `json:"observeApiRef,omitempty"`
