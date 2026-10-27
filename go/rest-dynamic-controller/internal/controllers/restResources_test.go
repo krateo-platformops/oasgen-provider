@@ -319,6 +319,25 @@ func configureMock(t *testing.T, payload string) {
 	defer resp.Body.Close()
 }
 
+// vendorOperationPolls asks the VENDOR how many times it was polled for an operation. The CR cannot
+// answer this: it shows the outcome, not whether the controller actually polled to reach it. A test that
+// only checked the outcome would pass against a controller that reported success on the first look.
+func vendorOperationPolls(t *testing.T, opID string) int {
+	t.Helper()
+	resp, err := http.Get("http://localhost:30007/admin/operation-polls/" + opID)
+	if err != nil {
+		t.Fatalf("reading the operation poll count: %v", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Polls int `json:"polls"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decoding the operation poll count: %v", err)
+	}
+	return out.Polls
+}
+
 // vendorHas asks the VENDOR whether a resource exists, rather than asking the controller whether it
 // thinks it created one. Those are different questions and only the first is ground truth.
 func vendorHas(t *testing.T, id string) bool {
@@ -1434,6 +1453,114 @@ func TestController(t *testing.T) {
 			}
 			if !obs.ResourceExists {
 				t.Error("the resource was just created and the vendor has it, so observe must find it")
+			}
+			return ctx
+		}).
+		// The async engine had NO integration coverage: no testdata declared `async:`, so driveAsync, the
+		// operationRef extraction and the poll loop were exercised only by unit tests over their helpers --
+		// the configuration that concealed the whole dispatch verb being undriven (#221).
+		//
+		// Model A: the controller polls the operation INLINE inside Create and does not return until it
+		// terminates. The create answers 202 with a handle and NO resource body, so postGet must re-read
+		// the resource afterwards or there is nothing to put in status.
+		Assess("AsyncInlinePollsToCompletion", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			configureMock(t, `{"simulateErrors": false, "authFailures": false, "asyncOperations": false, "resetAsyncOperations": true, "asyncPollsBeforeSuccess": 2}`)
+
+			k := cli.Resource(schema.GroupVersionResource{
+				Group: "sample.krateo.io", Version: "v1-0", Resource: "asyncsamples",
+			}).Namespace(namespace)
+
+			obs, err := handler.Observe(ctx, mustGet(ctx, t, k, "async-1"))
+			if err != nil {
+				t.Error("Error during initial observe", "error", err)
+				return ctx
+			}
+			if obs.ResourceExists {
+				t.Error("nothing has been created yet, so observe must report not-exists")
+				return ctx
+			}
+
+			if err := handler.Create(ctx, mustGet(ctx, t, k, "async-1")); err != nil {
+				t.Errorf("an inline async create must poll to completion and succeed: %v", err)
+				return ctx
+			}
+
+			// The operation reports "running" twice before "succeeded", so a controller that accepted the
+			// first answer would have polled once. Asked of the VENDOR, because the CR shows only the
+			// outcome.
+			if polls := vendorOperationPolls(t, "op-1"); polls < 3 {
+				t.Errorf("the controller must poll until the operation terminates; vendor saw %d polls, want at least 3", polls)
+			}
+
+			// postGet: the 202 carried no resource body, so status is populated only by the re-read.
+			u := mustGet(ctx, t, k, "async-1")
+			id, found, _ := unstructured.NestedString(u.Object, "status", "id")
+			if !found || id == "" {
+				t.Error("postGet must re-read the resource after the operation succeeds and project its id into status")
+				return ctx
+			}
+			if !vendorHas(t, id) {
+				t.Errorf("the vendor does not have %s", id)
+			}
+			return ctx
+		}).
+		// Model B (mode: requeue): the handle is recorded on the CR and polled across reconciles rather
+		// than inside Create. Zero coverage before this -- driveAsyncRequeue, asyncOperationInFlight and
+		// reReadStatusOnAsyncSuccess appeared nowhere in the suite, and the last of those runs a GET from a
+		// create path, one of the five cross-verb reads #220 changed.
+		Assess("AsyncRequeuePollsAcrossReconciles", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			configureMock(t, `{"simulateErrors": false, "authFailures": false, "asyncOperations": false, "resetAsyncOperations": true, "asyncPollsBeforeSuccess": 2}`)
+
+			k := cli.Resource(schema.GroupVersionResource{
+				Group: "sample.krateo.io", Version: "v1-0", Resource: "asyncrqsamples",
+			}).Namespace(namespace)
+
+			if err := handler.Create(ctx, mustGet(ctx, t, k, "asyncrq-1")); err != nil {
+				t.Errorf("a requeue-mode create must record the handle and return: %v", err)
+				return ctx
+			}
+
+			// The handle must be ON THE CR, or nothing later can resume the operation -- and the create
+			// must NOT have polled to completion, which is the whole difference from Model A.
+			u := mustGet(ctx, t, k, "asyncrq-1")
+			opID := u.GetAnnotations()[annotationAsyncOperationID]
+			if opID == "" {
+				t.Error("create must record krateo.io/async-operation-id so a later reconcile can resume the poll")
+				return ctx
+			}
+			if polls := vendorOperationPolls(t, opID); polls > 1 {
+				t.Errorf("a requeue-mode create must not poll to completion inline; vendor saw %d polls", polls)
+			}
+
+			// Each observe polls once. Bounded, so a controller that never advanced fails rather than
+			// hanging the suite.
+			var id string
+			for i := 0; i < 8; i++ {
+				if _, err := handler.Observe(ctx, mustGet(ctx, t, k, "asyncrq-1")); err != nil {
+					t.Errorf("observe %d while the operation was in flight: %v", i+1, err)
+					return ctx
+				}
+				u = mustGet(ctx, t, k, "asyncrq-1")
+				if v, found, _ := unstructured.NestedString(u.Object, "status", "id"); found && v != "" {
+					id = v
+					break
+				}
+			}
+			if id == "" {
+				t.Errorf("the operation never completed across 8 observes; annotation=%q vendor polls=%d",
+					u.GetAnnotations()[annotationAsyncOperationID], vendorOperationPolls(t, opID))
+				return ctx
+			}
+			if polls := vendorOperationPolls(t, opID); polls < 3 {
+				t.Errorf("the operation reports running twice before succeeding, so it must have been polled at least 3 times; vendor saw %d", polls)
+			}
+			if !vendorHas(t, id) {
+				t.Errorf("the vendor does not have %s", id)
+			}
+			// The handle must be cleared once the operation terminates, or every later reconcile re-polls a
+			// finished operation forever.
+			if left := mustGet(ctx, t, k, "asyncrq-1").GetAnnotations()[annotationAsyncOperationID]; left != "" {
+				t.Errorf("the operation handle must be cleared once it terminates, still %q", left)
 			}
 			return ctx
 		}).Feature()

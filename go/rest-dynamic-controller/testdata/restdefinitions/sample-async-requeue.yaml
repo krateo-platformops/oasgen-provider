@@ -1,0 +1,48 @@
+# Model B async (mode: requeue): the controller records the operation handle on the CR and polls it
+# across reconciles rather than blocking inside Create. Zero integration coverage before this --
+# driveAsyncRequeue, asyncOperationInFlight and reReadStatusOnAsyncSuccess appeared nowhere in the suite.
+#
+# reReadStatusOnAsyncSuccess runs a GET from a create path, which is one of the five cross-verb reads
+# #220 changed, so this path is both untested and freshly modified.
+apiVersion: ogen.krateo.io/v1alpha1
+kind: RestDefinition
+metadata:
+  name: sample-async-requeue
+  namespace: demo-system
+spec:
+  oasPath: configmap://demo-system/sample/openapi.yaml
+  resourceGroup: sample.krateo.io
+  resource:
+    kind: Asyncrqsample
+    identifiers:
+    - name
+    additionalStatusFields:
+    - id
+    # id stays in SPEC deliberately. postGet builds its re-read from the CR alone, so a get keyed by a
+    # server-assigned id can never resolve (#229). This API's id is the client-chosen name, so the author
+    # supplies it and the re-read works -- which is the shape postGet supports.
+    verbsDescription:
+    - action: create
+      method: POST
+      path: /async/resource
+      async:
+        mode: requeue
+        operationRef:
+          in: body
+          path: operationId
+        poll:
+          method: GET
+          path: /operations/{operationId}
+          handleParam: operationId
+          statusPath: status
+          successValues: [succeeded]
+          failureValues: [failed]
+          intervalSeconds: 1
+          maxAttempts: 10
+        postGet: true
+    - action: get
+      method: GET
+      path: /resource/{id}
+    - action: delete
+      method: DELETE
+      path: /resource/{id}

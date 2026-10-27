@@ -1,0 +1,51 @@
+# Model A async: the controller polls the operation INLINE, inside the Create call, and does not return
+# until the operation terminates.
+#
+# The async engine had no integration coverage before this -- no testdata declared `async:` at all, so
+# driveAsync, the operationRef extraction and the poll loop were exercised only by unit tests over their
+# helpers. That is the configuration that concealed the entire dispatch verb being undriven (#221).
+apiVersion: ogen.krateo.io/v1alpha1
+kind: RestDefinition
+metadata:
+  name: sample-async
+  namespace: demo-system
+spec:
+  oasPath: configmap://demo-system/sample/openapi.yaml
+  resourceGroup: sample.krateo.io
+  resource:
+    kind: Asyncsample
+    identifiers:
+    - name
+    additionalStatusFields:
+    - id
+    # id stays in SPEC deliberately. postGet builds its re-read from the CR alone, so a get keyed by a
+    # server-assigned id can never resolve (#229). This API's id is the client-chosen name, so the author
+    # supplies it and the re-read works -- which is the shape postGet supports.
+    verbsDescription:
+    - action: create
+      method: POST
+      path: /async/resource
+      async:
+        # The handle comes from the response BODY here. The mock also sets Operation-Location, so the
+        # header route is available to a future case without changing the fixture.
+        operationRef:
+          in: body
+          path: operationId
+        poll:
+          method: GET
+          path: /operations/{operationId}
+          handleParam: operationId
+          statusPath: status
+          successValues: [succeeded]
+          failureValues: [failed]
+          intervalSeconds: 1
+          maxAttempts: 10
+        # Re-read the resource once the operation succeeds: the 202 carried no resource body, so without
+        # this there is nothing to project into status.
+        postGet: true
+    - action: get
+      method: GET
+      path: /resource/{id}
+    - action: delete
+      method: DELETE
+      path: /resource/{id}
