@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-27T17:30:00Z
+timestamp: 2026-10-27T21:10:00Z
 ---
 
 # Log
@@ -12,6 +12,107 @@ timestamp: 2026-10-27T17:30:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-27 — 0.36.0
+
+A new primitive and the removal of the limitation that made a correct RestDefinition send an incomplete
+request.
+
+### Dependent lookups: a pre-call read that feeds the request
+
+Some APIs require a value the user cannot know. Creating a git reference needs the sha to branch from,
+and "a branch off the default branch" means two dependent reads before the create: the repository's
+`default_branch`, then that branch's `object.sha`. There was no way to express that, so the one route
+needing it kept a hand-written proxy alive for an otherwise fully native provider — 28 of its 31 kinds
+needed none (#120).
+
+A **dependent lookup** is a named pre-call read whose selected value is substituted into a field of the
+main request:
+
+```yaml
+dependentLookups:                      # a sibling of verbsDescription
+- name: defaultBranch
+  method: GET
+  path: /repos/{owner}/{repo}
+  parameters:
+  - {inPath: owner, inCustomResource: spec.owner}
+  select: .default_branch
+- name: baseSha
+  method: GET
+  path: /repos/{owner}/{repo}/git/ref/{ref}
+  parameters:
+  - inPath: ref
+    fromLookup: defaultBranch          # the chain: link 1's result is link 2's parameter
+    valueMapping: {type: jq, jq: {inline: '"heads/" + .'}}
+  select: .object.sha
+
+verbsDescription:
+- action: create
+  fieldMapping:
+  - inBody: sha
+    resolver:
+      type: dependentLookup
+      dependentLookup:
+        name: baseSha
+        when: {customResourceFieldAbsent: spec.sha}
+```
+
+Lookups are declared as a sibling of `verbsDescription`, which is the specific thing the removed
+`apiLookup` resolver could not do: its action had to name one of the five CRUD verbs, a closed enum, so
+an auxiliary endpoint was inexpressible.
+
+The other shape is a **match** over a list — find the item whose field equals a CR value and take a field
+off it, which is what binding a Keycloak flow by alias instead of UUID needs. The two shapes arrived as
+separate requests from two providers and turned out to be one feature.
+
+**Three things it deliberately does not do**, each an absence rather than a safeguard:
+
+- **No "take the first match".** An ambiguous match is always an error, and the message does not name the
+  candidates it declined to choose between. `apiLookup` scoped its list server-side and then took
+  `items[0]`; against Keycloak, whose flow endpoint ignores the alias filter and returns everything, that
+  bound the **wrong id while reporting success**.
+- **`fromLookup` may only name an earlier lookup**, enforced in the CRD. A cycle is unrepresentable
+  rather than detected, so there is no solver and no runtime check to get wrong.
+- **`GET` only.** A POST search needs a request body and there is no field to declare one; admitting POST
+  would ship a value that cannot work.
+
+A `when` guard skips a lookup when the CR already supplies the value, so an explicit field wins and costs
+no API calls.
+
+Nothing can use this yet: a lookup can only name a path its document declares, and the GitHub provider's
+documents carry no git-ref operation. Worth saying plainly — the proxy there dies as soon as the CR
+carries `spec.sha`, which is free and independent of this feature.
+
+### A resource with an update verb and no create verb now has a usable spec
+
+A document with no create endpoint is not necessarily a read-only resource. Aruba's CMP profile declares
+`PUT`/`GET`/`DELETE` for `aiKeys` and no `POST` at all, and that was treated as read-only: the spec
+contained nothing but parameters and identifiers, so the declared `update` sent a body missing the vendor
+fields it was supposed to carry — and generation reported **no diagnostic at all**, because each half was
+behaving exactly as written (#236).
+
+The spec base is now resolved by explicit precedence — create, then dispatch, then update — rather than by
+position in `verbsDescription`. That ordering is the substance of the fix and not a detail: the previous
+code took the first create-or-dispatch verb it met, so simply admitting `update` alongside them would have
+let the order of YAML keys decide which body defines the spec, silently, for every resource declaring
+both.
+
+For the AiKey case the spec goes from `metadata` reduced to the identifier alone, with no `properties`, to
+the vendor's full metadata — `name`, `location`, `tags` — plus `properties`. Such a resource is
+adopt-then-update rather than read-only, and the generated identifier description now says so.
+
+The fallback applies only when no create or dispatch verb is **declared**. A create verb that is declared
+but carries no body keeps its existing empty base: borrowing the update body there would inject fields
+into the spec of a resource that defines itself differently.
+
+### Also
+
+A guard that runs the shipped CRD through the apiserver's own validator, so a validation rule whose
+estimated cost exceeds the budget fails a test instead of failing `helm install`. That failure mode took a
+CRD down once before (#169), and nothing in the repo could catch it: the CEL tests evaluate rules with
+`cel-go`, which happily runs a rule the apiserver would refuse to install. It immediately earned its place
+— two rules written during this release measured over 100× the per-rule budget and moved to generation
+time as a result.
 
 ## 2026-10-27 — 0.35.0
 
