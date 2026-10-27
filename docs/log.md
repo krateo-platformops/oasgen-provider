@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-27T09:00:00Z
+timestamp: 2026-10-27T17:30:00Z
 ---
 
 # Log
@@ -12,6 +12,53 @@ timestamp: 2026-10-27T09:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-27 — 0.35.0
+
+One fix, for a class of document that could not be used at all.
+
+### A `+` in a component name no longer fails the whole document
+
+A document with a component whose NAME contains `+` did not generate a degraded CRD — it generated
+nothing:
+
+```
+parser error [ModelBuildError]: failed to build V3 model: component
+  `#/components/schemas/…ApiKeyQuotasDto+QuotaValue` does not exist in the specification
+```
+
+`.NET` emitters produce these names routinely: a nested CLR type `ApiKeyQuotasDto.QuotaValue`
+serialises as `ApiKeyQuotasDto+QuotaValue`, because `+` is how the CLR spells a nested type. Any
+vendor shipping an ASP.NET-generated document can hit this, and Aruba's CMP profile document did.
+
+The `$ref` resolver unescaped fragments with `url.QueryUnescape`, which applies
+x-www-form-urlencoded semantics and decodes `+` to a **space**. The lookup therefore asked for a
+component whose name contained a space, which does not exist. Both spellings failed, by different
+routes — a literal `+` was decoded once, while `%2B` was decoded twice, the second pass being guarded
+on the presence of `%`. Either way the name ended with a space.
+
+Fixed in the parser fork with `url.PathUnescape`, which leaves `+` alone and still decodes `%2B`
+(`krateo-platformops/libopenapi` v0.21.9, four call sites). Both modules move to it.
+
+**The pin also changes organisation**, from the pre-migration `krateoplatformops` to
+`krateo-platformops`. That was checked rather than assumed: the new fork's parent is the old fork,
+their `v0.21.8` tags are the same commit `0af9c359`, and that differs from upstream's `d3dcac4e` — so
+the Krateo fork does carry its own patch, and `v0.21.9` sits directly on top of it. Nothing was
+dropped in the move.
+
+Verified against the real 45 KB vendor document through `/render`, from two binaries built from
+identical source differing only in this pin: the old one returned `crds: []` and the error above, the
+new one `crds: 1`, `configurationCrds: 1`, `errors: []`. Unit tests alone would not have established
+that a document of that size builds a V3 model.
+
+### Not fixed here
+
+Generating from that document surfaced a second, unrelated defect, filed as #236. A resource whose
+document has **no create endpoint** but whose RestDefinition declares `update` gets a spec built
+read-only — identifiers become selectors — so the declared update sends a body missing the vendor's
+own fields, and generation reports no diagnostic at all. For Aruba's AiKey that means an update would
+`PUT {"metadata":{"name":"…"}}` and silently drop the `properties` object holding the key's quotas.
+Until that is fixed, such a resource is safe to adopt and read, not to update.
 
 ## 2026-10-27 — 0.34.0
 
