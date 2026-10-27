@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/ext"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
 )
@@ -72,7 +73,13 @@ func evalRules(t *testing.T, rules []celRule, doc map[string]any) string {
 	t.Helper()
 	require.NotEmpty(t, rules, "no CEL rules found: a schema with no rules admits everything")
 
-	env, err := cel.NewEnv(cel.Variable("self", cel.MapType(cel.StringType, cel.DynType)))
+	env, err := cel.NewEnv(
+		cel.Variable("self", cel.MapType(cel.StringType, cel.DynType)),
+		// The apiserver enables two-variable comprehensions (Kubernetes 1.32+), so a helper that claims
+		// to mirror admission has to as well -- without it a rule using all(i, v, ...) fails to compile
+		// here while being enforced on a cluster.
+		ext.TwoVarComprehensions(),
+	)
 	require.NoError(t, err)
 
 	for _, r := range rules {

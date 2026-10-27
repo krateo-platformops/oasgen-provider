@@ -24,13 +24,18 @@ func toDomainFieldMapping(v definitionv1alpha1.VerbsDescription) []oas2jsonschem
 		if m.ValueMapping != nil {
 			vmType = m.ValueMapping.Type
 		}
+		var lookupName string
+		if m.Resolver != nil && m.Resolver.Type == "dependentLookup" && m.Resolver.DependentLookup != nil {
+			lookupName = m.Resolver.DependentLookup.Name
+		}
 		out = append(out, oas2jsonschema.FieldMappingEntry{
-			InPath:           m.InPath,
-			InQuery:          m.InQuery,
-			InBody:           m.InBody,
-			InResponse:       m.InResponse,
-			InCustomResource: m.InCustomResource,
-			ValueMappingType: vmType,
+			InPath:             m.InPath,
+			InQuery:            m.InQuery,
+			InBody:             m.InBody,
+			InResponse:         m.InResponse,
+			InCustomResource:   m.InCustomResource,
+			ValueMappingType:   vmType,
+			ResolverLookupName: lookupName,
 		})
 	}
 	// Legacy requestFieldMapping: request-direction only, no value transform.
@@ -262,4 +267,45 @@ func validateCorrelationTokenInSpec(cr *definitionv1alpha1.RestDefinition, specS
 			token, root, strings.Join(available, ", "))
 	}
 	return nil
+}
+
+// toDomainDependentLookups converts the resource's declared lookups into the library-agnostic domain type.
+func toDomainDependentLookups(lookups []definitionv1alpha1.DependentLookup) []oas2jsonschema.DependentLookup {
+	if len(lookups) == 0 {
+		return nil
+	}
+	out := make([]oas2jsonschema.DependentLookup, 0, len(lookups))
+	for _, l := range lookups {
+		dl := oas2jsonschema.DependentLookup{
+			Name:    l.Name,
+			Method:  l.Method,
+			Path:    l.Path,
+			OASPath: l.OASPath,
+			Select:  l.Select,
+		}
+		for _, prm := range l.Parameters {
+			var vmType string
+			if prm.ValueMapping != nil {
+				vmType = prm.ValueMapping.Type
+			}
+			dl.Parameters = append(dl.Parameters, oas2jsonschema.LookupParameter{
+				InPath:           prm.InPath,
+				InQuery:          prm.InQuery,
+				InCustomResource: prm.InCustomResource,
+				FromLookup:       prm.FromLookup,
+				ValueMappingType: vmType,
+			})
+		}
+		if l.Match != nil {
+			dl.Match = &oas2jsonschema.LookupMatch{
+				ItemsAt:                  l.Match.ItemsAt,
+				WhereField:               l.Match.WhereField,
+				EqualsFromCustomResource: l.Match.EqualsFromCustomResource,
+				SelectField:              l.Match.SelectField,
+				OnMissing:                l.Match.OnMissing,
+			}
+		}
+		out = append(out, dl)
+	}
+	return out
 }

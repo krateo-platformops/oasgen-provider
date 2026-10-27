@@ -330,6 +330,248 @@ spec:
                     - name
                     - namespace
                     type: object
+                  dependentLookups:
+                    description: |-
+                      DependentLookups declares named, pre-call reads whose selected value feeds a field of the main
+                      request, via a fieldMapping entry whose resolver names the lookup.
+
+                      This is the shape apiLookup could not express and was removed for (ff66424): its Action had to name
+                      a verb in verbsDescription, and that field is a closed enum, so an auxiliary endpoint could not be
+                      declared at all. A lookup is declared HERE, as a sibling of verbsDescription, precisely so it can
+                      name any endpoint in the document without widening that enum.
+
+                      Two consumers define this shape, filed independently by two providers:
+                        - oasgen-provider#108's GitHub GitRef needs a CHAIN -- the default branch, then that branch's sha
+                          -- where the second read's path parameter is the first read's result.
+                        - rest-dynamic-controller#30's KeycloakClient needs client-side MATCHING over a list: find the
+                          authentication flow whose alias equals a CR field, take its id.
+
+                      MaxItems is REQUIRED, not stylistic: the uniqueness and ordering rules below are CEL comprehensions,
+                      and Kubernetes costs a rule statically against the declared bound. An unbounded list estimates as
+                      effectively infinite and the apiserver refuses the whole CRD -- taking the install down rather than
+                      the RestDefinition (#169). Eight is generous; the two known consumers use two and one.
+                    items:
+                      description: |-
+                        DependentLookup is a named, pre-call read against any endpoint in the document, whose selected value is
+                        substituted into a field of the main request by a fieldMapping entry naming it.
+
+                        Exactly one of 'select' or 'match' is configured: 'select' picks a value out of a single-object response
+                        (GitRef's two reads), 'match' finds one item in a list response and takes a field off it (Keycloak's
+                        alias -> id).
+                      properties:
+                        match:
+                          description: Match finds exactly one item in a list response
+                            and takes a field off it.
+                          properties:
+                            equalsFromCustomResource:
+                              description: EqualsFromCustomResource is a JSONPath
+                                into the Custom Resource yielding the value to match.
+                              type: string
+                            itemsAt:
+                              default: .
+                              description: |-
+                                ItemsAt is a gojq program yielding the array to search. Defaults to '.' for a response that is
+                                itself a bare array.
+                              type: string
+                            onMissing:
+                              default: requeue
+                              description: |-
+                                OnMissing selects what happens when no item matches.
+                                  - "requeue" (default): the referent may still be converging -- a flow CR that has not been
+                                    created yet is the expected case, not an error.
+                                  - "error": no match is a permanent misconfiguration.
+                              enum:
+                              - requeue
+                              - error
+                              type: string
+                            selectField:
+                              description: SelectField is the field taken off the
+                                matched item, e.g. 'id'.
+                              type: string
+                            whereField:
+                              description: WhereField is the field on each item compared
+                                against the Custom Resource value, e.g. 'alias'.
+                              type: string
+                          required:
+                          - equalsFromCustomResource
+                          - selectField
+                          - whereField
+                          type: object
+                        method:
+                          description: Method is the HTTP method of the lookup's operation.
+                          enum:
+                          - GET
+                          - POST
+                          type: string
+                        name:
+                          description: |-
+                            Name identifies this lookup. A fieldMapping resolver references it by this name, as does a later
+                            lookup's parameter via 'fromLookup'.
+                          maxLength: 63
+                          pattern: ^[a-zA-Z][a-zA-Z0-9]*$
+                          type: string
+                        oasPath:
+                          description: |-
+                            OASPath overrides the document this lookup resolves against, exactly as a verb's does (#108). A
+                            lookup against a different service than the resource's own verbs is the case this exists for.
+                          type: string
+                        parameters:
+                          description: |-
+                            Parameters binds the lookup's OWN path and query parameters, from the Custom Resource or from an
+                            earlier lookup's result.
+                          items:
+                            description: |-
+                              LookupParameter binds one of a lookup's own parameters. The value comes EITHER from the Custom Resource
+                              or from an earlier lookup's result, never both.
+                            properties:
+                              fromLookup:
+                                description: |-
+                                  FromLookup names an EARLIER dependentLookups entry whose result supplies the value.
+
+                                  "Earlier" is load-bearing and enforced at the Resource level: a lookup may only reference one
+                                  declared above it. That makes a cycle unrepresentable rather than detected, so there is no solver
+                                  and no runtime cycle check to get wrong.
+                                maxLength: 63
+                                type: string
+                              inCustomResource:
+                                description: InCustomResource is a JSONPath into the
+                                  Custom Resource supplying the value.
+                                type: string
+                              inPath:
+                                description: InPath selects a path parameter of the
+                                  lookup's operation.
+                                type: string
+                              inQuery:
+                                description: InQuery selects a query parameter of
+                                  the lookup's operation.
+                                type: string
+                              valueMapping:
+                                description: |-
+                                  ValueMapping transforms the value before it is bound, using the same tiers as a fieldMapping entry.
+                                  The jq tier is what supplies a prefix a declared path needs but the source value does not carry,
+                                  e.g. '"heads/" + .' for GitHub's {ref}.
+                                properties:
+                                  aliases:
+                                    description: |-
+                                      Aliases is an explicit set of bidirectional CR<->API value pairs (used when type is 'alias').
+                                      On the request the CR value is rewritten to its apiValue; on the response the apiValue is rewritten
+                                      back to the CR value; any value without a matching pair passes through unchanged.
+                                    items:
+                                      description: 'ValueAlias is a single bidirectional
+                                        CR<->API value pair, e.g. {customResourceValue:
+                                        read, apiValue: pull}.'
+                                      properties:
+                                        apiValue:
+                                          description: APIValue is the corresponding
+                                            value as expressed by the external API
+                                            (API domain).
+                                          type: string
+                                        customResourceValue:
+                                          description: CustomResourceValue is the
+                                            value as expressed in the Custom Resource
+                                            (CR domain).
+                                          type: string
+                                      required:
+                                      - apiValue
+                                      - customResourceValue
+                                      type: object
+                                    type: array
+                                  jq:
+                                    description: |-
+                                      JQ is a gojq program (used when type is 'jq'), supplied inline or as a referenced .jq module.
+                                      The program is one-directional: for a round-tripping field, write the inverse program in the
+                                      opposite-direction entry.
+                                    properties:
+                                      entrypoint:
+                                        description: |-
+                                          Entrypoint is the jq function defined in the referenced module to invoke, e.g. "normalize".
+                                          If empty, the whole module body is executed as the program. Only meaningful together with ref.
+                                        type: string
+                                      inline:
+                                        description: Inline is a gojq source literal.
+                                          Best for short, single-use expressions.
+                                        type: string
+                                      ref:
+                                        description: |-
+                                          Ref references a self-contained .jq module asset, using the SAME URI scheme as spec.oasPath:
+                                            configmap://<namespace>/<name>/<key>   |   http(s)://<url>
+                                        pattern: ^(configmap:\/\/([a-z0-9-]+)\/([a-z0-9-]+)\/([a-zA-Z0-9._-]+)|https?:\/\/\S+)$
+                                        type: string
+                                    type: object
+                                    x-kubernetes-validations:
+                                    - message: exactly one of inline or ref must be
+                                        set
+                                      rule: has(self.inline) != has(self.ref)
+                                    - message: entrypoint is only valid together with
+                                        ref
+                                      rule: '!has(self.entrypoint) || has(self.ref)'
+                                  type:
+                                    description: Type selects the transform tier.
+                                    enum:
+                                    - alias
+                                    - jq
+                                    type: string
+                                required:
+                                - type
+                                type: object
+                                x-kubernetes-validations:
+                                - message: aliases must be set when type is 'alias'
+                                  rule: 'self.type == ''alias'' ? has(self.aliases)
+                                    : true'
+                                - message: jq must be set when type is 'jq'
+                                  rule: 'self.type == ''jq'' ? has(self.jq) : true'
+                            type: object
+                            x-kubernetes-validations:
+                            - message: exactly one of inPath or inQuery must be set
+                              rule: has(self.inPath) != has(self.inQuery)
+                            - message: 'exactly one of inCustomResource or fromLookup
+                                must be set: a parameter''s value comes either from
+                                the Custom Resource or from an earlier lookup, and
+                                declaring both leaves the precedence to the implementation
+                                rather than the author'
+                              rule: has(self.inCustomResource) != has(self.fromLookup)
+                          maxItems: 16
+                          type: array
+                        path:
+                          description: |-
+                            Path is the lookup's path, which MUST exist in the document under Method exactly as a verb's does --
+                            parameters are resolved against the document, so a path that is not declared there has no parameter
+                            schema and cannot be bound.
+
+                            This is a sharper constraint than it looks when transcribing an API's docs. oasgen-provider#120
+                            writes GitHub's git-ref read in prose as /repos/{owner}/{repo}/git/ref/heads/{default_branch}, but
+                            GitHub's actual operation is GET /repos/{owner}/{repo}/git/ref/{ref} -- ONE parameter, whose value
+                            must be formatted "heads/<branch>". The prose path would not resolve; the real one needs the prefix
+                            supplied, which is what a parameter's valueMapping is for.
+
+                            A document also has to declare the operation at all. Confirmed with the GitHub KOG: none of the five
+                            OAS assets it ships declares any git-ref operation today -- the only git/refs occurrences are
+                            git_refs_url hypermedia example strings inside the Repository schema. Adding the operation to the
+                            document is a prerequisite for that consumer, separate from this field existing.
+                          type: string
+                        select:
+                          description: |-
+                            Select is a gojq program run against the lookup's response body, yielding the single value to
+                            substitute, e.g. '.default_branch' or '.object.sha'.
+                          type: string
+                      required:
+                      - method
+                      - name
+                      - path
+                      type: object
+                      x-kubernetes-validations:
+                      - message: 'exactly one of select or match must be set: select
+                          reads a value out of a single-object response, match finds
+                          one item in a list response'
+                        rule: has(self.select) != has(self.match)
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-validations:
+                    - message: 'dependentLookups names must be unique: a fieldMapping
+                        resolver names a lookup, so two lookups sharing a name leave
+                        which one runs decided by list order rather than by the author'
+                      rule: self.all(l, self.filter(o, o.name == l.name).size() ==
+                        1)
                   excludedSpecFields:
                     description: 'ExcludedSpecFields: the list of fields to exclude
                       from the spec of the generated CRD (for example server-generated
@@ -870,6 +1112,32 @@ spec:
                                   BEFORE valueMapping, so a resolved value may still be alias/jq-transformed afterward. Valid
                                   only on request-direction entries (inPath/inQuery/inBody set).
                                 properties:
+                                  dependentLookup:
+                                    description: |-
+                                      DependentLookup substitutes the result of a named pre-call read (used when type is
+                                      'dependentLookup'). The named lookup is declared in Resource.DependentLookups.
+                                    properties:
+                                      name:
+                                        description: Name is the dependentLookups
+                                          entry to substitute from.
+                                        maxLength: 63
+                                        type: string
+                                      when:
+                                        description: |-
+                                          When guards the lookup, so it is skipped when the value is already available. Without a guard, a CR
+                                          that supplies the value explicitly would still pay for the read and then have the result discarded.
+                                        properties:
+                                          customResourceFieldAbsent:
+                                            description: |-
+                                              CustomResourceFieldAbsent runs the lookup only when this JSONPath is absent or null in the Custom
+                                              Resource, so an explicitly supplied value wins and costs no API calls.
+                                            type: string
+                                        required:
+                                        - customResourceFieldAbsent
+                                        type: object
+                                    required:
+                                    - name
+                                    type: object
                                   secretRef:
                                     description: |-
                                       SecretRef substitutes a Kubernetes Secret's value for the field (used when type is 'secretRef'). The
@@ -894,6 +1162,7 @@ spec:
                                     description: Type selects the resolver kind.
                                     enum:
                                     - secretRef
+                                    - dependentLookup
                                     type: string
                                 required:
                                 - type
@@ -901,6 +1170,17 @@ spec:
                                 x-kubernetes-validations:
                                 - message: secretRef must be set when type is 'secretRef'
                                   rule: 'self.type == ''secretRef'' ? has(self.secretRef)
+                                    : true'
+                                - message: dependentLookup must be set when type is
+                                    'dependentLookup'
+                                  rule: 'self.type == ''dependentLookup'' ? has(self.dependentLookup)
+                                    : true'
+                                - message: dependentLookup cannot be set when type
+                                    is 'secretRef'
+                                  rule: 'self.type == ''secretRef'' ? !has(self.dependentLookup)
+                                    : true'
+                                - message: secretRef cannot be set when type is 'dependentLookup'
+                                  rule: 'self.type == ''dependentLookup'' ? !has(self.secretRef)
                                     : true'
                               valueMapping:
                                 description: ValueMapping optionally transforms the
@@ -1534,6 +1814,13 @@ spec:
                   rule: '!self.verbsDescription.exists(v, v.action == ''dispatch'')
                     || !(has(self.createApiRef) || has(self.updateApiRef) || has(self.deleteApiRef)
                     || has(self.observeApiRef))'
+                - message: 'a dependentLookups parameter''s fromLookup must name a
+                    lookup declared EARLIER in the list: resolution is in declaration
+                    order, and restricting references to preceding entries makes a
+                    cycle unrepresentable rather than something detected at runtime'
+                  rule: '!has(self.dependentLookups) || self.dependentLookups.all(i,
+                    l, !has(l.parameters) || l.parameters.all(p, !has(p.fromLookup)
+                    || self.dependentLookups.exists(j, o, j < i && o.name == p.fromLookup)))'
                 - message: 'compareScope cannot be set alongside a ''dispatch'' verb:
                     a dispatch is compared on its correlation token alone, so any
                     other scope would make an unrelated spec edit read as drift on
