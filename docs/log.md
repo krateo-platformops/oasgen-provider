@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-26T09:00:00Z
+timestamp: 2026-10-27T09:00:00Z
 ---
 
 # Log
@@ -12,6 +12,77 @@ timestamp: 2026-10-26T09:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-27 — 0.34.0
+
+Three fixes to paths that could not work, and the async engine driven end to end for the first time.
+Two of the three were found by the integration coverage added here rather than reported by a user.
+
+### Per-verb `oasPath` now reaches the controller
+
+A resource whose verbs span two OAS documents generated a correct CRD and then could not execute the
+verb that needed the second one: `retrieving requested params: operation not found: POST`. The
+generator has resolved `oasPath` per verb since 0.25.0; the controller never read the field at all --
+`VerbsDescription` had no `OASPath` on that side at any tag -- so the feature worked at **no released
+version** (#220, fixed in #227).
+
+Each verb is now executed against the document it declares, resolved by a per-reconcile client set
+keyed by document path, so verbs sharing a document share one fetch and parse.
+
+One client per reconcile *entry point* would not have been enough, and that is the part worth knowing
+if you read the change. **Five uses execute an action their entry point never named**: the delete
+verification runs GET from `Delete`; the async re-read runs GET from a create or update path;
+`IsResourceKnown` runs GET from `Observe`, before the get-or-findby decision; the findby branch; and
+`UpdatableBodyPaths`, which `compareScope: updatable` reads during `Observe` to ask what the UPDATE
+verb's body can express. A client resolved once per entry point addresses the wrong document for
+every one of those.
+
+`UpdatableBodyPaths` also joins `UnstructuredClientInterface`, where `RequestedBody` and
+`RequestedParams` already were. Being reachable only through the concrete type is what forced
+`Observe` to hold one concrete client, which was the obstacle to resolving per verb.
+
+### `postGet` can re-read a resource whose identifier the server assigns
+
+An async create answers 202 with an operation handle and no resource body, so the identifier its get
+verb needs exists nowhere on the CR. `postGet` built its request from the CR alone and failed with
+`missing path parameter: id` -- **after the operation had already succeeded**, so the external
+resource existed while the CR errored on every reconcile (#229, fixed in #231).
+
+An ordering fix rather than a new mechanism: `BuildCallConfig` already resolves path parameters from
+spec **or** status, and `additionalStatusFields` already declares which response fields reach status.
+`postGet` simply ran before anything had projected the trigger response. It now projects first, in
+memory, with the same two calls the caller uses.
+
+Residual limitation, stated so the fix is not read as covering more than it does: a trigger response
+carrying the handle **and nothing else**, with the identifier appearing nowhere until the resource is
+fetched, still cannot be re-read by id -- you would need the id to fetch the thing that would tell
+you the id. That shape needs `findby`.
+
+### A correct async create no longer warns about a missing schema
+
+`no suitable response schema found for action 'create'` fired on a perfectly correct async
+definition: such a verb answers with an operation handle, not the resource, so there is no
+resource-shaped schema to compare against the base action's. The CRD was already right; the warning
+pointed authors at a problem they did not have (#228, fixed in #232).
+
+The comparison already exempted a `dispatch` base for the same stated reason -- *"the dispatch's own
+response is the 204-empty body that made this verb necessary"* -- and async was never given the same
+treatment. Done through the verb model rather than as a special case: `Async` is now mirrored into the
+generator's `Verb` alongside `Correlation`, carrying the document-facing fields only.
+
+### The async engine is executed, both models
+
+`driveAsync`, the `operationRef` extraction, the poll loop, `driveAsyncRequeue` and
+`reReadStatusOnAsyncSuccess` had **no integration coverage**: no testdata declared `async:`, so all of
+it was exercised only by unit tests over its helpers. That is the configuration that concealed the
+whole `dispatch` verb being undriven before 0.33.0, and it concealed both fixes above (#230).
+
+The mock vendor answers 202 with a handle and no body, then reports `running` until polled enough
+times. The tests assert the **vendor's** poll count, not the CR's state, because the CR shows the
+outcome either way and cannot say whether the controller actually polled. Model B additionally
+asserts that the handle is recorded, that `Create` did **not** poll to completion inline -- the only
+thing distinguishing the two models -- and that the handle is cleared on termination, without which
+every later reconcile re-polls a finished operation forever.
 
 ## 2026-10-26 — 0.33.0
 
@@ -137,6 +208,48 @@ not check `alreadyDispatched`, so calling `Create` twice directly fires twice an
 caller performs.
 
 The dispatch verb still has **not** been driven against a live vendor API.
+
+### An accepted spec change no longer silently does nothing
+
+Appending to `additionalStatusFields` — the one mutation its append-only CEL rule permits — was
+accepted, reported `Synced=True` and "External resource is up to date", and **never regenerated the
+CRD**. The field never appeared, with no error, no warning and no event. The same was true of
+`includedSpecFields`, confirmed with a captured before/after on a purpose-built probe (#224, fixed in
+#225).
+
+The mechanism to prevent it was already built and simply never reached: `status.resourceHash` exists
+for exactly this case, `Create` stores it and `Update` compares it and regenerates — but `Observe`
+never consulted it, and since the runtime calls `Update` only when `Observe` reports drift, that
+comparison was unreachable for a spec-only change. `Observe` checked the OAS content hash, the
+auth-secret digest, prunable versions and the *deployment* digest (RBAC, ConfigMap, Deployment —
+never the CRD).
+
+**Expect a one-time CRD regeneration per RestDefinition when you upgrade to this release.** That
+regeneration is the fix working: it is what finally applies spec changes that were previously
+accepted and dropped. An operator watching every CRD regenerate on a version bump whose notes
+mention none of their resources would reasonably read it as a fault, so: it is expected, it happens
+once, and the CRD it produces is the one the RestDefinition has been describing all along.
+
+Two consequences worth stating plainly:
+
+- **An appended `additionalStatusFields` entry now reaches an EXISTING CRD.** `resourceHash` covers
+  the whole of `spec.resource`, so the append changes it, `Observe` reports drift and `Update`
+  regenerates. No manual step, and no need to delete and recreate the RestDefinition — which was the
+  only previous route and destroys the CRD and every CR of that kind.
+- `status.resourceHash` shipped in 0.27.0. A RestDefinition created before that has the field empty,
+  so its first reconcile after this release regenerates once and stores the hash: bounded and
+  self-healing, and correct, since such a CRD may genuinely be stale.
+
+### Tests that can fail
+
+`DeleteRuleMatrix` asserted only that the finalizer was released — the controller's own report of
+itself. Its `success/200-tombstone/verifiable` case therefore stayed green for ten releases while the
+feature it is named after was dead code, with the gojq error printing inside the passing test. Two
+columns now ask better questions (#226): `wantFetchable` asks the **vendor** whether a plain GET
+still answers 200, which is the only way to catch a release that orphaned a live resource; and
+`wantVerified` asks **how** the decision was reached, so a dead predicate reaching the right answer
+by fallback cannot hide. Reverting the #219 fix now fails the tombstone case on `wantVerified` and
+nothing else.
 
 ### Documentation
 
