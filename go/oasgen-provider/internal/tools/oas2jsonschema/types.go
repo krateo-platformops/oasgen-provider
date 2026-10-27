@@ -72,6 +72,29 @@ type Verb struct {
 	// comes from an item of the correlation collection rather than from a get/findby response, and the
 	// refusal checks that the collection endpoint exists and that the token names a real spec field.
 	Correlation *Correlation
+	// Async is set when the verb declares an asynchronous operation. Generation needs it because such a
+	// verb's own response is an operation HANDLE, not the resource: a 202 carrying {"operationId": ...}
+	// has no resource-shaped schema to compare against the base action's, so comparing it reports a
+	// missing schema for a definition that is perfectly correct (#228).
+	//
+	// The same situation as a dispatch base, which the comparison already exempts for the same stated
+	// reason. Mirrored as a library-agnostic type like Correlation above, carrying the document-facing
+	// fields: the poll's method and path are what a future check would validate against the document, in
+	// the way echoedAt is validated for correlation.
+	Async *Async
+}
+
+// Async mirrors the RestDefinition's async block, library-agnostic (see the API type for the full
+// contract). Only the document-facing parts: generation does not drive the operation, it only needs to
+// know the verb is asynchronous -- and, in due course, that the poll endpoint it names exists.
+type Async struct {
+	// Mode is "requeue" for poll-across-reconciles, empty for the inline poll.
+	Mode string
+	// PollMethod and PollPath name the operation-status endpoint.
+	PollMethod string
+	PollPath   string
+	// PostGet reports whether the resource is re-read once the operation succeeds.
+	PostGet bool
 }
 
 // Correlation mirrors the RestDefinition's correlation block, library-agnostic (see the API type for the

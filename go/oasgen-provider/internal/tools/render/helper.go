@@ -149,6 +149,21 @@ func toDomainCorrelation(c *definitionv1alpha1.Correlation) *oas2jsonschema.Corr
 	}
 }
 
+// toDomainAsync mirrors a verb's async block into the generator's library-agnostic type. Nil when the
+// verb is synchronous, which is what the schema comparison keys on: an async verb's own response is an
+// operation handle rather than the resource, so there is nothing to compare it against (#228).
+func toDomainAsync(a *definitionv1alpha1.AsyncConfig) *oas2jsonschema.Async {
+	if a == nil {
+		return nil
+	}
+	return &oas2jsonschema.Async{
+		Mode:       a.Mode,
+		PollMethod: a.Poll.Method,
+		PollPath:   a.Poll.Path,
+		PostGet:    a.PostGet,
+	}
+}
+
 // validateDispatchCorrelation refuses a dispatch verb whose correlation cannot possibly close the loop,
 // here rather than at reconcile time.
 //
