@@ -18,9 +18,11 @@ spec:
     - name
     additionalStatusFields:
     - id
-    # id stays in SPEC deliberately. postGet builds its re-read from the CR alone, so a get keyed by a
-    # server-assigned id can never resolve (#229). This API's id is the client-chosen name, so the author
-    # supplies it and the re-read works -- which is the shape postGet supports.
+    # id is NOT in spec: the API assigns it and only the create response reveals it. This is the canonical
+    # async shape, and the one that could not work before #229 -- postGet built its re-read from the CR
+    # alone, where the trigger response had never been projected.
+    excludedSpecFields:
+    - id
     verbsDescription:
     - action: create
       method: POST

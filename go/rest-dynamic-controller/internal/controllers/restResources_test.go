@@ -1532,23 +1532,32 @@ func TestController(t *testing.T) {
 				t.Errorf("a requeue-mode create must not poll to completion inline; vendor saw %d polls", polls)
 			}
 
-			// Each observe polls once. Bounded, so a controller that never advanced fails rather than
-			// hanging the suite.
-			var id string
+			// Each observe polls once. The completion signal is the HANDLE BEING CLEARED, which is the
+			// controller's own terminal condition -- not the presence of status.id, which is populated from
+			// the trigger response at record time (#229) and so is already there before the first poll.
+			// Bounded, so a controller that never advances fails with diagnostics rather than hanging.
+			completed := false
 			for i := 0; i < 8; i++ {
 				if _, err := handler.Observe(ctx, mustGet(ctx, t, k, "asyncrq-1")); err != nil {
 					t.Errorf("observe %d while the operation was in flight: %v", i+1, err)
 					return ctx
 				}
-				u = mustGet(ctx, t, k, "asyncrq-1")
-				if v, found, _ := unstructured.NestedString(u.Object, "status", "id"); found && v != "" {
-					id = v
+				if mustGet(ctx, t, k, "asyncrq-1").GetAnnotations()[annotationAsyncOperationID] == "" {
+					completed = true
 					break
 				}
 			}
-			if id == "" {
-				t.Errorf("the operation never completed across 8 observes; annotation=%q vendor polls=%d",
-					u.GetAnnotations()[annotationAsyncOperationID], vendorOperationPolls(t, opID))
+			if !completed {
+				t.Errorf("the operation never terminated across 8 observes; handle=%q vendor polls=%d",
+					mustGet(ctx, t, k, "asyncrq-1").GetAnnotations()[annotationAsyncOperationID],
+					vendorOperationPolls(t, opID))
+				return ctx
+			}
+
+			u = mustGet(ctx, t, k, "asyncrq-1")
+			id, found, _ := unstructured.NestedString(u.Object, "status", "id")
+			if !found || id == "" {
+				t.Error("status.id must be populated once the operation has terminated")
 				return ctx
 			}
 			if polls := vendorOperationPolls(t, opID); polls < 3 {
@@ -1557,10 +1566,10 @@ func TestController(t *testing.T) {
 			if !vendorHas(t, id) {
 				t.Errorf("the vendor does not have %s", id)
 			}
-			// The handle must be cleared once the operation terminates, or every later reconcile re-polls a
-			// finished operation forever.
+			// Belt and braces: the handle stays cleared. The loop above exits ON that condition, so this
+			// guards a later write putting it back -- which would re-poll a finished operation forever.
 			if left := mustGet(ctx, t, k, "asyncrq-1").GetAnnotations()[annotationAsyncOperationID]; left != "" {
-				t.Errorf("the operation handle must be cleared once it terminates, still %q", left)
+				t.Errorf("the operation handle must stay cleared once it terminates, got %q", left)
 			}
 			return ctx
 		}).Feature()
