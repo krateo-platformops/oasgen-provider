@@ -163,6 +163,23 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 		return nil, verr
 	}
 
+	// Checked here for the same reason as the echo path above: it rejects a DECLARATION, but it cannot be
+	// CRD validation -- as CEL it exceeds the apiserver's rule cost budget and would refuse the whole CRD
+	// at install (#169). See ValidateDependentLookups.
+	if lerr := generator.ValidateDependentLookups(); lerr != nil {
+		for i, v := range cr.Spec.Resource.VerbsDescription {
+			for j, m := range v.FieldMapping {
+				if m.Resolver != nil && m.Resolver.Type == "dependentLookup" {
+					return nil, &FieldError{
+						Field: fmt.Sprintf("spec.resource.verbsDescription[%d].fieldMapping[%d].resolver.dependentLookup.name", i, j),
+						Err:   lerr,
+					}
+				}
+			}
+		}
+		return nil, lerr
+	}
+
 	_, genSpan := oteltelemetry.Tracer().Start(ctx, "restdefinition.generate_crd")
 	defer genSpan.End()
 	defer func() { oteltelemetry.RecordError(genSpan, err) }()
