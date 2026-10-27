@@ -208,3 +208,7 @@ func TestBuildPollRequest_HandleParam(t *testing.T) {
 			"the poll addresses the OPERATION, not the resource: the handle must not be shadowed")
 	})
 }
+
+func (m *mockAsyncClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
+	return nil, nil
+}

@@ -693,6 +693,12 @@ func (ms *MockServer) router(w http.ResponseWriter, r *http.Request) {
 		ms.dispatchWorkflow(w, r)
 	case strings.HasPrefix(r.URL.Path, "/workflows/") && strings.HasSuffix(r.URL.Path, "/runs") && r.Method == http.MethodGet:
 		ms.listWorkflowRuns(w, r)
+	// POST /v2/resource exists so a two-document RestDefinition can have a create verb whose operation is
+	// ABSENT from the primary document, which is the shape per-verb oasPath exists for (#220): Aruba
+	// CloudServer creates against compute-provider 1.1, whose endpoint the 1.0 document does not declare.
+	// Behaves exactly like POST /resource; only its path differs.
+	case r.URL.Path == "/v2/resource" && r.Method == http.MethodPost:
+		ms.createResource(w, r)
 	case r.URL.Path == "/resource":
 		switch r.Method {
 		case http.MethodGet:
@@ -742,6 +748,7 @@ func (ms *MockServer) Start() error {
 	log.Printf("  POST   /workflows/{id}/dispatches (204, no body -- GitHub workflow_dispatch)")
 	log.Printf("  GET    /workflows/{id}/runs (list runs; token arrives in display_title)")
 	log.Printf("  GET    /admin/dispatch-count")
+	log.Printf("  POST   /v2/resource (create; declared only in the SECOND OAS document)")
 
 	return http.ListenAndServe(addr, nil)
 }

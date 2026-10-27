@@ -248,6 +248,16 @@ type VerbsDescription struct {
 	Method string `json:"method"`
 	// Path: the path to the api
 	Path string `json:"path"`
+	// OASPath, when set, is the OAS document THIS VERB is executed against, overriding the
+	// definition-level spec.oasPath. It exists because one resource's lifecycle can span two documents --
+	// Aruba CloudServer reads from compute-provider 1.0 and creates against 1.1 -- and the generator has
+	// resolved per verb since 0.25.0.
+	//
+	// This field was absent from the RDC side entirely until #220: the generator built a correct CRD from
+	// the second document and the controller then executed every verb against the first, so the verb that
+	// needed the second document failed with "operation not found" and the feature worked at no released
+	// version.
+	OASPath string `json:"oasPath,omitempty"`
 	// RequestFieldMapping provides explicit mapping from API parameters (path, query, or body)
 	// to fields in the Custom Resource. Deprecated: mirrored for backward compatibility; prefer FieldMapping.
 	RequestFieldMapping []RequestFieldMappingItem `json:"requestFieldMapping,omitempty"`

@@ -81,8 +81,8 @@ func hasObserveVerb(verbs []getter.VerbsDescription) bool {
 //	                       prevent. A successful delete is still trusted here, the documented limitation.
 //
 // Returns nil to release the finalizer, or the error to surface while holding it.
-func (h *handler) resolveDeleteOutcome(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured, deleteErr error, log logging.Logger) error {
-	stillExists, verified, verr := h.externalResourceStillExists(ctx, cli, clientInfo, mg, log)
+func (h *handler) resolveDeleteOutcome(ctx context.Context, cs *clientSet, clientInfo *getter.Info, mg *unstructured.Unstructured, deleteErr error, log logging.Logger) error {
+	stillExists, verified, verr := h.externalResourceStillExists(ctx, cs, clientInfo, mg, log)
 	if verr != nil {
 		// The probe itself failed: we know nothing, so retry rather than guess.
 		log.Error(verr, "Verifying deletion")
@@ -126,7 +126,13 @@ func (h *handler) resolveDeleteOutcome(ctx context.Context, cli restclient.Unstr
 // "could not check" must mean "retry", not "assume gone" -- otherwise any delete error on a resource
 // without a get verb would release the finalizer and orphan the resource, which is the bug #77 exists
 // to prevent (#101).
-func (h *handler) externalResourceStillExists(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured, log logging.Logger) (stillExists bool, verified bool, err error) {
+func (h *handler) externalResourceStillExists(ctx context.Context, cs *clientSet, clientInfo *getter.Info, mg *unstructured.Unstructured, log logging.Logger) (stillExists bool, verified bool, err error) {
+	// The GET verb's OWN document, not the delete verb's. Taking the set rather than a client is what makes
+	// that possible: this read runs an action its caller did not name (#220).
+	cli, err := cs.For(ctx, string(apiaction.Get))
+	if err != nil {
+		return false, false, fmt.Errorf("building the client for the verification get: %w", err)
+	}
 	getCall, getInfo, err := builder.APICallBuilder(cli, clientInfo, apiaction.Get)
 	if err != nil || getCall == nil || getInfo == nil {
 		log.Debug("No get verb to verify deletion; trusting the delete result")

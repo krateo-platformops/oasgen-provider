@@ -1,0 +1,12 @@
+# Created via POST /v2/resource, an operation that exists ONLY in the second OAS document.
+kind: Twodocsample
+apiVersion: sample.krateo.io/v1-0
+metadata:
+  name: twodoc-1
+  namespace: default
+spec:
+  name: twodoc-1
+  description: created against the second document
+  configurationRef:
+    name: my-twodoc-config
+    namespace: default

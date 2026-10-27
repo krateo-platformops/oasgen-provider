@@ -88,6 +88,11 @@ type UnstructuredClientInterface interface {
 	ValidateRequest(httpMethod string, path string, parameters map[string]string, query map[string]string, headers map[string]string, cookies map[string]string) error
 	RequestedBody(httpMethod string, path string) (bodys stringset.StringSet, err error)
 	RequestedParams(httpMethod string, path string) (parameters, query, headers, cookies stringset.StringSet, err error)
+	// UpdatableBodyPaths belongs here with its siblings above: it is document introspection, and a caller
+	// holding the interface needs it for compareScope "updatable". It was reachable only through the
+	// concrete type, which forced Observe to hold one, which is what stood in the way of resolving a
+	// client per verb (#220).
+	UpdatableBodyPaths(httpMethod string, path string) ([]string, error)
 	FindBy(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration, findByAction *getter.VerbsDescription) (Response, error)
 	Call(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration) (Response, error)
 	//Validate(req *http.Request) (bool, []error) // TODO: to be re-enabled when libopenapi-validator is stable (to be renamed to ValidateRequest)

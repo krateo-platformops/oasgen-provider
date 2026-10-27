@@ -1,0 +1,39 @@
+# Per-verb oasPath (#220), driven as a CALL rather than a render.
+#
+# get and delete come from the primary document; create comes from oas2, which declares POST /v2/resource
+# and nothing else. The primary document does not mention that path at all, so this resource can only be
+# created if the create verb is executed against the document IT declares. Before #220 the controller
+# loaded one document per resource and the create failed with "operation not found: POST".
+#
+# The generator half has always worked -- it resolved per verb from 0.25.0 -- which is exactly why a test
+# that renders proves nothing here.
+apiVersion: ogen.krateo.io/v1alpha1
+kind: RestDefinition
+metadata:
+  name: sample-twodoc
+  namespace: demo-system
+spec:
+  oasPath: configmap://demo-system/sample/openapi.yaml
+  resourceGroup: sample.krateo.io
+  resource:
+    kind: Twodocsample
+    identifiers:
+    - name
+    additionalStatusFields:
+    - id
+    # id is a path parameter of get/delete and a response field of create, so without this it lands in
+    # spec AND required -- unsatisfiable before the resource exists. It goes to status via
+    # additionalStatusFields above, and builder auto-populates path parameters from spec OR status.
+    excludedSpecFields:
+    - id
+    verbsDescription:
+    - action: create
+      method: POST
+      path: /v2/resource
+      oasPath: configmap://demo-system/sample-v2/openapi.yaml
+    - action: get
+      method: GET
+      path: /resource/{id}
+    - action: delete
+      method: DELETE
+      path: /resource/{id}

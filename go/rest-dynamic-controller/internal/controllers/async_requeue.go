@@ -205,7 +205,13 @@ func (h *handler) reReadStatusOnAsyncSuccess(ctx context.Context, cli restclient
 // handled=true (with the observation the caller should return) while the operation is still pending or has
 // terminated in failure; it returns handled=false once the operation has terminally succeeded (annotation
 // cleared) so the caller falls through to a normal observe that reads the resource's real state.
-func (h *handler) driveAsyncRequeue(ctx context.Context, cli restclient.UnstructuredClientInterface, clientInfo *getter.Info, mg *unstructured.Unstructured, operationID, action string, log logging.Logger) (controller.ExternalObservation, bool, error) {
+func (h *handler) driveAsyncRequeue(ctx context.Context, cs *clientSet, clientInfo *getter.Info, mg *unstructured.Unstructured, operationID, action string, log logging.Logger) (controller.ExternalObservation, bool, error) {
+	// The in-flight operation's OWN action, which is why this takes the set: a create polled from Observe
+	// must address the create verb's document, not the observe verb's (#220).
+	cli, err := cs.For(ctx, action)
+	if err != nil {
+		return controller.ExternalObservation{}, true, fmt.Errorf("building the client for the in-flight %q: %w", action, err)
+	}
 	cfg := asyncConfigForAction(clientInfo.Resource.VerbsDescription, action)
 	if cfg == nil {
 		// The verb no longer declares async — a stale annotation. Clear it and observe normally.

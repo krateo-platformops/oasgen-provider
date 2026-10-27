@@ -1,0 +1,12 @@
+apiVersion: sample.krateo.io/v1alpha1
+kind: TwodocsampleConfiguration
+metadata:
+  name: my-twodoc-config
+  namespace: default
+spec:
+  authentication:
+    bearer:
+      tokenRef:
+        name: sample-auth-sec
+        namespace: default
+        key: token
