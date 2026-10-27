@@ -1,0 +1,97 @@
+# Dependent lookups (#120, rest-dynamic-controller#30) driven end to end.
+#
+# Both consumer shapes in one definition, because the feature is the union of two independent requests:
+#
+#   - a CHAIN (GitRef): read the project's default profile, then read THAT profile's token, where the
+#     second read's path parameter is the first read's result.
+#   - a MATCH over a list (KeycloakClient): find the flow whose alias equals a CR field, take its id.
+#
+# Unit tests cover the helpers. This exists because every defect on this surface came from helpers that
+# were individually correct and never driven together (#218, #220, #224, #228, #229).
+apiVersion: ogen.krateo.io/v1alpha1
+kind: RestDefinition
+metadata:
+  name: sample-lookup
+  namespace: demo-system
+spec:
+  oasPath: configmap://demo-system/sample/openapi.yaml
+  resourceGroup: sample.krateo.io
+  resource:
+    kind: Lookupsample
+    identifiers:
+    - name
+    # id is assigned by the API and only its responses reveal it. Leaving it in spec would make the
+    # default fullSpec drift comparison weigh an unset spec.id against the response's id, which is a
+    # resource that never converges -- the same silent class as #75/#106.
+    excludedSpecFields:
+    - id
+
+    dependentLookups:
+    # Chain, link 1: the project's default profile NAME.
+    - name: defaultProfile
+      method: GET
+      path: /lookup/projects/{projectId}
+      parameters:
+      - inPath: projectId
+        inCustomResource: spec.projectId
+      select: .defaultProfile
+
+    # Chain, link 2: that profile's token. Its path parameter is link 1's RESULT, and the declared path
+    # takes "profiles/main" rather than "main" -- mirroring GitHub's single {ref} whose value must be
+    # "heads/<branch>". So the chained value needs the prefix, supplied by the EXISTING valueMapping jq
+    # tier rather than by any new concatenation primitive.
+    - name: baseToken
+      method: GET
+      path: /lookup/profiles/{profileRef}
+      parameters:
+      - inPath: profileRef
+        fromLookup: defaultProfile
+        valueMapping:
+          type: jq
+          jq:
+            inline: '"profiles/" + .'
+      select: .token.value
+
+    # Match: the flow whose alias equals the CR's. The response is a bare array, so itemsAt defaults to
+    # ".". onMissing defaults to requeue.
+    - name: flowByAlias
+      method: GET
+      path: /lookup/flows
+      match:
+        whereField: alias
+        equalsFromCustomResource: spec.flowAlias
+        selectField: id
+
+    verbsDescription:
+    - action: create
+      method: POST
+      path: /lookup/refs
+      fieldMapping:
+      # Guarded: a CR that supplies spec.sha must win AND must not pay for the two reads. The guard is
+      # what makes that true, and the mock's /admin/lookup-calls counter is how the test proves the reads
+      # did not happen rather than taking the controller's word for it.
+      - inBody: sha
+        resolver:
+          type: dependentLookup
+          dependentLookup:
+            name: baseToken
+            when:
+              customResourceFieldAbsent: spec.sha
+      # Unguarded: always resolved by the match.
+      - inBody: flow
+        resolver:
+          type: dependentLookup
+          dependentLookup:
+            name: flowByAlias
+    - action: get
+      method: GET
+      path: /lookup/refs/{id}
+      requestFieldMapping:
+      - inPath: id
+        inCustomResource: spec.name
+    - action: delete
+      method: DELETE
+      path: /lookup/refs/{id}
+      requestFieldMapping:
+      - inPath: id
+        inCustomResource: spec.name

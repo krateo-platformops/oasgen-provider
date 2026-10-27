@@ -392,8 +392,121 @@ paths:
                     type: string
                   status:
                     type: string
+  # --- dependent lookups (#120) -------------------------------------------------------------------------
+  # Two shapes, because two consumers define the feature: a CHAIN (project -> default profile -> that
+  # profile's token) and a MATCH over a list (the flow whose alias equals a CR field).
+  /lookup/projects/{projectId}:
+    get:
+      summary: First link of the chain - the project's default profile name.
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: the project
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: string}
+                  defaultProfile: {type: string}
+  # The {profileRef} value is "profiles/main", not "main" -- mirroring GitHub's single {ref} parameter
+  # whose value must be formatted "heads/<branch>". That is what makes the chained value need a
+  # valueMapping to be addressable, and testing the easy shape instead would never exercise the transform.
+  /lookup/profiles/{profileRef}:
+    get:
+      summary: Second link - the token of the profile the first link named.
+      parameters:
+        - name: profileRef
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: the profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: {type: string}
+                  token:
+                    type: object
+                    properties:
+                      value: {type: string}
+  /lookup/flows:
+    get:
+      summary: A BARE ARRAY of flows, which is why LookupMatch.itemsAt defaults to ".".
+      responses:
+        '200':
+          description: the flows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    alias: {type: string}
+                    id: {type: string}
+  /lookup/refs:
+    post:
+      summary: Create a ref, carrying the values the lookups resolved.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Ref'}
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ref'}
+  /lookup/refs/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: the ref
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ref'}
+    delete:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '204':
+          description: deleted
+
 components:
   schemas:
+    Ref:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        # projectId and flowAlias are in the BODY so generation puts them in spec, which is what the
+        # lookups read with inCustomResource. That mirrors the real consumers: GitRef's lookups read
+        # spec.owner/spec.repo and KeycloakClient's reads spec.realm, and in both cases those are already
+        # path parameters of the create verb. A lookup can only read a field something else puts in spec.
+        projectId: {type: string}
+        flowAlias: {type: string}
+        # sha is resolved by the chain UNLESS the CR supplies it, which is what the `when` guard decides.
+        sha: {type: string}
+        # flow is always resolved by the match; a CR never sets it.
+        flow: {type: string}
+      required: [name]
     Resource:
       type: object
       properties:

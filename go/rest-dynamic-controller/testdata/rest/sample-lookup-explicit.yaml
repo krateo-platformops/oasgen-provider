@@ -1,0 +1,15 @@
+# The GUARD-CLOSED case: spec.sha is supplied, so the chain must NOT run and the CR's value must win.
+#
+# flowAlias is still resolved by the match, which is unguarded -- so this CR proves the guard is per
+# resolver rather than per resource.
+kind: Lookupsample
+apiVersion: sample.krateo.io/v1-0
+metadata:
+  name: lookup-explicit
+  namespace: default
+spec:
+  name: lookup-explicit
+  projectId: proj-7
+  flowAlias: direct-grant
+  sha: supplied-by-the-cr
+  configurationRef: {name: my-lookup-config, namespace: default}

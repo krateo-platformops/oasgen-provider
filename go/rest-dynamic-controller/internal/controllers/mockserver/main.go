@@ -41,6 +41,17 @@ type MockServer struct {
 	// with an error -- Aruba security/Kms answers 400 "Some kms keys are not deleted" for a key a
 	// direct GET already 404s on (#101). The delete status code is a proxy; the observe verb is truth.
 	deleteErrorsButRemoves bool
+
+	// --- dependent lookups (#120) ---
+	//
+	// lookupCalls counts, per path, how many times each lookup endpoint was actually hit. It is the
+	// GROUND TRUTH for the `when` guard: the only way to prove a guarded-off lookup did not run is to ask
+	// the vendor whether it was called, because the controller reaching Ready proves nothing either way.
+	lookupCalls map[string]int
+	// lastRefBody is the RAW body the ref-create endpoint last received. Asserting on this, rather than on
+	// the CR's status, is what shows the RESOLVED value actually reached the API.
+	lastRefBody map[string]interface{}
+	refs        map[string]map[string]interface{}
 	// tombstoneOnDelete reproduces an API that answers GET for a deleted resource with 200 and a
 	// record carrying status "deleted", rather than 404 (#111, Aruba security/Kmip).
 	tombstoneOnDelete bool
@@ -812,6 +823,25 @@ func (ms *MockServer) router(w http.ResponseWriter, r *http.Request) {
 		ms.operationPollCount(w, r)
 	case r.URL.Path == "/admin/dispatch-count" && r.Method == http.MethodGet:
 		ms.dispatchCountHandler(w, r)
+	case r.URL.Path == "/admin/lookup-calls" && r.Method == http.MethodGet:
+		ms.lookupCallsHandler(w, r)
+	case strings.HasPrefix(r.URL.Path, "/lookup/projects/") && r.Method == http.MethodGet:
+		ms.lookupProject(w, r)
+	case strings.HasPrefix(r.URL.Path, "/lookup/profiles/") && r.Method == http.MethodGet:
+		ms.lookupProfile(w, r)
+	case r.URL.Path == "/lookup/flows" && r.Method == http.MethodGet:
+		ms.lookupFlows(w, r)
+	case r.URL.Path == "/lookup/refs" && r.Method == http.MethodPost:
+		ms.createRef(w, r)
+	case strings.HasPrefix(r.URL.Path, "/lookup/refs/"):
+		switch r.Method {
+		case http.MethodGet:
+			ms.getRef(w, r)
+		case http.MethodDelete:
+			ms.deleteRef(w, r)
+		default:
+			ms.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
 	case strings.HasPrefix(r.URL.Path, "/status/"):
 		ms.statusCode(w, r)
 	case strings.HasPrefix(r.URL.Path, "/workflows/") && strings.HasSuffix(r.URL.Path, "/dispatches") && r.Method == http.MethodPost:
@@ -849,6 +879,185 @@ func (ms *MockServer) router(w http.ResponseWriter, r *http.Request) {
 	default:
 		ms.writeError(w, http.StatusNotFound, "endpoint not found")
 	}
+}
+
+// --- dependent lookups (#120) -------------------------------------------------------------------------
+//
+// Two shapes, because two consumers define the feature: a CHAIN (project -> its default profile -> that
+// profile's token), which is GitRef's shape, and a MATCH over a list (the flow whose alias equals a CR
+// field), which is KeycloakClient's.
+//
+// Every one of these endpoints AUTHENTICATES. That is deliberate and load-bearing: the lookup client is
+// built separately from the verb client, and if it were handed out without SetAuth the request would go
+// out unauthenticated. Against an endpoint that does not check, that passes silently -- which is how an
+// earlier async fixture nearly hid exactly this bug.
+
+func (ms *MockServer) noteLookupCall(path string) {
+	ms.mutex.Lock()
+	defer ms.mutex.Unlock()
+	if ms.lookupCalls == nil {
+		ms.lookupCalls = map[string]int{}
+	}
+	ms.lookupCalls[path]++
+}
+
+// GET /lookup/projects/{id} - first link of the chain: the project's default profile NAME.
+func (ms *MockServer) lookupProject(w http.ResponseWriter, r *http.Request) {
+	ms.delay()
+	if !ms.authenticate(r) {
+		ms.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	ms.noteLookupCall("/lookup/projects")
+
+	id := strings.TrimPrefix(r.URL.Path, "/lookup/projects/")
+	if id == "" {
+		ms.writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":             id,
+		"defaultProfile": "main",
+	})
+}
+
+// GET /lookup/profiles/{name} - second link: the token of the profile the first link named.
+//
+// The {name} it is addressed by is "profiles/main" rather than "main", mirroring GitHub's single {ref}
+// parameter whose value must be formatted "heads/<branch>". That is what makes the chained value need a
+// valueMapping, and testing the easy shape instead would miss the transform entirely.
+func (ms *MockServer) lookupProfile(w http.ResponseWriter, r *http.Request) {
+	ms.delay()
+	if !ms.authenticate(r) {
+		ms.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	ms.noteLookupCall("/lookup/profiles")
+
+	name := strings.TrimPrefix(r.URL.Path, "/lookup/profiles/")
+	if name != "profiles/main" {
+		ms.writeError(w, http.StatusNotFound, "profile not found: "+name)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"name":  name,
+		"token": map[string]interface{}{"value": "tok-abc123"},
+	})
+}
+
+// GET /lookup/flows - a BARE ARRAY, which is why LookupMatch.ItemsAt defaults to ".".
+//
+// It deliberately contains a near-miss alias ("browser" alongside "browser-mfa") so a match that compared
+// by prefix, or scoped server-side and took items[0], would bind the wrong id and the test would catch it.
+func (ms *MockServer) lookupFlows(w http.ResponseWriter, r *http.Request) {
+	ms.delay()
+	if !ms.authenticate(r) {
+		ms.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	ms.noteLookupCall("/lookup/flows")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+		{"alias": "browser", "id": "flow-browser"},
+		{"alias": "browser-mfa", "id": "flow-browser-mfa"},
+		{"alias": "direct-grant", "id": "flow-direct-grant"},
+	})
+}
+
+// POST /lookup/refs - records the RAW body so a test can assert what the API actually received.
+func (ms *MockServer) createRef(w http.ResponseWriter, r *http.Request) {
+	ms.delay()
+	if !ms.authenticate(r) {
+		ms.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		ms.writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	name, _ := body["name"].(string)
+	if name == "" {
+		ms.writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	ms.mutex.Lock()
+	if ms.refs == nil {
+		ms.refs = map[string]map[string]interface{}{}
+	}
+	stored := map[string]interface{}{"id": name}
+	for k, v := range body {
+		stored[k] = v
+	}
+	ms.refs[name] = stored
+	ms.lastRefBody = body
+	ms.mutex.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(stored)
+}
+
+// GET /lookup/refs/{id}
+func (ms *MockServer) getRef(w http.ResponseWriter, r *http.Request) {
+	ms.delay()
+	if !ms.authenticate(r) {
+		ms.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/lookup/refs/")
+
+	ms.mutex.RLock()
+	stored, ok := ms.refs[id]
+	ms.mutex.RUnlock()
+	if !ok {
+		ms.writeError(w, http.StatusNotFound, "ref not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(stored)
+}
+
+// DELETE /lookup/refs/{id}
+func (ms *MockServer) deleteRef(w http.ResponseWriter, r *http.Request) {
+	ms.delay()
+	if !ms.authenticate(r) {
+		ms.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/lookup/refs/")
+
+	ms.mutex.Lock()
+	_, ok := ms.refs[id]
+	delete(ms.refs, id)
+	ms.mutex.Unlock()
+	if !ok {
+		ms.writeError(w, http.StatusNotFound, "ref not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /admin/lookup-calls - per-path call counts plus the last ref-create body.
+func (ms *MockServer) lookupCallsHandler(w http.ResponseWriter, r *http.Request) {
+	ms.mutex.RLock()
+	calls := map[string]int{}
+	for k, v := range ms.lookupCalls {
+		calls[k] = v
+	}
+	last := ms.lastRefBody
+	ms.mutex.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"calls":       calls,
+		"lastRefBody": last,
+	})
 }
 
 func (ms *MockServer) Start() error {
