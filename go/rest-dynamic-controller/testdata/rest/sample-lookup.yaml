@@ -1,0 +1,15 @@
+# The GUARD-OPEN case: no spec.sha, so the chain runs and resolves it.
+#
+# The mock's lookup endpoints all authenticate, so this also proves the lookup client is handed out with
+# SetAuth applied -- a lookup client built for a second document without it would read whatever anonymous
+# access allows, which is a wrong answer rather than an error.
+kind: Lookupsample
+apiVersion: sample.krateo.io/v1-0
+metadata:
+  name: lookup-1
+  namespace: default
+spec:
+  name: lookup-1
+  projectId: proj-7
+  flowAlias: browser-mfa
+  configurationRef: {name: my-lookup-config, namespace: default}

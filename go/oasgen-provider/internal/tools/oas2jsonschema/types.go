@@ -38,6 +38,15 @@ type ResourceConfig struct {
 	ConfigurationFields    []ConfigurationField
 	ExcludedSpecFields     []string
 	IncludedSpecFields     []string
+	// DependentLookups are the resource's named pre-call reads. Generation does not execute them -- that
+	// is the controller's job -- but it is the only place that can check they are coherent against the
+	// document: that a lookup's path exists under its method, and that every resolver naming a lookup
+	// names one that is declared.
+	//
+	// Those last two checks live here rather than as CRD validation because they have to traverse
+	// verbsDescription x fieldMapping, and neither list is bounded, so as CEL they exceed the apiserver's
+	// rule cost budget and refuse the whole CRD at install (#169). See the note on the API type.
+	DependentLookups []DependentLookup
 }
 
 type ConfigurationField struct {
@@ -120,6 +129,47 @@ type FieldMappingEntry struct {
 	// ValueMappingType is "" (no transform, type resolvable from the source), "alias" (a statically-typed
 	// string/enum remap), or "jq" (an opaque program whose output type is not statically analyzable).
 	ValueMappingType string
+	// ResolverLookupName is the dependentLookups entry this entry's resolver substitutes from, or "" when
+	// the entry has no resolver or a resolver of another kind. Generation needs it only to check the name
+	// is declared; resolving the value is the controller's job.
+	ResolverLookupName string
+}
+
+// DependentLookup mirrors the RestDefinition's dependentLookups entry, library-agnostic (see the API type
+// for the full contract). Only the document-facing parts, as for Correlation and Async: generation does not
+// run the lookup, it checks that what was declared can work.
+type DependentLookup struct {
+	Name    string
+	Method  string
+	Path    string
+	OASPath string
+	// Parameters are the lookup's own path/query bindings. Generation checks each named parameter exists
+	// on the operation, which is the check that catches a lookup transcribed from an API's prose docs
+	// rather than from the document it will actually run against.
+	Parameters []LookupParameter
+	// Select and Match are mutually exclusive, already enforced at admission. Both are carried because
+	// which one is set determines what a response-shape check would have to look at.
+	Select string
+	Match  *LookupMatch
+}
+
+// LookupParameter mirrors one of a lookup's parameter bindings.
+type LookupParameter struct {
+	InPath           string
+	InQuery          string
+	InCustomResource string
+	FromLookup       string
+	ValueMappingType string
+}
+
+// LookupMatch mirrors a lookup's client-side match block. There is deliberately no "take the first match"
+// option; see the API type for what taking items[0] did to Keycloak.
+type LookupMatch struct {
+	ItemsAt                  string
+	WhereField               string
+	EqualsFromCustomResource string
+	SelectField              string
+	OnMissing                string
 }
 
 // --- Library-Agnostic Domain Models ---

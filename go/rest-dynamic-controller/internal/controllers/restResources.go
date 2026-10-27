@@ -659,8 +659,24 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	}
 
 	// First provisioning: a missing secretRef RBAC Role is normal here (expectExisting=false).
-	resolved, err := h.ensureSecretRefRBACAndResolve(ctx, clientInfo, callInfo.FieldMapping, mg, false)
+	resolved, err := h.ensureSecretRefRBACAndResolve(ctx, cs, clientInfo, callInfo.FieldMapping, mg, false)
 	if err != nil {
+		// A match that found no item, on a lookup declaring onMissing: requeue, is the expected state while
+		// the CR defining the referent is still converging -- not a failure. Report Pending and return
+		// cleanly so the next reconcile retries; returning the error instead would surface a permanent
+		// failure for an ordering race that resolves itself.
+		if isLookupReferentMissing(err) {
+			log.Debug("A dependent lookup's referent does not exist yet; waiting", "kind", mg.GetKind(), "reason", err.Error())
+			if cerr := unstructuredtools.SetConditions(mg, customcondition.Pending()); cerr != nil {
+				log.Error(cerr, "Setting condition")
+				return cerr
+			}
+			_, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+				Pluralizer:    h.pluralizer,
+				DynamicClient: h.dynamicClient,
+			})
+			return uerr
+		}
 		log.Error(err, "Provisioning secretRef RBAC / resolving field mapping resolvers")
 		return err
 	}
@@ -828,8 +844,24 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 
 	// The Role should already exist from Create (expectExisting=true): if it's unexpectedly missing, that's
 	// a hard error (decision D), not a silent recreate. Full replace of the granted secret-name set.
-	resolved, err := h.ensureSecretRefRBACAndResolve(ctx, clientInfo, callInfo.FieldMapping, mg, true)
+	resolved, err := h.ensureSecretRefRBACAndResolve(ctx, cs, clientInfo, callInfo.FieldMapping, mg, true)
 	if err != nil {
+		// A match that found no item, on a lookup declaring onMissing: requeue, is the expected state while
+		// the CR defining the referent is still converging -- not a failure. Report Pending and return
+		// cleanly so the next reconcile retries; returning the error instead would surface a permanent
+		// failure for an ordering race that resolves itself.
+		if isLookupReferentMissing(err) {
+			log.Debug("A dependent lookup's referent does not exist yet; waiting", "kind", mg.GetKind(), "reason", err.Error())
+			if cerr := unstructuredtools.SetConditions(mg, customcondition.Pending()); cerr != nil {
+				log.Error(cerr, "Setting condition")
+				return cerr
+			}
+			_, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+				Pluralizer:    h.pluralizer,
+				DynamicClient: h.dynamicClient,
+			})
+			return uerr
+		}
 		log.Error(err, "Refreshing secretRef RBAC / resolving field mapping resolvers")
 		return err
 	}
@@ -1044,7 +1076,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// making this fatal would hold the finalizer for a resource that does not exist. Whether the resource
 	// is still addressable is decided below, from the path parameters; if it is, the delete proceeds
 	// without the unresolved values, which for a delete request are almost never part of the call.
-	resolved, err := h.ensureSecretRefRBACAndResolve(ctx, clientInfo, callInfo.FieldMapping, mg, false)
+	resolved, err := h.ensureSecretRefRBACAndResolve(ctx, cs, clientInfo, callInfo.FieldMapping, mg, false)
 	if err != nil {
 		log.Warn("Provisioning secretRef RBAC / resolving field mapping resolvers, continuing", "error", err)
 		resolved = nil

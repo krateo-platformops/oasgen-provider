@@ -49,6 +49,10 @@ const (
 	CodePathNotFound GenerationCode = "PathNotFound"
 	// CodeStatusFieldNotFound indicates that a status field was not found in the response schema.
 	CodeStatusFieldNotFound GenerationCode = "StatusFieldNotFound"
+	// CodeLookupNotFound indicates that a dependentLookup resolver names a lookup the resource does not
+	// declare. It is a generation-time code rather than a CRD validation because the check cannot be
+	// expressed as CEL within the apiserver's rule cost budget; see ValidateDependentLookups.
+	CodeLookupNotFound GenerationCode = "LookupNotFound"
 	// CodeNoRootSchema indicates that no base schema could be found for the spec.
 	CodeNoRootSchema GenerationCode = "NoRootSchema"
 	// CodeNoStatusSchema indicates that no schema could be found for the status.

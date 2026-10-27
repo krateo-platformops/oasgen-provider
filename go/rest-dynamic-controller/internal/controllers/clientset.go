@@ -95,16 +95,46 @@ func (c *clientSet) oasPathFor(action string) string {
 // the async path re-reads with the GET verb, so both run an action their entry point did not name. A
 // client resolved once per entry point would address the wrong document for exactly those reads.
 func (c *clientSet) For(ctx context.Context, action string) (restclient.UnstructuredClientInterface, error) {
-	path := c.oasPathFor(action)
+	return c.forDocument(ctx, c.oasPathFor(action), fmt.Sprintf("action %q", action))
+}
+
+// oasPathForLookup returns the document a dependent lookup is executed against: its own oasPath when it
+// declares one, otherwise the definition-level spec.oasPath -- the same inheritance a verb gets.
+func (c *clientSet) oasPathForLookup(l getter.DependentLookup) string {
+	if l.OASPath != "" {
+		return l.OASPath
+	}
+	if c.info == nil {
+		return ""
+	}
+	return c.info.URL
+}
+
+// ForLookup returns the client for the document a dependent lookup executes against.
+//
+// It shares forDocument, and therefore the cache, with For: a lookup against the same document as the
+// verb it feeds costs no extra fetch or parse. That sharing is the reason the cache is keyed by path
+// rather than by action -- a lookup has no action to key on.
+func (c *clientSet) ForLookup(ctx context.Context, l getter.DependentLookup) (restclient.UnstructuredClientInterface, error) {
+	return c.forDocument(ctx, c.oasPathForLookup(l), fmt.Sprintf("lookup %q", l.Name))
+}
+
+// forDocument builds, configures and caches the client for one document path.
+//
+// Both entry points go through here so that a client can never be handed out unconfigured. That matters
+// most for SetAuth: a lookup resolved against a second document without it would send an
+// unauthenticated request and read whatever an anonymous caller is allowed to see, which for a
+// permission-scoped list is a wrong answer rather than an error.
+func (c *clientSet) forDocument(ctx context.Context, path, forWhat string) (restclient.UnstructuredClientInterface, error) {
 	if path == "" {
-		return nil, fmt.Errorf("no OAS document is declared for action %q and the definition carries no spec.oasPath", action)
+		return nil, fmt.Errorf("no OAS document is declared for %s and the definition carries no spec.oasPath", forWhat)
 	}
 	if cli, ok := c.byPath[path]; ok {
 		return cli, nil
 	}
 	cli, err := restclient.BuildClient(ctx, c.kube, path)
 	if err != nil {
-		return nil, fmt.Errorf("building the client for action %q against %q: %w", action, path, err)
+		return nil, fmt.Errorf("building the client for %s against %q: %w", forWhat, path, err)
 	}
 	c.configure(cli)
 	c.byPath[path] = cli

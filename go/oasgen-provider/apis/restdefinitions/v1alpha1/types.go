@@ -271,11 +271,18 @@ type FieldMappingItem struct {
 // not be declared and cross-resource lookup — the reason it was built, see
 // krateo-rest-dynamic-controller#30 — was inexpressible. The case it appeared to serve (resolving a
 // server-generated id) is already covered by additionalStatusFields + inCustomResource: status.id. Do not
-// reintroduce it in that shape: #30 carries a design for named lookups with client-side matching.
+// reintroduce it in that shape.
+//
+// The 'dependentLookup' kind IS that #30 design, and it is not the apiLookup shape: the endpoint is
+// declared in Resource.DependentLookups rather than having to name a CRUD verb, matching is client-side,
+// and an ambiguous match is an error instead of items[0].
 // +kubebuilder:validation:XValidation:rule="self.type == 'secretRef' ? has(self.secretRef) : true",message="secretRef must be set when type is 'secretRef'"
+// +kubebuilder:validation:XValidation:rule="self.type == 'dependentLookup' ? has(self.dependentLookup) : true",message="dependentLookup must be set when type is 'dependentLookup'"
+// +kubebuilder:validation:XValidation:rule="self.type == 'secretRef' ? !has(self.dependentLookup) : true",message="dependentLookup cannot be set when type is 'secretRef'"
+// +kubebuilder:validation:XValidation:rule="self.type == 'dependentLookup' ? !has(self.secretRef) : true",message="secretRef cannot be set when type is 'dependentLookup'"
 type FieldResolver struct {
 	// Type selects the resolver kind.
-	// +kubebuilder:validation:Enum=secretRef
+	// +kubebuilder:validation:Enum=secretRef;dependentLookup
 	// +required
 	Type string `json:"type"`
 	// SecretRef substitutes a Kubernetes Secret's value for the field (used when type is 'secretRef'). The
@@ -283,6 +290,10 @@ type FieldResolver struct {
 	// different one.
 	// +optional
 	SecretRef *SecretRefResolver `json:"secretRef,omitempty"`
+	// DependentLookup substitutes the result of a named pre-call read (used when type is
+	// 'dependentLookup'). The named lookup is declared in Resource.DependentLookups.
+	// +optional
+	DependentLookup *DependentLookupRef `json:"dependentLookup,omitempty"`
 }
 
 // SecretRefResolver substitutes a Kubernetes Secret's value for the field. The Secret is always read from
@@ -295,6 +306,145 @@ type SecretRefResolver struct {
 	// KeyFromCustomResource is a JSONPath into the Custom Resource yielding the key within the Secret's data.
 	// +required
 	KeyFromCustomResource string `json:"keyFromCustomResource"`
+}
+
+// DependentLookup is a named, pre-call read against any endpoint in the document, whose selected value is
+// substituted into a field of the main request by a fieldMapping entry naming it.
+//
+// Exactly one of 'select' or 'match' is configured: 'select' picks a value out of a single-object response
+// (GitRef's two reads), 'match' finds one item in a list response and takes a field off it (Keycloak's
+// alias -> id).
+// +kubebuilder:validation:XValidation:rule="has(self.select) != has(self.match)",message="exactly one of select or match must be set: select reads a value out of a single-object response, match finds one item in a list response"
+type DependentLookup struct {
+	// Name identifies this lookup. A fieldMapping resolver references it by this name, as does a later
+	// lookup's parameter via 'fromLookup'.
+	// +required
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z][a-zA-Z0-9]*$`
+	Name string `json:"name"`
+	// Method is the HTTP method of the lookup's operation.
+	//
+	// GET only, deliberately. A lookup is a READ, and the APIs that express a search as POST need a
+	// request body, which there is no field here to declare. Admitting POST without that would ship a
+	// discoverable value that cannot work -- the mistake apiLookup made. Neither known consumer needs it:
+	// GitRef chains two GETs, KeycloakClient lists with a GET. Widen it together with a way to declare
+	// the body, when something actually needs one.
+	// +required
+	// +kubebuilder:validation:Enum=GET
+	Method string `json:"method"`
+	// Path is the lookup's path, which MUST exist in the document under Method exactly as a verb's does --
+	// parameters are resolved against the document, so a path that is not declared there has no parameter
+	// schema and cannot be bound.
+	//
+	// This is a sharper constraint than it looks when transcribing an API's docs. oasgen-provider#120
+	// writes GitHub's git-ref read in prose as /repos/{owner}/{repo}/git/ref/heads/{default_branch}, but
+	// GitHub's actual operation is GET /repos/{owner}/{repo}/git/ref/{ref} -- ONE parameter, whose value
+	// must be formatted "heads/<branch>". The prose path would not resolve; the real one needs the prefix
+	// supplied, which is what a parameter's valueMapping is for.
+	//
+	// A document also has to declare the operation at all. Confirmed with the GitHub KOG: none of the five
+	// OAS assets it ships declares any git-ref operation today -- the only git/refs occurrences are
+	// git_refs_url hypermedia example strings inside the Repository schema. Adding the operation to the
+	// document is a prerequisite for that consumer, separate from this field existing.
+	// +required
+	Path string `json:"path"`
+	// OASPath overrides the document this lookup resolves against, exactly as a verb's does (#108). A
+	// lookup against a different service than the resource's own verbs is the case this exists for.
+	// +optional
+	OASPath string `json:"oasPath,omitempty"`
+	// Parameters binds the lookup's OWN path and query parameters, from the Custom Resource or from an
+	// earlier lookup's result.
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Parameters []LookupParameter `json:"parameters,omitempty"`
+	// Select is a gojq program run against the lookup's response body, yielding the single value to
+	// substitute, e.g. '.default_branch' or '.object.sha'.
+	// +optional
+	Select string `json:"select,omitempty"`
+	// Match finds exactly one item in a list response and takes a field off it.
+	// +optional
+	Match *LookupMatch `json:"match,omitempty"`
+}
+
+// LookupParameter binds one of a lookup's own parameters. The value comes EITHER from the Custom Resource
+// or from an earlier lookup's result, never both.
+// +kubebuilder:validation:XValidation:rule="has(self.inPath) != has(self.inQuery)",message="exactly one of inPath or inQuery must be set"
+// +kubebuilder:validation:XValidation:rule="has(self.inCustomResource) != has(self.fromLookup)",message="exactly one of inCustomResource or fromLookup must be set: a parameter's value comes either from the Custom Resource or from an earlier lookup, and declaring both leaves the precedence to the implementation rather than the author"
+type LookupParameter struct {
+	// InPath selects a path parameter of the lookup's operation.
+	// +optional
+	InPath string `json:"inPath,omitempty"`
+	// InQuery selects a query parameter of the lookup's operation.
+	// +optional
+	InQuery string `json:"inQuery,omitempty"`
+	// InCustomResource is a JSONPath into the Custom Resource supplying the value.
+	// +optional
+	InCustomResource string `json:"inCustomResource,omitempty"`
+	// FromLookup names an EARLIER dependentLookups entry whose result supplies the value.
+	//
+	// "Earlier" is load-bearing and enforced at the Resource level: a lookup may only reference one
+	// declared above it. That makes a cycle unrepresentable rather than detected, so there is no solver
+	// and no runtime cycle check to get wrong.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	FromLookup string `json:"fromLookup,omitempty"`
+	// ValueMapping transforms the value before it is bound, using the same tiers as a fieldMapping entry.
+	// The jq tier is what supplies a prefix a declared path needs but the source value does not carry,
+	// e.g. '"heads/" + .' for GitHub's {ref}.
+	// +optional
+	ValueMapping *ValueMapping `json:"valueMapping,omitempty"`
+}
+
+// LookupMatch finds exactly one item in a list response and takes a field off it.
+//
+// There is deliberately NO option to take the first of several matches. apiLookup scoped its list
+// server-side and then took items[0], and against Keycloak that resolved silently wrong: verified live in
+// ff66424, /authentication/flows ignores ?alias= and returns all 7 flows, so any alias but the first bound
+// the wrong id while reporting success. Ambiguity is always an error here, and the absence of a field to
+// configure otherwise is the point -- the same reason SecretRefResolver exposes no namespace.
+type LookupMatch struct {
+	// ItemsAt is a gojq program yielding the array to search. Defaults to '.' for a response that is
+	// itself a bare array.
+	// +optional
+	// +kubebuilder:default="."
+	ItemsAt string `json:"itemsAt,omitempty"`
+	// WhereField is the field on each item compared against the Custom Resource value, e.g. 'alias'.
+	// +required
+	WhereField string `json:"whereField"`
+	// EqualsFromCustomResource is a JSONPath into the Custom Resource yielding the value to match.
+	// +required
+	EqualsFromCustomResource string `json:"equalsFromCustomResource"`
+	// SelectField is the field taken off the matched item, e.g. 'id'.
+	// +required
+	SelectField string `json:"selectField"`
+	// OnMissing selects what happens when no item matches.
+	//   - "requeue" (default): the referent may still be converging -- a flow CR that has not been
+	//     created yet is the expected case, not an error.
+	//   - "error": no match is a permanent misconfiguration.
+	// +optional
+	// +kubebuilder:validation:Enum=requeue;error
+	// +kubebuilder:default=requeue
+	OnMissing string `json:"onMissing,omitempty"`
+}
+
+// DependentLookupRef names the lookup a fieldMapping resolver substitutes from.
+type DependentLookupRef struct {
+	// Name is the dependentLookups entry to substitute from.
+	// +required
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+	// When guards the lookup, so it is skipped when the value is already available. Without a guard, a CR
+	// that supplies the value explicitly would still pay for the read and then have the result discarded.
+	// +optional
+	When *LookupWhen `json:"when,omitempty"`
+}
+
+// LookupWhen guards a lookup against running unnecessarily.
+type LookupWhen struct {
+	// CustomResourceFieldAbsent runs the lookup only when this JSONPath is absent or null in the Custom
+	// Resource, so an explicitly supplied value wins and costs no API calls.
+	// +required
+	CustomResourceFieldAbsent string `json:"customResourceFieldAbsent"`
 }
 
 // ValueMapping declares a value transform applied to a FieldMappingItem. Exactly one tier is configured:
@@ -695,6 +845,18 @@ type QueryParam struct {
 // +kubebuilder:validation:XValidation:rule="!self.verbsDescription.exists(v, v.action == 'dispatch') || !self.verbsDescription.exists(v, v.action == 'create' || v.action == 'update')",message="a 'dispatch' verb cannot be combined with 'create' or 'update': the dispatch IS the create, and there is nothing an update of a past invocation could mean"
 // +kubebuilder:validation:XValidation:rule="self.verbsDescription.filter(v, v.action == 'dispatch').size() <= 1",message="declare at most one 'dispatch' verb: two dispatches on one kind have no defined order and no way to tell which one a correlated invocation came from"
 // +kubebuilder:validation:XValidation:rule="!self.verbsDescription.exists(v, v.action == 'dispatch') || !(has(self.createApiRef) || has(self.updateApiRef) || has(self.deleteApiRef) || has(self.observeApiRef))",message="a 'dispatch' verb cannot be combined with any *ApiRef: delegating to a Snowplow RESTAction and declaring a correlated dispatch are the two alternative answers to the same problem, and declaring both leaves which one runs decided by the order of checks in the controller rather than by the author"
+// +kubebuilder:validation:XValidation:rule="!has(self.dependentLookups) || self.dependentLookups.all(i, l, !has(l.parameters) || l.parameters.all(p, !has(p.fromLookup) || self.dependentLookups.exists(j, o, j < i && o.name == p.fromLookup)))",message="a dependentLookups parameter's fromLookup must name a lookup declared EARLIER in the list: resolution is in declaration order, and restricting references to preceding entries makes a cycle unrepresentable rather than something detected at runtime"
+// NOTE: the two checks that a dependentLookup resolver names a DECLARED lookup are deliberately NOT CEL
+// rules here. They have to traverse verbsDescription x fieldMapping, and neither list carries a MaxItems
+// bound -- verbsDescription's was removed on purpose (#169), because bounding it only ever existed to keep
+// a different rule inside the cost budget. Written as CEL they are refused outright by the apiserver:
+// "estimated rule cost exceeds budget by factor of more than 100x", and worse, they push the TOTAL for the
+// whole schema over its limit, which takes down the entire CRD install rather than one validation. Measured
+// with the apiserver's own estimator in crd_cost_budget_test.go, which exists so this cannot regress.
+//
+// They are enforced at generation instead, by validateDependentLookups, where there is no cost budget and
+// the message can name the offending verb. That is the same place a per-verb oasPath disagreement is
+// refused.
 // +kubebuilder:validation:XValidation:rule="!self.verbsDescription.exists(v, v.action == 'dispatch') || !has(self.compareScope)",message="compareScope cannot be set alongside a 'dispatch' verb: a dispatch is compared on its correlation token alone, so any other scope would make an unrelated spec edit read as drift on a resource whose only response to drift is to fire the dispatch again"
 type Resource struct {
 	// Name: the name of the resource to manage
@@ -714,6 +876,28 @@ type Resource struct {
 	// CRD-install time -- taking the whole CRD down rather than just the validation (#169).
 	// +required
 	VerbsDescription []VerbsDescription `json:"verbsDescription"`
+	// DependentLookups declares named, pre-call reads whose selected value feeds a field of the main
+	// request, via a fieldMapping entry whose resolver names the lookup.
+	//
+	// This is the shape apiLookup could not express and was removed for (ff66424): its Action had to name
+	// a verb in verbsDescription, and that field is a closed enum, so an auxiliary endpoint could not be
+	// declared at all. A lookup is declared HERE, as a sibling of verbsDescription, precisely so it can
+	// name any endpoint in the document without widening that enum.
+	//
+	// Two consumers define this shape, filed independently by two providers:
+	//   - oasgen-provider#108's GitHub GitRef needs a CHAIN -- the default branch, then that branch's sha
+	//     -- where the second read's path parameter is the first read's result.
+	//   - rest-dynamic-controller#30's KeycloakClient needs client-side MATCHING over a list: find the
+	//     authentication flow whose alias equals a CR field, take its id.
+	//
+	// MaxItems is REQUIRED, not stylistic: the uniqueness and ordering rules below are CEL comprehensions,
+	// and Kubernetes costs a rule statically against the declared bound. An unbounded list estimates as
+	// effectively infinite and the apiserver refuses the whole CRD -- taking the install down rather than
+	// the RestDefinition (#169). Eight is generous; the two known consumers use two and one.
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:XValidation:rule="self.all(l, self.filter(o, o.name == l.name).size() == 1)",message="dependentLookups names must be unique: a fieldMapping resolver names a lookup, so two lookups sharing a name leave which one runs decided by list order rather than by the author"
+	// +optional
+	DependentLookups []DependentLookup `json:"dependentLookups,omitempty"`
 	// Identifiers: the list of fields to use as identifiers - used to populate the status of the resource
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Identifiers are immutable, you cannot change them once the CRD has been generated"
 	// +optional

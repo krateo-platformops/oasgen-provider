@@ -68,7 +68,7 @@ func TestResolveRequestResolvers_SecretRef(t *testing.T) {
 		},
 	}
 
-	resolved, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg)
+	resolved, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg, nil)
 	if err != nil {
 		t.Fatalf("ResolveRequestResolvers: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestResolveRequestResolvers_SecretRefArrayPath(t *testing.T) {
 		},
 	}
 
-	resolved, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg)
+	resolved, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg, nil)
 	if err != nil {
 		t.Fatalf("ResolveRequestResolvers: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestResolveRequestResolvers_MissingSecretIsError(t *testing.T) {
 		},
 	}
 
-	_, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg)
+	_, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg, nil)
 	if err == nil {
 		t.Fatal("expected an error when the referenced secret does not exist")
 	}
@@ -153,7 +153,7 @@ func TestResolveRequestResolvers_NoResolversIsNilNoError(t *testing.T) {
 	mapping := []getter.FieldMappingItem{
 		{InBody: "name", InCustomResource: "spec.name"},
 	}
-	resolved, err := ResolveRequestResolvers(context.Background(), nil, mapping, mg)
+	resolved, err := ResolveRequestResolvers(context.Background(), nil, mapping, mg, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestResolveRequestResolvers_SecretRefDedupedAcrossEntries(t *testing.T) {
 	}
 
 	dyn.Fake.ClearActions()
-	resolved, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg)
+	resolved, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg, nil)
 	if err != nil {
 		t.Fatalf("ResolveRequestResolvers: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestResolveRequestResolvers_DistinctSecretsNotDeduped(t *testing.T) {
 		},
 	}
 
-	resolved, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg)
+	resolved, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg, nil)
 	if err != nil {
 		t.Fatalf("ResolveRequestResolvers: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestResolveSecretRefValueNotLeakedInErrors(t *testing.T) {
 			},
 		},
 	}
-	_, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg)
+	_, err := ResolveRequestResolvers(context.Background(), dyn, mapping, mg, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}

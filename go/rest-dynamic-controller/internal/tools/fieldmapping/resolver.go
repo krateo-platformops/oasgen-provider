@@ -31,7 +31,16 @@ func ResolverKey(m getter.FieldMappingItem) string {
 // entry.
 // The cache does not persist across calls (a fresh ResolveRequestResolvers call per Create/Update/Delete),
 // so it never serves a stale value across reconciles.
-func ResolveRequestResolvers(ctx context.Context, dyn dynamic.Interface, mapping []getter.FieldMappingItem, mg *unstructured.Unstructured) (map[string]interface{}, error) {
+// lookupValues carries the already-executed dependent lookups, keyed by lookup name. Resolution is split
+// that way because running a lookup needs an HTTP client and the resource's documents, which belong to the
+// controller, while SUBSTITUTION belongs here with the other resolver kinds.
+//
+// A dependentLookup entry whose lookup is absent from lookupValues is a hard ERROR, not a skip. That is
+// load-bearing: builder.applyFieldMapping skips a resolver entry with no resolved value, treating it as
+// "not applicable here", so without this check a caller that forgot to run the lookups would send the
+// request with the field simply missing -- exactly the silent-wrong-request class this whole resolver path
+// exists to prevent (#117).
+func ResolveRequestResolvers(ctx context.Context, dyn dynamic.Interface, mapping []getter.FieldMappingItem, mg *unstructured.Unstructured, lookupValues map[string]interface{}) (map[string]interface{}, error) {
 	if len(mapping) == 0 {
 		return nil, nil
 	}
@@ -69,6 +78,27 @@ func ResolveRequestResolvers(ctx context.Context, dyn dynamic.Interface, mapping
 				secretCache[cacheKey] = val
 			}
 			out[ResolverKey(m)] = val
+		case "dependentLookup":
+			r := m.Resolver.DependentLookup
+			if r == nil {
+				return nil, fmt.Errorf("dependentLookup resolver is not configured (field %q)", m.InBody)
+			}
+			v, ok := lookupValues[r.Name]
+			if !ok {
+				// Either the guard skipped this lookup -- in which case the CR supplies the value and
+				// there must be NO resolved entry, so the CR's own field flows through normally -- or the
+				// caller never ran the lookups at all. The two are told apart by re-evaluating the guard
+				// here rather than trusting the absence, because the second case must be loud.
+				skip, gerr := guardSkips(r.When, mg)
+				if gerr != nil {
+					return nil, gerr
+				}
+				if skip {
+					continue
+				}
+				return nil, fmt.Errorf("dependentLookup %q was not resolved for field %q: the lookups were not run before building this request", r.Name, m.InBody)
+			}
+			out[ResolverKey(m)] = v
 		default:
 			return nil, fmt.Errorf("resolver type %q is not supported (field %q)", m.Resolver.Type, m.InCustomResource)
 		}
@@ -134,4 +164,22 @@ func readStringPath(mg *unstructured.Unstructured, path string) (string, error) 
 		return "", fmt.Errorf("path %q is not a string", path)
 	}
 	return s, nil
+}
+
+// guardSkips reports whether a dependentLookup's `when` guard means the lookup is skipped because the CR
+// already carries the value. A nil guard never skips. An explicit null counts as absent: that is how a CR
+// says "I am not supplying this".
+func guardSkips(when *getter.LookupWhen, mg *unstructured.Unstructured) (bool, error) {
+	if when == nil || when.CustomResourceFieldAbsent == "" {
+		return false, nil
+	}
+	segments, err := pathparsing.ParsePath(when.CustomResourceFieldAbsent)
+	if err != nil || len(segments) == 0 {
+		return false, fmt.Errorf("invalid when.customResourceFieldAbsent path %q", when.CustomResourceFieldAbsent)
+	}
+	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
+	if err != nil {
+		return false, fmt.Errorf("reading when.customResourceFieldAbsent %q: %w", when.CustomResourceFieldAbsent, err)
+	}
+	return found && val != nil, nil
 }

@@ -404,6 +404,36 @@ func dispatchCount(t *testing.T) int {
 	return out.DispatchCount
 }
 
+var lookupGVR = schema.GroupVersionResource{
+	Group:    "sample.krateo.io",
+	Version:  "v1-0",
+	Resource: "lookupsamples",
+}
+
+// lookupState asks the VENDOR what it saw: how many times each lookup endpoint was hit, and the raw body
+// the create received.
+//
+// Both halves matter and neither can be got from the CR. The call counts are the only way to prove a
+// guarded-off lookup did NOT run -- a CR reaching Ready says nothing either way -- and the raw body is the
+// only way to prove the RESOLVED value actually reached the API rather than being recorded in status and
+// dropped on the way out.
+func lookupState(t *testing.T) (map[string]int, map[string]interface{}) {
+	t.Helper()
+	resp, err := http.Get("http://localhost:30007/admin/lookup-calls")
+	if err != nil {
+		t.Fatalf("reading the lookup call counts: %v", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Calls       map[string]int         `json:"calls"`
+		LastRefBody map[string]interface{} `json:"lastRefBody"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decoding the lookup call counts: %v", err)
+	}
+	return out.Calls, out.LastRefBody
+}
+
 func TestMain(m *testing.M) {
 	xenv.SetTestMode(true)
 
@@ -1571,6 +1601,102 @@ func TestController(t *testing.T) {
 			if left := mustGet(ctx, t, k, "asyncrq-1").GetAnnotations()[annotationAsyncOperationID]; left != "" {
 				t.Errorf("the operation handle must stay cleared once it terminates, got %q", left)
 			}
+			return ctx
+		}).
+		// Dependent lookups (#120, rest-dynamic-controller#30) end to end.
+		//
+		// Both consumer shapes in one block: a CHAIN whose second read's path parameter is the first
+		// read's result, and a MATCH over a list. Every assertion that matters is made against the mock
+		// vendor rather than the CR, because the two things that can go wrong here are invisible from the
+		// CR: a lookup that ran when the guard said it should not, and a resolved value that reached
+		// status but not the outgoing request.
+		Assess("DependentLookupsChainAndMatch", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			// Mock state persists between Assess blocks, and the delete matrix above leaves simulateErrors
+			// ON -- which would fail every lookup with a 500 that has nothing to do with lookups.
+			resetDispatchMock(t, `{"simulateErrors": false, "authFailures": false}`)
+
+			k := cli.Resource(lookupGVR).Namespace(namespace)
+
+			// --- guard OPEN: no spec.sha, so the chain must run and resolve it ---
+			u := mustGet(ctx, t, k, "lookup-1")
+			obs, err := handler.Observe(ctx, u)
+			if err != nil {
+				t.Error("Error during initial observe", "error", err)
+				return ctx
+			}
+			if obs.ResourceExists {
+				t.Error("the ref cannot exist before it is created")
+				return ctx
+			}
+
+			before, _ := lookupState(t)
+
+			u = mustGet(ctx, t, k, "lookup-1")
+			if err := handler.Create(ctx, u); err != nil {
+				t.Error("Error creating through dependent lookups", "error", err)
+				return ctx
+			}
+
+			calls, body := lookupState(t)
+			if got := calls["/lookup/projects"] - before["/lookup/projects"]; got != 1 {
+				t.Errorf("chain link 1 must run exactly once, vendor saw %d", got)
+			}
+			if got := calls["/lookup/profiles"] - before["/lookup/profiles"]; got != 1 {
+				t.Errorf("chain link 2 must run exactly once, vendor saw %d", got)
+			}
+			if got := calls["/lookup/flows"] - before["/lookup/flows"]; got != 1 {
+				t.Errorf("the match lookup must run exactly once, vendor saw %d", got)
+			}
+			// The whole point: the value the chain resolved has to be in the body the API received. The
+			// prefix proves the chained valueMapping ran too -- without it link 2 is addressed as "main"
+			// and 404s.
+			if got, _ := body["sha"].(string); got != "tok-abc123" {
+				t.Errorf("the API must receive the chain-resolved sha, got %q", got)
+			}
+			// browser-mfa, NOT browser: the flows list carries a near-miss alias so a prefix comparison or
+			// an items[0] shortcut binds the wrong id and lands here.
+			if got, _ := body["flow"].(string); got != "flow-browser-mfa" {
+				t.Errorf("the match must bind the id of the EXACT alias, got %q", got)
+			}
+
+			if obs, err = handler.Observe(ctx, mustGet(ctx, t, k, "lookup-1")); err != nil {
+				t.Error("Error observing after create", "error", err)
+			} else if !obs.ResourceExists {
+				t.Error("the ref must exist after create")
+			}
+
+			// --- guard CLOSED: spec.sha is supplied, so the chain must NOT run ---
+			before, _ = lookupState(t)
+
+			ue := mustGet(ctx, t, k, "lookup-explicit")
+			if _, err := handler.Observe(ctx, ue); err != nil {
+				t.Error("Error observing the explicit-sha resource", "error", err)
+				return ctx
+			}
+			ue = mustGet(ctx, t, k, "lookup-explicit")
+			if err := handler.Create(ctx, ue); err != nil {
+				t.Error("Error creating with an explicitly supplied sha", "error", err)
+				return ctx
+			}
+
+			calls, body = lookupState(t)
+			if got := calls["/lookup/projects"] - before["/lookup/projects"]; got != 0 {
+				t.Errorf("the guard must stop the chain entirely; vendor saw %d calls to link 1", got)
+			}
+			if got := calls["/lookup/profiles"] - before["/lookup/profiles"]; got != 0 {
+				t.Errorf("the guard must stop the chain entirely; vendor saw %d calls to link 2", got)
+			}
+			// The guard is per RESOLVER, not per resource: the unguarded match still has to run.
+			if got := calls["/lookup/flows"] - before["/lookup/flows"]; got != 1 {
+				t.Errorf("the unguarded match must still run, vendor saw %d", got)
+			}
+			if got, _ := body["sha"].(string); got != "supplied-by-the-cr" {
+				t.Errorf("an explicitly supplied sha must win, got %q", got)
+			}
+			if got, _ := body["flow"].(string); got != "flow-direct-grant" {
+				t.Errorf("the match must bind direct-grant's id, got %q", got)
+			}
+
 			return ctx
 		}).Feature()
 
