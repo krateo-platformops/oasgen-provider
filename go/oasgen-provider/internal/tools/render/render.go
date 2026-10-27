@@ -118,6 +118,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 			ItemsPath:    v.ItemsPath,
 			FieldMapping: toDomainFieldMapping(v),
 			Correlation:  toDomainCorrelation(v.Correlation),
+			Async:        toDomainAsync(v.Async),
 		}
 	}
 

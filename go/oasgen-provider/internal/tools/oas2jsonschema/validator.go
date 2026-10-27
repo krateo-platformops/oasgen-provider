@@ -37,6 +37,15 @@ func ValidateSchemas(docs *DocumentSet, verbs []Verb, config *GeneratorConfig) [
 		if baseAction == ActionDispatch {
 			isComparable = false
 		}
+		// Nor is there anything to compare FROM an async verb: its own response is an operation handle --
+		// a 202 carrying {"operationId": ...} -- not the resource. The resource shape comes from the get
+		// verb, and postGet re-reads it once the operation succeeds. Comparing anyway reported a missing
+		// create schema for a definition that is entirely correct (#228), which is the same mistake as
+		// reporting a missing base action for a dispatch: a warning about a shape the verb is DEFINED not
+		// to have.
+		if isAsyncVerb(verb) {
+			isComparable = false
+		}
 
 		if isComparable {
 			// Perform the comparison against the base action schema.
@@ -242,4 +251,11 @@ func buildPath(base, field string) string {
 		return field
 	}
 	return fmt.Sprintf("%s.%s", base, field)
+}
+
+// isAsyncVerb reports whether a verb declares an asynchronous operation, and therefore answers with an
+// operation handle rather than the resource. Named rather than inlined so the exemption reads the same
+// way at the call site as the dispatch one beside it, and so a test can state the rule directly.
+func isAsyncVerb(v Verb) bool {
+	return v.Async != nil
 }
