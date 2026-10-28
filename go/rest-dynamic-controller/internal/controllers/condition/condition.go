@@ -17,7 +17,34 @@ const (
 	// issued, enough times in a row that the update is evidently not able to fix it. The controller stops
 	// issuing that update; the resource stays NOT ready, with the field named.
 	ReasonDriftNotConverging string = "DriftNotConverging"
+	// ReasonResponseObtained and ReasonNoResponseBody are the two states of TypeObserved below.
+	ReasonResponseObtained string = "ResponseObtained"
+	ReasonNoResponseBody   string = "NoResponseBody"
 )
+
+// TypeObserved reports whether the last observe obtained a response body to populate status FROM, which is
+// a different question from whether the resource is Ready.
+//
+// It exists because a CR could not distinguish three situations that look identical from outside -- a
+// declared status field simply absent in all of them (#233):
+//
+//  1. the API returned a body and genuinely had no diagnostic to report -- healthy;
+//  2. the API returned a body and the diagnostic was at a path the RestDefinition does not name --
+//     mis-declared;
+//  3. the observe obtained no body at all -- the diagnostic exists and is NOT being read.
+//
+// Case 3 is the one with consequences: a resource whose failure reason is being dropped looks exactly
+// like a healthy one. TypeObserved separates it from the other two without claiming anything about any
+// individual field, which matters because absence is the COMMON case: measured across five live Aruba
+// resources, every healthy payload omitted both failureReason and error even though both are declared in
+// the vendor's published specs. A per-field warning would therefore fire constantly on correct input,
+// which is the mistake #228 was -- a warning about a shape the verb is defined not to have.
+//
+// It is deliberately a condition that TRANSITIONS rather than a marker that is only ever set. A condition
+// whose status never changes carries a lastTransitionTime from the first time it was set, forever, so an
+// always-True "Observed" would answer "populated from a response obtained WHEN?" with the wrong date. By
+// flipping to False when no body is obtained, the timestamp means what a reader assumes it means.
+const TypeObserved string = "Observed"
 
 // Pending returns a metav1.Condition indicating that a resource is pending. This means that the resource has been created or updated, but is not yet ready for use.
 func Pending() metav1.Condition {
@@ -59,6 +86,38 @@ func DriftNotConverging(field, detail string) metav1.Condition {
 		Status:             metav1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonDriftNotConverging,
+		Message:            msg,
+	}
+}
+
+// Observed reports that the last observe obtained a response body, so the declared status fields were
+// populated from it. A status field still absent after this is absent because the API did not send it.
+func Observed() metav1.Condition {
+	return metav1.Condition{
+		Type:               TypeObserved,
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonResponseObtained,
+	}
+}
+
+// NotObserved reports that the last observe obtained NO response body, so nothing was populated and the
+// absence of a declared status field says nothing about the external resource.
+//
+// Not expressed as Ready=False: the resource may well exist and be fine, and the observe may have decided
+// that from a status code alone. What is unknown is the CONTENT of its status, which is a different claim
+// from the resource not being ready, and conflating them would make every bodyless observe look like a
+// failed one.
+func NotObserved(detail string) metav1.Condition {
+	msg := "the observe obtained no response body, so declared status fields were not populated and their absence is not evidence about the external resource"
+	if detail != "" {
+		msg = msg + ": " + detail
+	}
+	return metav1.Condition{
+		Type:               TypeObserved,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonNoResponseBody,
 		Message:            msg,
 	}
 }

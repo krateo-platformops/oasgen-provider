@@ -410,7 +410,44 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		log.Error(err, "Normalizing response body (fieldMapping)")
 		return controller.ExternalObservation{}, err
 	}
+	// Record whether this observe had a body to populate status FROM. A declared status field absent after
+	// a body WAS obtained means the API did not send it; absent after NO body means nothing was read, and
+	// the absence is not evidence about the external resource (#233). Those were indistinguishable from
+	// the CR, and the second is the one that silently hides a resource's failure reason.
+	//
+	// Set inside each branch rather than once above, because the two branches persist differently: the
+	// body path already writes status below, while the bodyless path did not write at all. A condition set
+	// on the bodyless path without its own write would be computed, applied to an in-memory object and
+	// dropped -- the same way the drift reason was lost in #213.
+	if b == nil {
+		changed, cerr := setObservedIfChanged(mg, customcondition.NotObserved(
+			fmt.Sprintf("observe action %q returned no body", observeAction)))
+		if cerr != nil {
+			log.Error(cerr, "Setting the Observed condition")
+			return controller.ExternalObservation{}, cerr
+		}
+		// Only write when the condition actually transitioned. This path has no other reason to write, so
+		// an unguarded write here would issue one API update per reconcile, forever, for any resource
+		// whose observe never returns a body.
+		if changed {
+			if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+				Pluralizer:    h.pluralizer,
+				DynamicClient: h.dynamicClient,
+			}); uerr != nil {
+				log.Error(uerr, "Updating status")
+				return controller.ExternalObservation{}, uerr
+			}
+		}
+	}
+
 	if b != nil {
+		// No write guard needed here -- this path writes status unconditionally below for the populated
+		// fields -- but the change check still matters, so the timestamp marks the transition rather than
+		// the latest reconcile.
+		if _, cerr := setObservedIfChanged(mg, customcondition.Observed()); cerr != nil {
+			log.Error(cerr, "Setting the Observed condition")
+			return controller.ExternalObservation{}, cerr
+		}
 		err = populateStatusFields(clientInfo, mg, b)
 		if err != nil {
 			log.Error(err, "Populating status fields (identifiers and additionalStatusFields)")
