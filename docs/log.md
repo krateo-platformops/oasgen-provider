@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-28T13:10:00Z
+timestamp: 2026-10-28T17:05:00Z
 ---
 
 # Log
@@ -12,6 +12,57 @@ timestamp: 2026-10-28T13:10:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-28 — 0.39.0
+
+One fix, for a RestDefinition that could wedge permanently on first install.
+
+### Create's first phase survives a status conflict
+
+A RestDefinition could stick on `krateo.io/external-create-pending` with *"cannot determine creation
+result"*, and nothing repaired it. Two different wedges, both from a single status write at the end of
+`Create`'s first phase (#252).
+
+`Create` is deliberately two-phase: the first applies the CRDs and returns, and the next reconcile, now
+seeing the CRD, creates the controller Deployment. So **"CRDs present, no Deployment" is an expected
+intermediate state**, not damage — worth knowing before diagnosing a stuck install from that reading
+alone. What was unsafe was how the phase ended.
+
+The write was **unreliable**. A plain `Status().Update` returns a resource-version conflict as an error,
+and `Create` returned it; provider-runtime cannot know how much of an errored `Create` took effect, so it
+left the pending annotation set and every later reconcile answered the same way. A conflict there is
+ordinary rather than exceptional — many RestDefinitions reconcile at once on a fresh install, which is
+precisely when it happens and precisely when it matters.
+
+The write was also **incomplete**. It recorded `hasSecuritySchemes` but not the version the CRD had just
+been applied at, because `status.resource` was assigned only in the second phase. `observedVersion` then
+fell back to `resourceVersion`, the next `Observe` looked the CRD up at the wrong version and reported it
+absent, and the runtime re-entered the create handshake on a resource it had already created. The
+re-check that exists to absorb exactly this is gated on having a parsed document, and the saved-status
+branch has none.
+
+Both are fixed by one function that retries on conflict, re-reading the object on each attempt so a
+concurrent change is merged rather than clobbered — which matters, because the runtime writes its own
+annotations to that same object — and that records the version the CRD was applied at. That version is
+not inferred: it is the GVK whose CRD was applied immediately above. Recording it demotes the
+document-dependent re-check from sole guard to safety net.
+
+A conflict that never clears still surfaces, unmasked, after a bounded number of attempts. Retrying
+forever would turn a wedge into a hang, and swallowing it would report a success that wrote nothing.
+
+**Not the same bug as #122.** That fix (`resourceExistsForController`) shipped in 0.23.1 and was present
+on the clusters where these were measured — same symptom, different triggers. If you are reading an old
+diagnosis of this symptom, check which of the three it describes.
+
+#### How this was found
+
+By installing it. Both paths were measured on independent fresh GKE clusters by the snowplow session,
+which also ran a check before teardown that separated the two causes — the first showing the status
+update conflicting 70ms after the CRDs applied, the second showing the pending annotation re-set 97
+seconds *after* the succeeded stamp. Neither is reachable from a unit test or a static read: the trigger
+is concurrency during a bulk install, and the symptom is an annotation left behind by the runtime rather
+than anything this repo writes. The failure rate was 2 of 2 fresh clusters under a roughly
+60-RestDefinition install, so this was never a rare race.
 
 ## 2026-10-28 — 0.38.0
 
