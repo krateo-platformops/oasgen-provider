@@ -690,6 +690,9 @@ func (g *OASSchemaGenerator) checkLookupPaths() []error {
 				Message: fmt.Sprintf("dependent lookup %q declares path %q, which its OAS document does not contain; the lookup cannot resolve its parameters and will fail on every reconcile", l.Name, l.Path),
 				Got:     l.Path,
 			})
+			// MUST continue. FindPath returns a zero pathItem on failure, and GetOperations() on that
+			// panics -- so falling through here does not merely add noise, it crashes generation for the
+			// whole RestDefinition.
 			continue
 		}
 

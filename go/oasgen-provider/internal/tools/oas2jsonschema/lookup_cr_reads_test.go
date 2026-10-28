@@ -24,10 +24,18 @@ func lookupReadWarnings(t *testing.T, rc *ResourceConfig) []string {
 	return msgs
 }
 
+// lookupReading builds a lookup that is VALID against noParamDoc except for the CR path under test, so a
+// warning from this fixture can only be the CR-read check firing.
+//
+// It used to declare `GET /things`, which the document defines only POST for, and bound a path parameter
+// `id` that no operation declares. Harmless while nothing validated the lookup's own path -- and the
+// moment checkLookupPaths was added it made every subtest here report a method warning, including the
+// "no warning" one. A fixture that declares something the document cannot support is a latent failure in
+// any test that later asserts on warnings.
 func lookupReading(path string) DependentLookup {
 	return DependentLookup{
-		Name: "probe", Method: "GET", Path: "/things", Select: ".x",
-		Parameters: []LookupParameter{{InPath: "id", InCustomResource: path}},
+		Name: "probe", Method: "GET", Path: "/things/{name}", Select: ".x",
+		Parameters: []LookupParameter{{InPath: "name", InCustomResource: path}},
 	}
 }
 
