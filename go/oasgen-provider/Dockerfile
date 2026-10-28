@@ -1,6 +1,6 @@
 # Build environment
 # -----------------
-FROM golang:1.25-trixie AS builder
+FROM golang:1.26-trixie AS builder
 LABEL stage=builder
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -38,7 +38,7 @@ RUN CGO_ENABLED=0 GO111MODULE=on go build -ldflags="-X 'main.Build=${BUILD_VERSI
 
 # Deployment environment
 # ----------------------
-FROM golang:1.25-trixie
+FROM golang:1.26-trixie
 
 ENV GOCACHE='/tmp/.cache'
 RUN mkdir -p "$GOCACHE/go-build" && chmod -R 1777 "$GOCACHE"
