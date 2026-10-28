@@ -1698,6 +1698,56 @@ func TestController(t *testing.T) {
 			}
 
 			return ctx
+		}).
+		// #233: the Observed condition must actually REACH the CR, alongside Ready rather than replacing
+		// it. The constructor unit tests cover the shape; they cannot catch the condition being set on an
+		// in-memory object and dropped, which is how the drift reason was lost in #213, nor an Upsert that
+		// overwrote Ready instead of coexisting with it.
+		Assess("ObserveRecordsThatItObtainedABody", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			resetDispatchMock(t, `{"simulateErrors": false, "authFailures": false}`)
+
+			k := cli.Resource(lookupGVR).Namespace(namespace)
+			u := mustGet(ctx, t, k, "lookup-1")
+			if _, err := handler.Observe(ctx, u); err != nil {
+				t.Error("Error observing", "error", err)
+				return ctx
+			}
+
+			u = mustGet(ctx, t, k, "lookup-1")
+			conds, _, cerr := unstructured.NestedSlice(u.Object, "status", "conditions")
+			if cerr != nil {
+				t.Fatalf("reading status.conditions: %v", cerr)
+			}
+
+			var observedStatus, observedReason string
+			sawReady := false
+			for _, c := range conds {
+				m, ok := c.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				switch m["type"] {
+				case customcondition.TypeObserved:
+					observedStatus, _ = m["status"].(string)
+					observedReason, _ = m["reason"].(string)
+				case "Ready":
+					sawReady = true
+				}
+			}
+
+			if observedStatus != "True" {
+				t.Errorf("after an observe that obtained a body, %s must be True, got %q", customcondition.TypeObserved, observedStatus)
+			}
+			if observedReason != customcondition.ReasonResponseObtained {
+				t.Errorf("expected reason %q, got %q", customcondition.ReasonResponseObtained, observedReason)
+			}
+			// Conditions are upserted BY TYPE, so a new type has to coexist with Ready rather than
+			// displace it. If this fails, every resource lost its readiness report to gain this one.
+			if !sawReady {
+				t.Error("the Ready condition must survive alongside Observed")
+			}
+
+			return ctx
 		}).Feature()
 
 	testenv.Test(t, f)
