@@ -678,35 +678,49 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 		e.log.Debug("Pruned superseded served versions", "versions", pruned)
 	}
 
-	cr.SetConditions(rtv1.Creating())
-	cr.Status.Resource = definitionv1alpha1.KindApiVersion{
-		Kind:       gvk.Kind,
-		APIVersion: gvk.GroupVersion().String(),
-	}
-	// Only set Configuration status if configuration fields or security schemes are defined
+	// Derived from the spec ONCE, before the retry: the mutation below runs against a re-read object on
+	// every attempt, and these must record the spec this reconcile actually acted on rather than whatever
+	// the latest read happens to say.
+	oasPath := cr.Spec.OASPath
+	rHash := resourceHash(cr)
+	var cfgKindAPIVersion *definitionv1alpha1.KindApiVersion
 	if len(cr.Spec.Resource.ConfigurationFields) > 0 || hasSecuritySchemes {
 		e.log.Debug("Configuration fields or security schemes defined, setting Configuration status in RestDefinition status")
 		cfgGVK := getConfigurationGVK(cr)
-		cr.Status.Configuration = definitionv1alpha1.KindApiVersion{
+		cfgKindAPIVersion = &definitionv1alpha1.KindApiVersion{
 			Kind:       cfgGVK.Kind,
 			APIVersion: cfgGVK.GroupVersion().String(),
 		}
 	}
-	cr.Status.OASPath = cr.Spec.OASPath
-	cr.Status.Digest = dig
-	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
-	cr.Status.OASHash = oasHash
-	cr.Status.ResourceHash = resourceHash(cr)
 
-	err = e.kube.Status().Update(ctx, cr)
-	if err != nil {
+	// Retried on conflict for the same reason phase 1 is (#259). This write is the one that records
+	// status.digest, status.oasHash and status.resourceHash -- the values Observe compares against to
+	// decide whether anything drifted -- so losing it does not merely lose a status field: the next
+	// Observe sees an empty digest, reports drift that does not exist, and Update redeploys on every
+	// reconcile. A conflict here is as ordinary as in phase 1, and it was the only one of the two left
+	// unprotected.
+	if err := e.persistStatusWithRetry(ctx, cr, func(target *definitionv1alpha1.RestDefinition) {
+		target.SetConditions(rtv1.Creating())
+		target.Status.Resource = definitionv1alpha1.KindApiVersion{
+			Kind:       gvk.Kind,
+			APIVersion: gvk.GroupVersion().String(),
+		}
+		if cfgKindAPIVersion != nil {
+			target.Status.Configuration = *cfgKindAPIVersion
+		}
+		target.Status.OASPath = oasPath
+		target.Status.Digest = dig
+		target.Status.HasSecuritySchemes = &hasSecuritySchemes
+		target.Status.OASHash = oasHash
+		target.Status.ResourceHash = rHash
+	}); err != nil {
 		return fmt.Errorf("updating status: %w", err)
 	}
 
 	e.log.Debug("Created RestDefinition", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)
 	e.rec.Eventf(cr, corev1.EventTypeNormal, "RestDefinitionCreating",
 		"RestDefinition '%s/%s' creating", cr.Spec.Resource.Kind, cr.Spec.ResourceGroup)
-	return err
+	return nil
 }
 
 // generateAndApplyCRDs renders the target CRD (and the Configuration CRD when configuration fields or
@@ -1441,32 +1455,46 @@ func crdExists(ctx context.Context, kube client.Client, name string) (bool, erro
 // internal/tools/crd: a concurrent change to the status is merged on top instead of clobbered by a stale
 // write, which matters because the runtime writes annotations to this same object.
 func (e *external) persistCreatePhaseStatus(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, hasSecuritySchemes bool) error {
+	return e.persistStatusWithRetry(ctx, cr, func(target *definitionv1alpha1.RestDefinition) {
+		target.SetConditions(rtv1.Creating())
+		target.Status.HasSecuritySchemes = &hasSecuritySchemes
+		target.Status.Resource = definitionv1alpha1.KindApiVersion{
+			Kind:       gvk.Kind,
+			APIVersion: gvk.GroupVersion().String(),
+		}
+	})
+}
+
+// persistStatusWithRetry applies mutate to a FRESHLY READ copy of cr and writes the status subresource,
+// retrying on conflict, then applies mutate to the caller's copy so the rest of the reconcile sees what
+// was persisted rather than the pre-write state.
+//
+// Both of Create's phases end in a status write, and a conflict escaping either one is what wedges the
+// resource (#252, #259). Sharing one mechanism rather than hand-rolling a second: phase 2 writes seven
+// fields where phase 1 writes three, so a duplicated retry-and-mirror is exactly the construct that
+// drifts, and a mirror that forgets a field is invisible until something downstream reads the stale value.
+//
+// Re-reads on every attempt rather than retrying a stale object, matching applyMergedWithRetry in
+// internal/tools/crd: a concurrent change is merged on top instead of clobbered. That matters because
+// provider-runtime writes its own annotations to this same object -- though not to its status, which has a
+// subresource of its own, so these writes and the runtime's cannot collide on content.
+//
+// mutate must be idempotent and must not derive values from the object it is given: it runs twice, on two
+// different copies. Anything computed from the spec is computed once by the caller and captured.
+func (e *external) persistStatusWithRetry(ctx context.Context, cr *definitionv1alpha1.RestDefinition, mutate func(*definitionv1alpha1.RestDefinition)) error {
 	key := client.ObjectKeyFromObject(cr)
 
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &definitionv1alpha1.RestDefinition{}
 		if gerr := e.kube.Get(ctx, key, cur); gerr != nil {
 			return gerr
 		}
-		cur.SetConditions(rtv1.Creating())
-		cur.Status.HasSecuritySchemes = &hasSecuritySchemes
-		cur.Status.Resource = definitionv1alpha1.KindApiVersion{
-			Kind:       gvk.Kind,
-			APIVersion: gvk.GroupVersion().String(),
-		}
+		mutate(cur)
 		return e.kube.Status().Update(ctx, cur)
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 
-	// Mirror onto the caller's copy so the rest of this reconcile, and the runtime's own bookkeeping, see
-	// what was persisted rather than the pre-write state.
-	cr.SetConditions(rtv1.Creating())
-	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
-	cr.Status.Resource = definitionv1alpha1.KindApiVersion{
-		Kind:       gvk.Kind,
-		APIVersion: gvk.GroupVersion().String(),
-	}
+	mutate(cr)
 	return nil
 }
