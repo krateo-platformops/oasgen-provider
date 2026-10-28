@@ -678,16 +678,28 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 		e.log.Debug("Pruned superseded served versions", "versions", pruned)
 	}
 
-	// Derived from the spec ONCE, before the retry: the mutation below runs against a re-read object on
-	// every attempt, and these must record the spec this reconcile actually acted on rather than whatever
-	// the latest read happens to say.
-	oasPath := cr.Spec.OASPath
-	rHash := resourceHash(cr)
-	var cfgKindAPIVersion *definitionv1alpha1.KindApiVersion
+	// Captured ONCE, before the retry. The mutation runs against a re-read object on every attempt, so
+	// anything derived from the spec must record the spec this reconcile acted on rather than whatever the
+	// latest read happens to say -- and anything an earlier step wrote onto cr.Status in place must be
+	// collected here or it is never persisted at all. See the doc comment on createdStatus.
+	st := createdStatus{
+		resource: definitionv1alpha1.KindApiVersion{
+			Kind:       gvk.Kind,
+			APIVersion: gvk.GroupVersion().String(),
+		},
+		oasPath:            cr.Spec.OASPath,
+		digest:             dig,
+		hasSecuritySchemes: hasSecuritySchemes,
+		oasHash:            oasHash,
+		resourceHash:       resourceHash(cr),
+		// Set in place by syncAuthSecretRBAC above, which has already provisioned the RBAC these describe.
+		authSecretDigest:         cr.Status.AuthSecretDigest,
+		authSecretRBACNamespaces: cr.Status.AuthSecretRBACNamespaces,
+	}
 	if len(cr.Spec.Resource.ConfigurationFields) > 0 || hasSecuritySchemes {
 		e.log.Debug("Configuration fields or security schemes defined, setting Configuration status in RestDefinition status")
 		cfgGVK := getConfigurationGVK(cr)
-		cfgKindAPIVersion = &definitionv1alpha1.KindApiVersion{
+		st.configuration = &definitionv1alpha1.KindApiVersion{
 			Kind:       cfgGVK.Kind,
 			APIVersion: cfgGVK.GroupVersion().String(),
 		}
@@ -699,21 +711,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	// Observe sees an empty digest, reports drift that does not exist, and Update redeploys on every
 	// reconcile. A conflict here is as ordinary as in phase 1, and it was the only one of the two left
 	// unprotected.
-	if err := e.persistStatusWithRetry(ctx, cr, func(target *definitionv1alpha1.RestDefinition) {
-		target.SetConditions(rtv1.Creating())
-		target.Status.Resource = definitionv1alpha1.KindApiVersion{
-			Kind:       gvk.Kind,
-			APIVersion: gvk.GroupVersion().String(),
-		}
-		if cfgKindAPIVersion != nil {
-			target.Status.Configuration = *cfgKindAPIVersion
-		}
-		target.Status.OASPath = oasPath
-		target.Status.Digest = dig
-		target.Status.HasSecuritySchemes = &hasSecuritySchemes
-		target.Status.OASHash = oasHash
-		target.Status.ResourceHash = rHash
-	}); err != nil {
+	if err := e.persistStatusWithRetry(ctx, cr, st.applyTo); err != nil {
 		return fmt.Errorf("updating status: %w", err)
 	}
 
@@ -1463,6 +1461,57 @@ func (e *external) persistCreatePhaseStatus(ctx context.Context, cr *definitionv
 			APIVersion: gvk.GroupVersion().String(),
 		}
 	})
+}
+
+// createdStatus is the COMPLETE set of status that Create's second phase persists, collected into one
+// value so it can be captured before the retry and applied to a re-read object.
+//
+// Why a named type rather than a closure over locals: this write used to be `Status().Update(ctx, cr)`,
+// which persisted cr's WHOLE status -- so any earlier step that set a field on cr.Status in place was
+// carried along for free. Writing a re-read object instead, which is what makes the retry safe, ends that
+// silently: a field an upstream step sets and this type does not carry is never persisted, and nothing
+// fails at the point of the mistake.
+//
+// That is not hypothetical -- it happened in the first version of this refactor. syncAuthSecretRBAC, a few
+// lines above the write, sets AuthSecretDigest and AuthSecretRBACNamespaces on cr.Status in place, and
+// both were dropped. An empty AuthSecretDigest makes Observe's auth-secret drift check fire on every
+// reconcile, redeploying forever; an empty AuthSecretRBACNamespaces makes teardownAuthSecretRBAC return
+// early on Delete, leaking RBAC in every namespace it had provisioned. Every test in the package passed,
+// because none of them exercise Create's second phase.
+//
+// So the type exists to make the set enumerable and therefore checkable -- see
+// TestCreatedStatusCoversEveryStatusField, which fails if RestDefinitionStatus grows a field applyTo does
+// not set.
+type createdStatus struct {
+	resource                 definitionv1alpha1.KindApiVersion
+	configuration            *definitionv1alpha1.KindApiVersion
+	oasPath                  string
+	digest                   string
+	hasSecuritySchemes       bool
+	oasHash                  string
+	resourceHash             string
+	authSecretDigest         string
+	authSecretRBACNamespaces []string
+}
+
+// applyTo writes the whole set onto target. Idempotent, and derives nothing from target, because
+// persistStatusWithRetry runs it once per write attempt and once more to mirror.
+func (s createdStatus) applyTo(target *definitionv1alpha1.RestDefinition) {
+	target.SetConditions(rtv1.Creating())
+	target.Status.Resource = s.resource
+	// Left alone rather than zeroed when there is no Configuration: a RestDefinition that had one and no
+	// longer does keeps the record of what was deployed, which Delete needs in order to tear it down.
+	if s.configuration != nil {
+		target.Status.Configuration = *s.configuration
+	}
+	target.Status.OASPath = s.oasPath
+	target.Status.Digest = s.digest
+	hasSchemes := s.hasSecuritySchemes
+	target.Status.HasSecuritySchemes = &hasSchemes
+	target.Status.OASHash = s.oasHash
+	target.Status.ResourceHash = s.resourceHash
+	target.Status.AuthSecretDigest = s.authSecretDigest
+	target.Status.AuthSecretRBACNamespaces = s.authSecretRBACNamespaces
 }
 
 // persistStatusWithRetry applies mutate to a FRESHLY READ copy of cr and writes the status subresource,
