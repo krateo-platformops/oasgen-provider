@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-27T21:10:00Z
+timestamp: 2026-10-28T01:40:00Z
 ---
 
 # Log
@@ -12,6 +12,59 @@ timestamp: 2026-10-27T21:10:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-28 — 0.37.0
+
+One addition: a CR can now tell "nothing to report" from "nothing was read".
+
+### An absent status field no longer means two different things
+
+A resource declares `additionalStatusFields` such as `failureReason` or `error`, and the controller
+populates them from the observe response. A field the response does not contain is skipped, which is
+correct — most APIs omit a diagnostic they have nothing to say about. The consequence was that a CR looked
+identical in three quite different situations (#233):
+
+1. the API returned a body and genuinely had no diagnostic — **healthy**;
+2. the API returned a body and the diagnostic sat at a path the RestDefinition does not name —
+   **mis-declared**;
+3. the observe obtained **no body at all** — the diagnostic exists and is not being read.
+
+The third is the one that costs something: a resource whose failure reason is being dropped is
+indistinguishable from a healthy one. Measured on five live resources, every healthy payload omitted both
+`failureReason` and `error` even though both are declared in the vendor's published specs — so absence is
+the ordinary case, not a signal.
+
+A new `Observed` condition records whether the last observe had a body to read from:
+
+```yaml
+- type: Observed
+  status: "True"
+  reason: ResponseObtained
+```
+
+```yaml
+- type: Observed
+  status: "False"
+  reason: NoResponseBody
+  message: "the observe obtained no response body, so declared status fields were not
+    populated and their absence is not evidence about the external resource"
+```
+
+It sits alongside `Ready` rather than replacing it, and says nothing about any individual field — which is
+deliberate. The obvious alternative, warning when a declared status path is missing from the response,
+would fire on every healthy resource of that API. That is the same mistake as warning that an async
+create's `202` does not match the resource schema, when carrying an operation handle instead is exactly
+what a `202` is for (#228).
+
+**Not `Ready=False`.** A bodyless observe does not mean the resource is unhealthy — existence may have been
+decided from a status code alone. What is unknown is the content of its status, and conflating the two
+would make every bodyless observe look like a failure.
+
+Two details worth knowing if you build on it. The condition **transitions** rather than only ever being
+set, because `lastTransitionTime` marks when a status last changed: an always-True marker would report the
+first observe forever. And it is applied only when it would actually change, because the write path does
+not diff — setting it unconditionally would issue a status update on every reconcile, for as long as a
+resource exists.
 
 ## 2026-10-27 — 0.36.0
 
