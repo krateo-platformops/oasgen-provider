@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -111,6 +112,10 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 	}); ierr != nil {
 		return nil, warnings, ierr
 	}
+
+	// A pattern the API server cannot compile makes it refuse the whole CustomResourceDefinition, so
+	// every pattern is compiled here and dropped with a warning if it fails (#249).
+	warnings = append(warnings, validatePatterns(baseSchema, "spec")...)
 
 	// Convert the schema to JSON schema format.
 	byteSchema, err := GenerateJsonSchema(baseSchema, g.generatorConfig)
@@ -577,4 +582,48 @@ func dropResolverSuppliedRequired(schema *Schema, verbs []Verb) {
 		kept = append(kept, name)
 	}
 	schema.Required = kept
+}
+
+// validatePatterns compiles every `pattern` in the schema with Go's regexp and REMOVES the ones that do
+// not compile, reporting each as a warning.
+//
+// Kubernetes compiles a CRD's patterns as RE2; OpenAPI specifies ECMA-262. Most patterns are identical
+// under both, but not all: backreferences and lookahead are valid ECMA and rejected by RE2. Emitting one
+// of those produces a CustomResourceDefinition the API server refuses outright -- so the resource does
+// not merely lose a constraint, the whole CRD fails to install, exactly as an over-budget CEL rule does.
+//
+// Dropping the pattern and warning is therefore the conservative choice in the real sense: the resource
+// loses one constraint it was never going to get, instead of the install losing the resource. The warning
+// names the path so the author can rewrite it RE2-compatibly.
+func validatePatterns(schema *Schema, path string) []error {
+	if schema == nil {
+		return nil
+	}
+
+	var warnings []error
+
+	if schema.Pattern != "" {
+		if _, err := regexp.Compile(schema.Pattern); err != nil {
+			warnings = append(warnings, SchemaGenerationError{
+				Path:    path,
+				Code:    CodeFieldNotFound,
+				Message: fmt.Sprintf("pattern %q at %s is not a valid RE2 expression and was dropped: %v. Kubernetes compiles CRD patterns as RE2 while OpenAPI specifies ECMA-262, so constructs such as backreferences and lookahead are rejected; emitting it would make the API server refuse the entire CustomResourceDefinition", schema.Pattern, path, err),
+				Got:     schema.Pattern,
+			})
+			schema.Pattern = ""
+		}
+	}
+
+	for _, p := range schema.Properties {
+		warnings = append(warnings, validatePatterns(p.Schema, path+"."+p.Name)...)
+	}
+	warnings = append(warnings, validatePatterns(schema.Items, path+"[]")...)
+	for i, a := range schema.AllOf {
+		warnings = append(warnings, validatePatterns(a, fmt.Sprintf("%s.allOf[%d]", path, i))...)
+	}
+	if schema.AdditionalProperties != nil {
+		warnings = append(warnings, validatePatterns(schema.AdditionalProperties.Schema, path+".additionalProperties")...)
+	}
+
+	return warnings
 }

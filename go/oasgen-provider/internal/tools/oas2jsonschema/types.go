@@ -196,6 +196,34 @@ type Schema struct {
 	MaxProperties        int
 	Format               string                 // JSON Schema "format"; numeric formats (int32/int64/float/double) are emitted into the generated schema, all formats are also added to the description
 	Extensions           map[string]interface{} // Currently not used but can hold custom extensions
+
+	// --- validation keywords (#249) ---
+	//
+	// These were absent until #249, so a `pattern`, `minLength` or `maximum` written in a vendor document
+	// was read, discarded at this boundary, and never reached the CRD. The document therefore looked as
+	// though it declared a constraint that nothing enforced, with no diagnostic saying otherwise -- worse
+	// than not supporting them, because the declaration reads as working.
+	//
+	// All of them map one-to-one onto apiextensionsv1.JSONSchemaProps, so there is no translation here,
+	// with one exception noted on ExclusiveMinimum below.
+	//
+	// Pointers where the zero value is meaningful: `minimum: 0` and `minLength: 0` are real constraints
+	// and must be distinguishable from absent.
+	Pattern   string
+	MinLength *int64
+	MaxLength *int64
+	Minimum   *float64
+	Maximum   *float64
+	// ExclusiveMinimum/ExclusiveMaximum are BOOLEAN modifiers on Minimum/Maximum, which is the OAS 3.0 and
+	// JSON Schema draft-4 reading, and the only one a CRD can express. OAS 3.1 redefines them as numbers;
+	// that form has no faithful CRD representation and is reported as a warning rather than silently
+	// coerced, because coercing it would change which values the API server accepts.
+	ExclusiveMinimum bool
+	ExclusiveMaximum bool
+	MultipleOf       *float64
+	MinItems         *int64
+	MaxItems         *int64
+	UniqueItems      bool
 }
 
 // AdditionalProperties is JSON Schema §5.18 in EITHER of its two forms; nil means the keyword is absent.
@@ -365,6 +393,54 @@ func (s *Schema) deepCopyRec(visited map[*Schema]*Schema) *Schema {
 	}
 	newSchema.MaxProperties = s.MaxProperties
 	newSchema.Format = s.Format
+
+	// Extensions was dropped here before #249 -- found by the reflection guard rather than by looking,
+	// which is the point of the guard. Harmless so far because nothing reads Extensions yet, but it is the
+	// same latent class: a field added to Schema and forgotten in this hand-written list.
+	// Copied, not aliased, so a later pass cannot mutate the parsed document's map.
+	if s.Extensions != nil {
+		newSchema.Extensions = make(map[string]interface{}, len(s.Extensions))
+		for k, v := range s.Extensions {
+			newSchema.Extensions[k] = v
+		}
+	}
+
+	// Validation keywords (#249). Pointers are copied by VALUE into fresh ones rather than aliased: the
+	// spec base schema is deep-copied so later passes can mutate it -- validatePatterns clears an
+	// uncompilable pattern, prepareSchemaForCRD rewrites types -- and sharing a *int64 with the parsed
+	// document would let one resource's generation alter another's source.
+	newSchema.Pattern = s.Pattern
+	newSchema.ExclusiveMinimum = s.ExclusiveMinimum
+	newSchema.ExclusiveMaximum = s.ExclusiveMaximum
+	newSchema.UniqueItems = s.UniqueItems
+	if s.MinLength != nil {
+		v := *s.MinLength
+		newSchema.MinLength = &v
+	}
+	if s.MaxLength != nil {
+		v := *s.MaxLength
+		newSchema.MaxLength = &v
+	}
+	if s.Minimum != nil {
+		v := *s.Minimum
+		newSchema.Minimum = &v
+	}
+	if s.Maximum != nil {
+		v := *s.Maximum
+		newSchema.Maximum = &v
+	}
+	if s.MultipleOf != nil {
+		v := *s.MultipleOf
+		newSchema.MultipleOf = &v
+	}
+	if s.MinItems != nil {
+		v := *s.MinItems
+		newSchema.MinItems = &v
+	}
+	if s.MaxItems != nil {
+		v := *s.MaxItems
+		newSchema.MaxItems = &v
+	}
 
 	if s.Enum != nil {
 		newSchema.Enum = make([]interface{}, len(s.Enum))

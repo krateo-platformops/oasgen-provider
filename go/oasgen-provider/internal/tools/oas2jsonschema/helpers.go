@@ -386,6 +386,43 @@ func schemaToMapWithVisited(
 		m["format"] = schema.Format
 	}
 
+	// Validation keywords (#249). Emitted under their JSON Schema names, which is what a CRD's schema
+	// uses. An invalid `pattern` never reaches here -- validatePatterns clears it and warns first,
+	// because a pattern the API server cannot compile makes it refuse the whole CustomResourceDefinition.
+	if schema.Pattern != "" {
+		m["pattern"] = schema.Pattern
+	}
+	if schema.MinLength != nil {
+		m["minLength"] = *schema.MinLength
+	}
+	if schema.MaxLength != nil {
+		m["maxLength"] = *schema.MaxLength
+	}
+	if schema.Minimum != nil {
+		m["minimum"] = *schema.Minimum
+	}
+	if schema.Maximum != nil {
+		m["maximum"] = *schema.Maximum
+	}
+	if schema.ExclusiveMinimum {
+		m["exclusiveMinimum"] = true
+	}
+	if schema.ExclusiveMaximum {
+		m["exclusiveMaximum"] = true
+	}
+	if schema.MultipleOf != nil {
+		m["multipleOf"] = *schema.MultipleOf
+	}
+	if schema.MinItems != nil {
+		m["minItems"] = *schema.MinItems
+	}
+	if schema.MaxItems != nil {
+		m["maxItems"] = *schema.MaxItems
+	}
+	if schema.UniqueItems {
+		m["uniqueItems"] = true
+	}
+
 	// Process extensions
 	if len(schema.Extensions) > 0 {
 		for k, v := range schema.Extensions {
