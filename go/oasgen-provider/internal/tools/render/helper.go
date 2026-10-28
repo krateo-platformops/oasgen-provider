@@ -24,9 +24,12 @@ func toDomainFieldMapping(v definitionv1alpha1.VerbsDescription) []oas2jsonschem
 		if m.ValueMapping != nil {
 			vmType = m.ValueMapping.Type
 		}
-		var lookupName string
-		if m.Resolver != nil && m.Resolver.Type == "dependentLookup" && m.Resolver.DependentLookup != nil {
-			lookupName = m.Resolver.DependentLookup.Name
+		var lookupName, resolverType string
+		if m.Resolver != nil {
+			resolverType = m.Resolver.Type
+			if m.Resolver.Type == "dependentLookup" && m.Resolver.DependentLookup != nil {
+				lookupName = m.Resolver.DependentLookup.Name
+			}
 		}
 		out = append(out, oas2jsonschema.FieldMappingEntry{
 			InPath:             m.InPath,
@@ -36,6 +39,7 @@ func toDomainFieldMapping(v definitionv1alpha1.VerbsDescription) []oas2jsonschem
 			InCustomResource:   m.InCustomResource,
 			ValueMappingType:   vmType,
 			ResolverLookupName: lookupName,
+			ResolverType:       resolverType,
 		})
 	}
 	// Legacy requestFieldMapping: request-direction only, no value transform.

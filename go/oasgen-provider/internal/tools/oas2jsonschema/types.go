@@ -133,6 +133,10 @@ type FieldMappingEntry struct {
 	// the entry has no resolver or a resolver of another kind. Generation needs it only to check the name
 	// is declared; resolving the value is the controller's job.
 	ResolverLookupName string
+	// ResolverType is the resolver KIND on this entry ("secretRef", "dependentLookup"), or "" when it has
+	// none. ResolverLookupName cannot stand in for it: a secretRef entry has a resolver and no lookup
+	// name, so testing the name would miss exactly the case that has shipped longest.
+	ResolverType string
 }
 
 // DependentLookup mirrors the RestDefinition's dependentLookups entry, library-agnostic (see the API type

@@ -24,6 +24,20 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 		return nil, nil, fmt.Errorf("could not determine base schema for spec: %w", err)
 	}
 
+	// A body field a RESOLVER supplies must not be required of the user (#246).
+	//
+	// The controller substitutes it -- from a Secret, or from a dependent lookup -- so requiring it forces
+	// the author to write a value that is then overwritten. For secretRef that is worse than pointless:
+	// the obvious thing to put in a required field called `token` is the credential, in cleartext, in the
+	// CR spec, which is the exact outcome secretRef exists to avoid. For a dependentLookup it makes the
+	// feature inert, because a `when` guard keyed on the field's absence can never fire.
+	//
+	// Done HERE, before parameters are added, and that ordering is load-bearing. The names come off the
+	// request body's own `required`; a required PARAMETER that happens to share a name with a
+	// resolver-supplied body field is a different thing, and addParametersToSpec re-adds it below. Pruning
+	// afterwards would silently unrequire that parameter instead.
+	dropResolverSuppliedRequired(baseSchema, g.resourceConfig.Verbs)
+
 	// Add parameters to the spec schema. A cross-document parameter conflict is fatal, not a warning:
 	// the merged field would otherwise be chosen by verb order (#108).
 	requiredParameters, paramWarnings, err := g.addParametersToSpec(baseSchema)
@@ -525,4 +539,42 @@ func (g *OASSchemaGenerator) removeFieldAtPathRec(ctx context.Context, schema *S
 	//log.Printf("Field '%s' successfully removed", fieldName)
 
 	return true // Field was found and removed.
+}
+
+// dropResolverSuppliedRequired removes, from the schema's required list, every name that a
+// request-direction fieldMapping resolver supplies.
+//
+// Only `inBody` entries are considered. A resolver on inPath/inQuery addresses a URL rather than a spec
+// property, so there is nothing in `required` that legitimately corresponds to it, and matching such an
+// entry by name could unrequire an unrelated field that merely shares it.
+//
+// The property itself stays in the schema: the API still accepts the field, a CR may still set it (an
+// explicitly supplied value is what a dependentLookup's `when` guard exists to honour), and removing the
+// property would also remove the thing the mapping is anchored on.
+func dropResolverSuppliedRequired(schema *Schema, verbs []Verb) {
+	if schema == nil || len(schema.Required) == 0 {
+		return
+	}
+
+	supplied := map[string]bool{}
+	for _, verb := range verbs {
+		for _, m := range verb.FieldMapping {
+			if m.ResolverType == "" || m.InBody == "" {
+				continue
+			}
+			supplied[m.InBody] = true
+		}
+	}
+	if len(supplied) == 0 {
+		return
+	}
+
+	kept := make([]string, 0, len(schema.Required))
+	for _, name := range schema.Required {
+		if supplied[name] {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	schema.Required = kept
 }
