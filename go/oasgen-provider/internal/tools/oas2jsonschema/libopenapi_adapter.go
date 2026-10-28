@@ -363,6 +363,43 @@ func convertLibopenapiSchemaWithVisited(
 		}
 	}
 
+	// Validation keywords (#249). Copied verbatim: every one of these is representable in a CRD's
+	// OpenAPI v3 schema under the same name, so there is nothing to translate. Before #249 they were
+	// read off the document and dropped here, which made a declared constraint silently unenforced.
+	domainSchema.Pattern = s.Pattern
+	domainSchema.MinLength = s.MinLength
+	domainSchema.MaxLength = s.MaxLength
+	domainSchema.Minimum = s.Minimum
+	domainSchema.Maximum = s.Maximum
+	domainSchema.MultipleOf = s.MultipleOf
+	domainSchema.MinItems = s.MinItems
+	domainSchema.MaxItems = s.MaxItems
+	if s.UniqueItems != nil {
+		domainSchema.UniqueItems = *s.UniqueItems
+	}
+	// exclusiveMinimum/Maximum changed meaning between OAS 3.0 (a boolean modifier on minimum/maximum)
+	// and 3.1 (a number that is itself the bound). libopenapi models that as a DynamicValue, and only the
+	// boolean form has a CRD equivalent -- apiextensionsv1.JSONSchemaProps declares them as plain bools.
+	//
+	// The numeric form is dropped rather than coerced. Treating `exclusiveMinimum: 5` as
+	// `exclusiveMinimum: true` would silently attach the bound to whatever `minimum` happens to say, or to
+	// nothing at all, which changes which values the API server accepts. Logged rather than silently
+	// ignored, since an unenforced constraint that reads as declared is the whole subject of #249.
+	if s.ExclusiveMinimum != nil {
+		if s.ExclusiveMinimum.IsA() {
+			domainSchema.ExclusiveMinimum = s.ExclusiveMinimum.A
+		} else {
+			log.Printf("exclusiveMinimum is declared in the OAS 3.1 numeric form, which a CRD cannot express; it is not enforced")
+		}
+	}
+	if s.ExclusiveMaximum != nil {
+		if s.ExclusiveMaximum.IsA() {
+			domainSchema.ExclusiveMaximum = s.ExclusiveMaximum.A
+		} else {
+			log.Printf("exclusiveMaximum is declared in the OAS 3.1 numeric form, which a CRD cannot express; it is not enforced")
+		}
+	}
+
 	// MaxProperties handling
 	// as per JSON Schema spec (any non-negative integer).
 	if s.MaxProperties != nil {
