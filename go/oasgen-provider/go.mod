@@ -10,7 +10,7 @@ require (
 	github.com/gobuffalo/flect v1.0.3
 	github.com/google/cel-go v0.29.0
 	github.com/krateo-platformops/plumbing v1.14.2
-	github.com/krateo-platformops/provider-runtime v1.3.0
+	github.com/krateo-platformops/provider-runtime v1.5.1
 	github.com/pb33f/libopenapi v0.16.8
 	github.com/stoewer/go-strcase v1.3.0
 	github.com/stretchr/testify v1.11.1
