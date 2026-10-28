@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
@@ -637,10 +638,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 			return err
 		}
 
-		cr.SetConditions(rtv1.Creating())
-		cr.Status.HasSecuritySchemes = &hasSecuritySchemes
-		err = e.kube.Status().Update(ctx, cr)
-		if err != nil {
+		if err := e.persistCreatePhaseStatus(ctx, cr, gvk, hasSecuritySchemes); err != nil {
 			return fmt.Errorf("updating status: %w", err)
 		}
 		e.log.Debug("Applied CRD", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)
@@ -1409,4 +1407,66 @@ func crdExists(ctx context.Context, kube client.Client, name string) (bool, erro
 		return false, err
 	}
 	return true, nil
+}
+
+// persistCreatePhaseStatus records the outcome of Create's FIRST phase -- the CRDs have been applied, the
+// controller Deployment has not been created yet -- retrying on conflict.
+//
+// Create is deliberately two-phase: this phase applies the CRDs and returns, and the next reconcile, now
+// seeing the CRD, creates the Deployment. That makes "CRDs present, no Deployment" an expected
+// intermediate state rather than damage. What was not safe was how the phase ended (#252).
+//
+// The write it replaces had two defects, which produced two different permanent wedges from one line.
+//
+// It was UNRELIABLE. A plain Status().Update returns a resource-version conflict as an error, and Create
+// returned it -- so provider-runtime, which cannot know how much of an errored Create took effect, left
+// krateo.io/external-create-pending set and every later reconcile answered "cannot determine creation
+// result". A conflict here is ordinary, not a failure: many RestDefinitions reconcile at once on a fresh
+// install, which is exactly when it happens and exactly when it matters. Measured on a fresh GKE cluster:
+// the CRDs applied at 14:41:37.25 and the status update conflicted 70ms later, stranding the resource
+// permanently with no Deployment and no succeeded stamp.
+//
+// It was also INCOMPLETE. It recorded HasSecuritySchemes but not the version the CRD had just been applied
+// at -- Status.Resource is assigned only in the second phase. So observedVersion fell back to
+// resourceVersion, the next Observe looked the CRD up at the WRONG version, reported ResourceExists:
+// false for a CRD that plainly existed, and the runtime re-entered the create handshake on an
+// already-created resource. The re-check meant to absorb that is gated on `doc != nil`, and the
+// saved-status branch leaves doc nil. Measured on a second cluster: external-create-pending re-set 97
+// seconds AFTER external-create-succeeded.
+//
+// Recording the version here is what makes that re-check a safety net rather than the only guard. The
+// version is not a guess: it is the gvk whose CRD was applied immediately above.
+//
+// Re-reads on every attempt rather than retrying a stale object, matching applyMergedWithRetry in
+// internal/tools/crd: a concurrent change to the status is merged on top instead of clobbered by a stale
+// write, which matters because the runtime writes annotations to this same object.
+func (e *external) persistCreatePhaseStatus(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, hasSecuritySchemes bool) error {
+	key := client.ObjectKeyFromObject(cr)
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &definitionv1alpha1.RestDefinition{}
+		if gerr := e.kube.Get(ctx, key, cur); gerr != nil {
+			return gerr
+		}
+		cur.SetConditions(rtv1.Creating())
+		cur.Status.HasSecuritySchemes = &hasSecuritySchemes
+		cur.Status.Resource = definitionv1alpha1.KindApiVersion{
+			Kind:       gvk.Kind,
+			APIVersion: gvk.GroupVersion().String(),
+		}
+		return e.kube.Status().Update(ctx, cur)
+	})
+	if err != nil {
+		return err
+	}
+
+	// Mirror onto the caller's copy so the rest of this reconcile, and the runtime's own bookkeeping, see
+	// what was persisted rather than the pre-write state.
+	cr.SetConditions(rtv1.Creating())
+	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
+	cr.Status.Resource = definitionv1alpha1.KindApiVersion{
+		Kind:       gvk.Kind,
+		APIVersion: gvk.GroupVersion().String(),
+	}
+	return nil
 }
