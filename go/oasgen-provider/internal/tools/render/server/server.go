@@ -335,5 +335,31 @@ func (h *Handler) documentSetFor(cr *definitionv1alpha1.RestDefinition, def oas2
 		byVerb[v.Action] = parsed[v.OASPath]
 	}
 
-	return oas2jsonschema.NewDocumentSetWithOverrides(def, byVerb), nil
+	// Dependent lookups may name their own document too, and generation reads it to check the lookup's
+	// path exists there (#240). Wired here as well as in the controller, deliberately: /render exists so
+	// an author can see what the controller WILL produce, and a difference in which documents the two
+	// resolve is a difference in the warnings they report.
+	byLookup := map[string]oas2jsonschema.OASDocument{}
+	for i, l := range cr.Spec.Resource.DependentLookups {
+		if l.OASPath == "" || strings.EqualFold(l.OASPath, cr.Spec.OASPath) {
+			continue
+		}
+		field := fmt.Sprintf("spec.resource.dependentLookups[%d].oasPath", i)
+		if _, ok := parsed[l.OASPath]; !ok {
+			raw, ok := oas[l.OASPath]
+			if !ok {
+				return nil, []Problem{{Field: field, Severity: SeverityError,
+					Message: fmt.Sprintf("dependent lookup %q: no document supplied for oasPath %q: the request's oas map must carry it under exactly that key", l.Name, l.OASPath)}}
+			}
+			doc, err := h.Parser.Parse([]byte(raw))
+			if err != nil {
+				return nil, []Problem{{Field: field, Severity: SeverityError,
+					Message: fmt.Sprintf("dependent lookup %q: parsing OAS document %q: %v", l.Name, l.OASPath, err)}}
+			}
+			parsed[l.OASPath] = doc
+		}
+		byLookup[l.Name] = parsed[l.OASPath]
+	}
+
+	return oas2jsonschema.NewDocumentSetWithOverrides(def, byVerb).WithLookupOverrides(byLookup), nil
 }

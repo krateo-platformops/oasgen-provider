@@ -24,6 +24,15 @@ func oasPathsFor(cr *definitionv1alpha1.RestDefinition) []string {
 			seen[v.OASPath] = struct{}{}
 		}
 	}
+	// A dependent lookup may name its own document, and generation now reads it to check the lookup's
+	// path exists there (#240). Including it here is also what puts it in the composite digest below, so
+	// a change to a lookup's document re-triggers generation -- which it must, now that a generated
+	// warning depends on its contents.
+	for _, l := range cr.Spec.Resource.DependentLookups {
+		if l.OASPath != "" {
+			seen[l.OASPath] = struct{}{}
+		}
+	}
 	out := make([]string, 0, len(seen))
 	for p := range seen {
 		out = append(out, p)
@@ -103,5 +112,13 @@ func (e *external) getDocumentSetFromCR(ctx context.Context, cr *definitionv1alp
 		byVerb[v.Action] = parsed[v.OASPath]
 	}
 
-	return oas2jsonschema.NewDocumentSetWithOverrides(def, byVerb), compositeOASDigest(byPath), nil
+	byLookup := map[string]oas2jsonschema.OASDocument{}
+	for _, l := range cr.Spec.Resource.DependentLookups {
+		if l.OASPath == "" || strings.EqualFold(l.OASPath, cr.Spec.OASPath) {
+			continue
+		}
+		byLookup[l.Name] = parsed[l.OASPath]
+	}
+
+	return oas2jsonschema.NewDocumentSetWithOverrides(def, byVerb).WithLookupOverrides(byLookup), compositeOASDigest(byPath), nil
 }

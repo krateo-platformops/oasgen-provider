@@ -112,6 +112,13 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 		return nil, warnings, ierr
 	}
 
+	// A dependent lookup can only read a spec field something else puts there (#240). Checked HERE, last,
+	// for the same reason the allowlist runs last: a path that exists in the base schema may have been
+	// taken out by excludedSpecFields or by retainIncludedSpecFields, and a check running earlier would
+	// pass on a field the finished spec does not have.
+	warnings = append(warnings, g.checkLookupCRReads(baseSchema)...)
+	warnings = append(warnings, g.checkLookupPaths()...)
+
 	// Convert the schema to JSON schema format.
 	byteSchema, err := GenerateJsonSchema(baseSchema, g.generatorConfig)
 	if err != nil {
@@ -577,4 +584,147 @@ func dropResolverSuppliedRequired(schema *Schema, verbs []Verb) {
 		kept = append(kept, name)
 	}
 	schema.Required = kept
+}
+
+// checkLookupCRReads warns when a dependent lookup reads a `spec.`-rooted path the finished spec cannot
+// carry.
+//
+// Without this the mistake is invisible until runtime, and then it is invisible in the wrong place: the
+// controller reports `dependent lookup "x": "spec.y" not found on the custom resource` on every reconcile
+// of every CR of the kind, naming a RestDefinition field, for a CR the author wrote correctly. Generation
+// is where the author is present and the spec schema is in hand.
+//
+// Deliberately WARNINGS, and deliberately only `spec.`-rooted paths. A `status.`-rooted read is legitimate
+// -- it resolves from additionalStatusFields, which this schema says nothing about -- and a value may also
+// reach the request through a configurationFields entry, so refusing here would block definitions that
+// work. The two known consumers are safe for a reason that is a coincidence of their APIs rather than a
+// property of the design: GitRef's lookups read spec.owner/spec.repo and KeycloakClient's reads
+// spec.realm, which happen to be path parameters of their create verbs.
+func (g *OASSchemaGenerator) checkLookupCRReads(spec *Schema) []error {
+	if g.resourceConfig == nil || len(g.resourceConfig.DependentLookups) == 0 {
+		return nil
+	}
+
+	var warnings []error
+
+	// Collected as (lookup, what, path) so the message can say which declaration is wrong, not merely
+	// that something is.
+	type read struct{ lookup, what, path string }
+	var reads []read
+
+	for _, l := range g.resourceConfig.DependentLookups {
+		for _, prm := range l.Parameters {
+			if prm.InCustomResource != "" {
+				where := prm.InPath
+				if where == "" {
+					where = prm.InQuery
+				}
+				reads = append(reads, read{l.Name, fmt.Sprintf("parameters[%s].inCustomResource", where), prm.InCustomResource})
+			}
+		}
+		if l.Match != nil && l.Match.EqualsFromCustomResource != "" {
+			reads = append(reads, read{l.Name, "match.equalsFromCustomResource", l.Match.EqualsFromCustomResource})
+		}
+	}
+
+	for _, r := range reads {
+		segments, perr := pathparsing.ParsePath(r.path)
+		if perr != nil || len(segments) == 0 {
+			warnings = append(warnings, SchemaGenerationError{
+				Path:    fmt.Sprintf("dependentLookups[%s].%s", r.lookup, r.what),
+				Code:    CodeFieldNotFound,
+				Message: fmt.Sprintf("dependent lookup %q reads %q, which is not a valid path: %v", r.lookup, r.path, perr),
+				Got:     r.path,
+			})
+			continue
+		}
+		// Only spec-rooted reads are checkable against this schema.
+		if !strings.EqualFold(segments[0], "spec") {
+			continue
+		}
+		if found, _ := lookupTypeByPath(spec, segments[1:]); !found {
+			warnings = append(warnings, SchemaGenerationError{
+				Path:    fmt.Sprintf("dependentLookups[%s].%s", r.lookup, r.what),
+				Code:    CodeFieldNotFound,
+				Message: fmt.Sprintf("dependent lookup %q reads %q, which the generated spec does not contain; the lookup will fail on every reconcile unless another declaration puts that field in spec", r.lookup, r.path),
+				Got:     r.path,
+			})
+		}
+	}
+
+	return warnings
+}
+
+// checkLookupPaths warns when a dependent lookup names a path, or a parameter, its document does not
+// declare.
+//
+// A lookup resolves its parameters against the document exactly as a verb does, so a path the document
+// does not declare has no parameter schema and cannot be bound. That is invisible until the lookup runs,
+// and then it fails on every reconcile.
+//
+// The case this exists for is transcription from an API's prose docs rather than from the document the
+// resource will actually run against. oasgen-provider#120 wrote GitHub's git-ref read as
+// /repos/{owner}/{repo}/git/ref/heads/{default_branch}; the real operation is .../git/ref/{ref} with ONE
+// parameter whose value is formatted "heads/<branch>". The prose path is not in any document, and nothing
+// would have said so.
+//
+// Warnings, not errors, for the same reason as the CR-read check: generation reports what it can see, and
+// a document resolved per lookup may legitimately be one this process was not given.
+func (g *OASSchemaGenerator) checkLookupPaths() []error {
+	if g.resourceConfig == nil || len(g.resourceConfig.DependentLookups) == 0 {
+		return nil
+	}
+
+	var warnings []error
+	for _, l := range g.resourceConfig.DependentLookups {
+		doc := g.docs.ForLookup(l.Name)
+		if doc == nil {
+			continue // nothing to check against; not the author's mistake
+		}
+
+		pathItem, ok := doc.FindPath(l.Path)
+		if !ok {
+			warnings = append(warnings, SchemaGenerationError{
+				Path:    fmt.Sprintf("dependentLookups[%s].path", l.Name),
+				Code:    CodePathNotFound,
+				Message: fmt.Sprintf("dependent lookup %q declares path %q, which its OAS document does not contain; the lookup cannot resolve its parameters and will fail on every reconcile", l.Name, l.Path),
+				Got:     l.Path,
+			})
+			continue
+		}
+
+		op, ok := pathItem.GetOperations()[strings.ToLower(l.Method)]
+		if !ok {
+			warnings = append(warnings, SchemaGenerationError{
+				Path:    fmt.Sprintf("dependentLookups[%s].method", l.Name),
+				Code:    CodePathNotFound,
+				Message: fmt.Sprintf("dependent lookup %q declares %s on %q, which its OAS document does not define for that path", l.Name, l.Method, l.Path),
+				Got:     l.Method,
+			})
+			continue
+		}
+
+		// Each declared parameter must exist on the operation, or binding it is a no-op that leaves a
+		// {placeholder} in the URL.
+		declared := map[string]bool{}
+		for _, prm := range op.GetParameters() {
+			declared[prm.Name] = true
+		}
+		for _, prm := range l.Parameters {
+			name := prm.InPath
+			if name == "" {
+				name = prm.InQuery
+			}
+			if name == "" || declared[name] {
+				continue
+			}
+			warnings = append(warnings, SchemaGenerationError{
+				Path:    fmt.Sprintf("dependentLookups[%s].parameters", l.Name),
+				Code:    CodeFieldNotFound,
+				Message: fmt.Sprintf("dependent lookup %q binds parameter %q, which %s %q does not declare", l.Name, name, l.Method, l.Path),
+				Got:     name,
+			})
+		}
+	}
+	return warnings
 }

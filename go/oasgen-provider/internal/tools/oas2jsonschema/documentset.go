@@ -20,6 +20,10 @@ import "strings"
 type DocumentSet struct {
 	def    OASDocument
 	byVerb map[string]OASDocument
+	// byLookup is keyed by dependent-lookup NAME. A lookup has no action to key on, and keying it by
+	// document path instead would make two lookups that override to the same document indistinguishable
+	// from each other at the call site, which is where the name is what the caller has.
+	byLookup map[string]OASDocument
 }
 
 // NewDocumentSet builds a set whose every verb resolves to def.
@@ -66,6 +70,40 @@ func (s *DocumentSet) For(action string) OASDocument {
 	if len(s.byVerb) > 0 {
 		for a, d := range s.byVerb {
 			if strings.EqualFold(a, action) {
+				return d
+			}
+		}
+	}
+	return s.def
+}
+
+// WithLookupOverrides returns the set with per-lookup documents attached, keyed by lookup NAME.
+//
+// Separate from NewDocumentSetWithOverrides rather than a fourth constructor argument: the two callers
+// that build a set (the controller and the render server) resolve verb and lookup documents in different
+// places, and threading an empty map through every call site to express "no lookups" is how a nil map
+// becomes an empty one that reads as "checked, none found".
+func (s *DocumentSet) WithLookupOverrides(byLookup map[string]OASDocument) *DocumentSet {
+	if s == nil || len(byLookup) == 0 {
+		return s
+	}
+	s.byLookup = byLookup
+	return s
+}
+
+// ForLookup returns the document a dependent lookup's path must be resolved against: its own, when it
+// declares one, otherwise the default.
+//
+// Case-insensitive on the name for the same reason For is on the action -- a set keyed from the
+// declaration and a caller passing the declared name must not be able to silently disagree, because the
+// consequence is a path checked against the wrong document, which is worse than not checking it.
+func (s *DocumentSet) ForLookup(name string) OASDocument {
+	if s == nil {
+		return nil
+	}
+	if len(s.byLookup) > 0 {
+		for n, d := range s.byLookup {
+			if strings.EqualFold(n, name) {
 				return d
 			}
 		}
