@@ -15,54 +15,87 @@ provider and the rest-dynamic-controller together.
 
 ## 2026-10-28 — 0.39.0
 
-One fix, for a RestDefinition that could wedge permanently on first install.
+A RestDefinition could wedge permanently on first install. The fix is in three parts, and the
+load-bearing one is a dependency bump rather than anything written here.
 
-### Create's first phase survives a status conflict
+### The permanent wedge was a stale provider-runtime pin
 
-A RestDefinition could stick on `krateo.io/external-create-pending` with *"cannot determine creation
-result"*, and nothing repaired it. Two different wedges, both from a single status write at the end of
-`Create`'s first phase (#252).
+A RestDefinition could stick on `krateo.io/external-create-pending` reporting *"cannot determine creation
+result"*, on every reconcile, with no remedy short of a human deleting the annotation. Measured at 2 of 2
+fresh clusters under a ~60-RestDefinition install.
+
+The reason it was terminal was not in this repo. In provider-runtime **v1.3.0**, when `Create` returns an
+error the reconciler returns early on a resource-version conflict *before* stamping
+`external-create-failed`, so `pending` stays the newest annotation and the guard that checks it refuses to
+proceed, forever. `kerrors.IsConflict` unwraps, so wrapping the error — which this provider does — does
+not avoid it.
+
+**provider-runtime fixed that in v1.4.0** and oasgen-provider was pinned to v1.3.0, three minor versions
+behind a fix released for this exact failure. 0.39.0 moves to **v1.5.1**.
+
+What the upstream fix does (provider-runtime#10): an unresolved create now asks `Observe` whether the
+external resource exists, rather than refusing on the ambiguity. Present → adopt it. Absent → keep
+refusing and re-observe for a two-minute grace period, so a create that did land is adopted rather than
+duplicated. Still absent after that → the create genuinely did not land, so clear the marker and let
+create run again. The duplication guard is not relaxed; it is relocated into a window bounded by evidence.
+
+Two consequences worth knowing:
+
+- **Resources already wedged recover by themselves** on this version. On 0.38.0 and earlier they could
+  not, and the documented remedy was manual annotation surgery.
+- **Recovery takes up to about two minutes**, not until the next reconcile. The conflict branch upstream
+  still does not stamp `failed`, so the grace period is waited out rather than short-circuited. That
+  remains open upstream and is an optimisation, not a second wedge.
+
+If you maintain another provider on this runtime, check your pin. `git-provider` was already on v1.4.0;
+`core-provider` and `chart-inspector` were not.
+
+### Both of Create's phases now survive a status conflict
 
 `Create` is deliberately two-phase: the first applies the CRDs and returns, and the next reconcile, now
 seeing the CRD, creates the controller Deployment. So **"CRDs present, no Deployment" is an expected
-intermediate state**, not damage — worth knowing before diagnosing a stuck install from that reading
-alone. What was unsafe was how the phase ended.
+intermediate state**, not damage — worth knowing before diagnosing a slow install from that reading
+alone. What was unsafe was how each phase ended: a plain status write, returned as an error on conflict,
+reaching the runtime path above.
 
-The write was **unreliable**. A plain `Status().Update` returns a resource-version conflict as an error,
-and `Create` returned it; provider-runtime cannot know how much of an errored `Create` took effect, so it
-left the pending annotation set and every later reconcile answered the same way. A conflict there is
-ordinary rather than exceptional — many RestDefinitions reconcile at once on a fresh install, which is
-precisely when it happens and precisely when it matters.
+Both are now retried, re-reading the object on each attempt so a concurrent change is merged rather than
+clobbered by a stale write.
 
-The write was also **incomplete**. It recorded `hasSecuritySchemes` but not the version the CRD had just
-been applied at, because `status.resource` was assigned only in the second phase. `observedVersion` then
-fell back to `resourceVersion`, the next `Observe` looked the CRD up at the wrong version and reported it
-absent, and the runtime re-entered the create handshake on a resource it had already created. The
-re-check that exists to absorb exactly this is gated on having a parsed document, and the saved-status
-branch has none.
+Phase 1 (#252) also records the version its CRDs were applied at. Without it `observedVersion` fell back
+to `v1alpha1`, the next `Observe` looked the CRD up at the wrong version and reported it absent, and the
+runtime re-entered the create handshake on a resource it had already created. The re-check that absorbs
+that is gated on having a parsed document, and the branch that reads saved status has none — so recording
+the version is what demotes that re-check from sole guard to safety net.
 
-Both are fixed by one function that retries on conflict, re-reading the object on each attempt so a
-concurrent change is merged rather than clobbered — which matters, because the runtime writes its own
-annotations to that same object — and that records the version the CRD was applied at. That version is
-not inferred: it is the GVK whose CRD was applied immediately above. Recording it demotes the
-document-dependent re-check from sole guard to safety net.
+Phase 2 (#259) is the more consequential of the two, and was the one left unprotected by #252. It records
+`status.digest`, `status.oasHash` and `status.resourceHash` — the values `Observe` compares against to
+decide whether anything drifted. Losing that write does not merely lose a status field: the next `Observe`
+compares an empty digest against a freshly rendered one, reports drift that does not exist, and `Update`
+redeploys on every reconcile thereafter.
 
-A conflict that never clears still surfaces, unmasked, after a bounded number of attempts. Retrying
-forever would turn a wedge into a hang, and swallowing it would report a success that wrote nothing.
+A conflict that never clears still surfaces, bounded. Retrying forever would turn a wedge into a hang,
+and swallowing it would report a success that wrote nothing.
 
 **Not the same bug as #122.** That fix (`resourceExistsForController`) shipped in 0.23.1 and was present
-on the clusters where these were measured — same symptom, different triggers. If you are reading an old
-diagnosis of this symptom, check which of the three it describes.
+on the clusters where these were measured. Three distinct things now produce "cannot determine creation
+result", so an older diagnosis of that symptom may describe a different cause.
 
-#### How this was found
+### How this was found, and what the first attempt got wrong
 
-By installing it. Both paths were measured on independent fresh GKE clusters by the snowplow session,
-which also ran a check before teardown that separated the two causes — the first showing the status
-update conflicting 70ms after the CRDs applied, the second showing the pending annotation re-set 97
-seconds *after* the succeeded stamp. Neither is reachable from a unit test or a static read: the trigger
-is concurrency during a bulk install, and the symptom is an annotation left behind by the runtime rather
-than anything this repo writes. The failure rate was 2 of 2 fresh clusters under a roughly
-60-RestDefinition install, so this was never a rare race.
+By installing it. Both failure paths were measured on independent fresh GKE clusters by the snowplow
+session, which ran a check before teardown that separated them — one showing the status update conflicting
+70ms after the CRDs applied, the other showing `pending` re-set 97 seconds *after* the succeeded stamp.
+Neither is reachable from a unit test: the trigger is concurrency during a bulk install, and the symptom
+is an annotation the runtime leaves behind rather than anything this repo writes.
+
+The first fix (#252) covered phase 1 only and was shipped as a complete fix for the wedge. An independent
+review failed it, correctly, on two counts: phase 2 was still exposed, and the permanent wedge was in the
+runtime rather than here. Both are addressed above. The review's own analysis was of v1.3.0 — the version
+this provider pinned — which is how a fix released three versions earlier came to be described as missing.
+Checking what the dependency already does belongs before deciding what to write.
+
+One limit stated rather than glossed: the decisive log line for the phase-2 diagnosis was not retained and
+the cluster is gone, so that half is consistent with the evidence rather than proven by it.
 
 ## 2026-10-28 — 0.38.0
 
