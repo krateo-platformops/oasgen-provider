@@ -678,35 +678,47 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 		e.log.Debug("Pruned superseded served versions", "versions", pruned)
 	}
 
-	cr.SetConditions(rtv1.Creating())
-	cr.Status.Resource = definitionv1alpha1.KindApiVersion{
-		Kind:       gvk.Kind,
-		APIVersion: gvk.GroupVersion().String(),
+	// Captured ONCE, before the retry. The mutation runs against a re-read object on every attempt, so
+	// anything derived from the spec must record the spec this reconcile acted on rather than whatever the
+	// latest read happens to say -- and anything an earlier step wrote onto cr.Status in place must be
+	// collected here or it is never persisted at all. See the doc comment on createdStatus.
+	st := createdStatus{
+		resource: definitionv1alpha1.KindApiVersion{
+			Kind:       gvk.Kind,
+			APIVersion: gvk.GroupVersion().String(),
+		},
+		oasPath:            cr.Spec.OASPath,
+		digest:             dig,
+		hasSecuritySchemes: hasSecuritySchemes,
+		oasHash:            oasHash,
+		resourceHash:       resourceHash(cr),
+		// Set in place by syncAuthSecretRBAC above, which has already provisioned the RBAC these describe.
+		authSecretDigest:         cr.Status.AuthSecretDigest,
+		authSecretRBACNamespaces: cr.Status.AuthSecretRBACNamespaces,
 	}
-	// Only set Configuration status if configuration fields or security schemes are defined
 	if len(cr.Spec.Resource.ConfigurationFields) > 0 || hasSecuritySchemes {
 		e.log.Debug("Configuration fields or security schemes defined, setting Configuration status in RestDefinition status")
 		cfgGVK := getConfigurationGVK(cr)
-		cr.Status.Configuration = definitionv1alpha1.KindApiVersion{
+		st.configuration = &definitionv1alpha1.KindApiVersion{
 			Kind:       cfgGVK.Kind,
 			APIVersion: cfgGVK.GroupVersion().String(),
 		}
 	}
-	cr.Status.OASPath = cr.Spec.OASPath
-	cr.Status.Digest = dig
-	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
-	cr.Status.OASHash = oasHash
-	cr.Status.ResourceHash = resourceHash(cr)
 
-	err = e.kube.Status().Update(ctx, cr)
-	if err != nil {
+	// Retried on conflict for the same reason phase 1 is (#259). This write is the one that records
+	// status.digest, status.oasHash and status.resourceHash -- the values Observe compares against to
+	// decide whether anything drifted -- so losing it does not merely lose a status field: the next
+	// Observe sees an empty digest, reports drift that does not exist, and Update redeploys on every
+	// reconcile. A conflict here is as ordinary as in phase 1, and it was the only one of the two left
+	// unprotected.
+	if err := e.persistStatusWithRetry(ctx, cr, st.applyTo); err != nil {
 		return fmt.Errorf("updating status: %w", err)
 	}
 
 	e.log.Debug("Created RestDefinition", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)
 	e.rec.Eventf(cr, corev1.EventTypeNormal, "RestDefinitionCreating",
 		"RestDefinition '%s/%s' creating", cr.Spec.Resource.Kind, cr.Spec.ResourceGroup)
-	return err
+	return nil
 }
 
 // generateAndApplyCRDs renders the target CRD (and the Configuration CRD when configuration fields or
@@ -1441,32 +1453,97 @@ func crdExists(ctx context.Context, kube client.Client, name string) (bool, erro
 // internal/tools/crd: a concurrent change to the status is merged on top instead of clobbered by a stale
 // write, which matters because the runtime writes annotations to this same object.
 func (e *external) persistCreatePhaseStatus(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, hasSecuritySchemes bool) error {
+	return e.persistStatusWithRetry(ctx, cr, func(target *definitionv1alpha1.RestDefinition) {
+		target.SetConditions(rtv1.Creating())
+		target.Status.HasSecuritySchemes = &hasSecuritySchemes
+		target.Status.Resource = definitionv1alpha1.KindApiVersion{
+			Kind:       gvk.Kind,
+			APIVersion: gvk.GroupVersion().String(),
+		}
+	})
+}
+
+// createdStatus is the COMPLETE set of status that Create's second phase persists, collected into one
+// value so it can be captured before the retry and applied to a re-read object.
+//
+// Why a named type rather than a closure over locals: this write used to be `Status().Update(ctx, cr)`,
+// which persisted cr's WHOLE status -- so any earlier step that set a field on cr.Status in place was
+// carried along for free. Writing a re-read object instead, which is what makes the retry safe, ends that
+// silently: a field an upstream step sets and this type does not carry is never persisted, and nothing
+// fails at the point of the mistake.
+//
+// That is not hypothetical -- it happened in the first version of this refactor. syncAuthSecretRBAC, a few
+// lines above the write, sets AuthSecretDigest and AuthSecretRBACNamespaces on cr.Status in place, and
+// both were dropped. An empty AuthSecretDigest makes Observe's auth-secret drift check fire on every
+// reconcile, redeploying forever; an empty AuthSecretRBACNamespaces makes teardownAuthSecretRBAC return
+// early on Delete, leaking RBAC in every namespace it had provisioned. Every test in the package passed,
+// because none of them exercise Create's second phase.
+//
+// So the type exists to make the set enumerable and therefore checkable -- see
+// TestCreatedStatusCoversEveryStatusField, which fails if RestDefinitionStatus grows a field applyTo does
+// not set.
+type createdStatus struct {
+	resource                 definitionv1alpha1.KindApiVersion
+	configuration            *definitionv1alpha1.KindApiVersion
+	oasPath                  string
+	digest                   string
+	hasSecuritySchemes       bool
+	oasHash                  string
+	resourceHash             string
+	authSecretDigest         string
+	authSecretRBACNamespaces []string
+}
+
+// applyTo writes the whole set onto target. Idempotent, and derives nothing from target, because
+// persistStatusWithRetry runs it once per write attempt and once more to mirror.
+func (s createdStatus) applyTo(target *definitionv1alpha1.RestDefinition) {
+	target.SetConditions(rtv1.Creating())
+	target.Status.Resource = s.resource
+	// Left alone rather than zeroed when there is no Configuration: a RestDefinition that had one and no
+	// longer does keeps the record of what was deployed, which Delete needs in order to tear it down.
+	if s.configuration != nil {
+		target.Status.Configuration = *s.configuration
+	}
+	target.Status.OASPath = s.oasPath
+	target.Status.Digest = s.digest
+	hasSchemes := s.hasSecuritySchemes
+	target.Status.HasSecuritySchemes = &hasSchemes
+	target.Status.OASHash = s.oasHash
+	target.Status.ResourceHash = s.resourceHash
+	target.Status.AuthSecretDigest = s.authSecretDigest
+	target.Status.AuthSecretRBACNamespaces = s.authSecretRBACNamespaces
+}
+
+// persistStatusWithRetry applies mutate to a FRESHLY READ copy of cr and writes the status subresource,
+// retrying on conflict, then applies mutate to the caller's copy so the rest of the reconcile sees what
+// was persisted rather than the pre-write state.
+//
+// Both of Create's phases end in a status write, and a conflict escaping either one is what wedges the
+// resource (#252, #259). Sharing one mechanism rather than hand-rolling a second: phase 2 writes seven
+// fields where phase 1 writes three, so a duplicated retry-and-mirror is exactly the construct that
+// drifts, and a mirror that forgets a field is invisible until something downstream reads the stale value.
+//
+// Re-reads on every attempt rather than retrying a stale object, matching applyMergedWithRetry in
+// internal/tools/crd: a concurrent change is merged on top instead of clobbered. That matters because
+// provider-runtime writes its own annotations to this same object -- though not to its status, which has a
+// subresource of its own, so these writes and the runtime's cannot collide on content.
+//
+// mutate must be idempotent and must not derive values from the object it is given: it runs twice, on two
+// different copies. Anything computed from the spec is computed once by the caller and captured.
+func (e *external) persistStatusWithRetry(ctx context.Context, cr *definitionv1alpha1.RestDefinition, mutate func(*definitionv1alpha1.RestDefinition)) error {
 	key := client.ObjectKeyFromObject(cr)
 
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &definitionv1alpha1.RestDefinition{}
 		if gerr := e.kube.Get(ctx, key, cur); gerr != nil {
 			return gerr
 		}
-		cur.SetConditions(rtv1.Creating())
-		cur.Status.HasSecuritySchemes = &hasSecuritySchemes
-		cur.Status.Resource = definitionv1alpha1.KindApiVersion{
-			Kind:       gvk.Kind,
-			APIVersion: gvk.GroupVersion().String(),
-		}
+		mutate(cur)
 		return e.kube.Status().Update(ctx, cur)
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 
-	// Mirror onto the caller's copy so the rest of this reconcile, and the runtime's own bookkeeping, see
-	// what was persisted rather than the pre-write state.
-	cr.SetConditions(rtv1.Creating())
-	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
-	cr.Status.Resource = definitionv1alpha1.KindApiVersion{
-		Kind:       gvk.Kind,
-		APIVersion: gvk.GroupVersion().String(),
-	}
+	mutate(cr)
 	return nil
 }
