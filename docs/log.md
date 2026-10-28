@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-28T01:40:00Z
+timestamp: 2026-10-28T13:10:00Z
 ---
 
 # Log
@@ -12,6 +12,64 @@ timestamp: 2026-10-28T01:40:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-28 — 0.38.0
+
+Two fixes, both the same shape: a constraint the document declared, that the generated CRD did not carry.
+
+### Validation keywords reach the CRD
+
+A `pattern`, `minLength`, `minimum` or `maxItems` written in an OAS document was read off it and then
+discarded. The CRD enforced none of them, so the document looked as though it declared a constraint that
+nothing applied — which is worse than not supporting them, because the declaration reads as working
+(#249).
+
+Now carried: `pattern`, `minLength`, `maxLength`, `minimum`, `maximum`, `exclusiveMinimum`,
+`exclusiveMaximum`, `multipleOf`, `minItems`, `maxItems`, `uniqueItems`.
+
+This was never a regression. The domain schema had no fields to hold them and the adapter never read
+them, so they died at that boundary, before CRD generation was reached. Anyone who checked the
+transpiler and found it handles `pattern` was looking at the right file and the wrong layer: the
+transpiler does carry them; oasgen never handed it any.
+
+Three behaviours worth knowing if you write these:
+
+- **A `pattern` is compiled before it is emitted, and dropped with a warning if it fails.** Kubernetes
+  compiles CRD patterns as RE2 while OpenAPI specifies ECMA-262, so a backreference or lookahead is valid
+  in a document and rejected by the API server — which refuses the *entire* CustomResourceDefinition, not
+  just that one validation. Losing a constraint is better than losing the resource, and the warning names
+  the path so it can be rewritten.
+- **`exclusiveMinimum`/`exclusiveMaximum` are the boolean form**, which is what OAS 3.0 means and the only
+  thing a CRD can express. OAS 3.1 redefines them as numbers; that form is dropped and logged rather than
+  coerced, because treating `exclusiveMinimum: 5` as `true` would attach the bound to whatever `minimum`
+  happens to say.
+- **`uniqueItems` becomes `x-kubernetes-list-type: set`** in the generated CRD. That is the API
+  server-enforced form and the stronger one — structural schemas forbid a raw `uniqueItems: true` — so its
+  absence under that name is correct rather than a propagation failure.
+
+### A field the controller supplies is no longer required of the author
+
+A request-body field that a `fieldMapping` resolver supplies was still emitted into the CRD's
+`spec.required`, so an author had to write a value the controller then overwrote (#246).
+
+For `secretRef` — shipped since 0.12.0 — that was worse than redundant: the obvious thing to put in a
+required field called `token` is the credential, in cleartext, in the CR spec, which is precisely what
+`secretRef` exists to avoid. For a `dependentLookup` it made the feature inert, since a `when` guard keyed
+on the field's absence can never fire if the field is mandatory.
+
+The requirement is dropped; the property stays. The API still accepts the field, and an explicitly
+supplied value is exactly what a lookup's `when` guard exists to honour. Only `inBody` entries are
+affected — a resolver on a path or query parameter does not correspond to a spec property, and a required
+*parameter* that merely shares a name with a resolver-supplied body field keeps its requirement.
+
+### Also
+
+A guard that deep-copies a schema with every field populated and compares field by field, because
+`Schema.deepCopy` assigns fields one at a time by hand and a field added elsewhere and forgotten there is
+dropped silently — with no symptom at the point of the mistake, only a missing constraint in a CRD layers
+away. That is how the keyword bug above stayed invisible until someone measured a generated CRD on a live
+cluster. The guard found a second instance on its first run: `Extensions` was already being dropped,
+unrelated to any of this.
 
 ## 2026-10-28 — 0.37.0
 
