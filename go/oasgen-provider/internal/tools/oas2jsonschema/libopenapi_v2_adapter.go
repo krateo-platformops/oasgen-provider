@@ -261,9 +261,20 @@ func convertV2Parameter(p *v2.Parameter) ParameterInfo {
 
 // synthesiseV2ParameterSchema builds a Schema from the fields a 2.0 non-body parameter carries inline.
 //
-// Pattern/minimum/maximum and the other numeric facets are deliberately dropped: the domain Schema has
-// nowhere to put them, and inventing a description that restates them would put prose where validation
-// belongs. They were never expressible for v3 parameters either, so this is parity, not a v2 gap.
+// Swagger 2.0 has no `schema` on a non-body parameter: `pattern`, `minLength`, `maximum` and the rest are
+// written directly on the parameter object. That is why the validation keywords have to be copied by hand
+// here, where the v3 path got them for free -- convertLibopenapiParameter runs p.Schema through the same
+// convertLibopenapiSchema the request body uses, so #249 reached v3 parameters without touching them.
+//
+// Until #255 this function dropped them, which left the two document versions disagreeing about whether a
+// declared constraint was enforced: the same `pattern` on a path parameter reached the CRD from an OAS 3
+// document and vanished from a 2.0 one. That is the failure mode #249 exists to remove -- a constraint
+// that reads as declared and is enforced by nothing -- so covering only half the surface reproduced it
+// for every 2.0 consumer.
+//
+// `exclusiveMinimum`/`exclusiveMaximum` are booleans in 2.0, which is the draft-4 reading
+// apiextensionsv1.JSONSchemaProps expects, so they map straight across with none of the OAS 3.1 numeric
+// ambiguity convertLibopenapiSchema has to warn about.
 func synthesiseV2ParameterSchema(p *v2.Parameter) *Schema {
 	s := &Schema{Format: p.Format}
 	if p.Type != "" {
@@ -278,6 +289,21 @@ func synthesiseV2ParameterSchema(p *v2.Parameter) *Schema {
 	if p.Items != nil {
 		s.Items = synthesiseV2ItemsSchema(p.Items)
 	}
+
+	// Validation keywords (#255). v2.Parameter types every one of these as a pointer, so presence is
+	// unambiguous and no low-level lookup is needed -- unlike v2.Items below.
+	s.Pattern = p.Pattern
+	s.MinLength = v2Int64(p.MinLength)
+	s.MaxLength = v2Int64(p.MaxLength)
+	s.MinItems = v2Int64(p.MinItems)
+	s.MaxItems = v2Int64(p.MaxItems)
+	s.Minimum = v2Float64(p.Minimum)
+	s.Maximum = v2Float64(p.Maximum)
+	s.MultipleOf = v2Float64(p.MultipleOf)
+	s.ExclusiveMinimum = v2Bool(p.ExclusiveMinimum)
+	s.ExclusiveMaximum = v2Bool(p.ExclusiveMaximum)
+	s.UniqueItems = v2Bool(p.UniqueItems)
+
 	return s
 }
 
@@ -300,7 +326,89 @@ func synthesiseV2ItemsSchema(items *v2.Items) *Schema {
 	if items.Items != nil {
 		s.Items = synthesiseV2ItemsSchema(items.Items)
 	}
+
+	// Validation keywords (#255), gated on the LOW model rather than read off the fields above.
+	//
+	// v2.Items types these as plain values where v2.Parameter uses pointers, so `maximum: 0` -- which is a
+	// real constraint, "no greater than zero" -- is indistinguishable from absent on the high model, and
+	// reading the zero value would invent a constraint on every array whose items declare none. The low
+	// model records presence exactly: NodeReference.IsEmpty() is false only when the key was in the
+	// document. Measured on an items object declaring `maxLength: 4` and no `maximum`, IsEmpty() is false
+	// for maxLength and true for maximum even though Maximum reads 0.
+	//
+	// A nil low model means presence cannot be established, so nothing is carried. That is the pre-#255
+	// behaviour, and inventing bounds would be worse than omitting them. libopenapi's NewItems always sets
+	// it, so this is a guard, not a path with known callers.
+	lo := items.GoLow()
+	if lo == nil {
+		return s
+	}
+	if !lo.Pattern.IsEmpty() {
+		s.Pattern = items.Pattern
+	}
+	if !lo.MinLength.IsEmpty() {
+		s.MinLength = v2Int64(&items.MinLength)
+	}
+	if !lo.MaxLength.IsEmpty() {
+		s.MaxLength = v2Int64(&items.MaxLength)
+	}
+	if !lo.MinItems.IsEmpty() {
+		s.MinItems = v2Int64(&items.MinItems)
+	}
+	if !lo.MaxItems.IsEmpty() {
+		s.MaxItems = v2Int64(&items.MaxItems)
+	}
+	if !lo.Minimum.IsEmpty() {
+		s.Minimum = v2Float64(&items.Minimum)
+	}
+	if !lo.Maximum.IsEmpty() {
+		s.Maximum = v2Float64(&items.Maximum)
+	}
+	if !lo.MultipleOf.IsEmpty() {
+		s.MultipleOf = v2Float64(&items.MultipleOf)
+	}
+	if !lo.ExclusiveMinimum.IsEmpty() {
+		s.ExclusiveMinimum = items.ExclusiveMinimum
+	}
+	if !lo.ExclusiveMaximum.IsEmpty() {
+		s.ExclusiveMaximum = items.ExclusiveMaximum
+	}
+	if !lo.UniqueItems.IsEmpty() {
+		s.UniqueItems = items.UniqueItems
+	}
+
 	return s
+}
+
+// v2Int64, v2Float64 and v2Bool adapt the types libopenapi gives a 2.0 parameter to the ones the domain
+// Schema uses -- *int64 for lengths and counts, *float64 for bounds, matching
+// apiextensionsv1.JSONSchemaProps. They widen the Go type and nothing else.
+//
+// KNOWN LOSS, and not one this boundary can repair: libopenapi types `minimum`, `maximum` and
+// `multipleOf` as int for 2.0, where the 2.0 specification defines all three as JSON Schema `number`. A
+// fractional value fails to unmarshal and is discarded at the LOW level, so it is absent from both models
+// and cannot be recovered or even detected here -- probed on a parameter declaring `minimum: 0`,
+// `maximum: 2.5`, `multipleOf: 0.5`, only `minimum` survived, and the other two left no node behind to
+// warn about. The fix is *int -> *float64 in the fork; see #255. Integer bounds, the common case, are
+// unaffected.
+func v2Int64(p *int) *int64 {
+	if p == nil {
+		return nil
+	}
+	v := int64(*p)
+	return &v
+}
+
+func v2Float64(p *int) *float64 {
+	if p == nil {
+		return nil
+	}
+	v := float64(*p)
+	return &v
+}
+
+func v2Bool(p *bool) bool {
+	return p != nil && *p
 }
 
 func decodeYAMLNode(n *yaml.Node) interface{} {
