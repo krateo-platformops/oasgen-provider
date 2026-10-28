@@ -43,11 +43,14 @@ Two consequences worth knowing:
 
 - **Resources already wedged recover by themselves** on this version. On 0.38.0 and earlier they could
   not, and the documented remedy was manual annotation surgery.
-- **Recovery takes up to about two minutes**, not until the next reconcile. The conflict branch upstream
-  still does not stamp `failed`, so the window is waited out rather than short-circuited. It re-observes
-  every 15 seconds and is measured from when `external-create-pending` was stamped — which, for a conflict
-  during a fresh create, is effectively when the create was first attempted. That branch remains open
-  upstream and is an optimisation, not a second wedge.
+- **Recovery takes about two minutes — between 2m00 and roughly 2m15**, not until the next reconcile. Not
+  *up to* two minutes: the window has to elapse in full before the marker is cleared, so recovery is never
+  sooner, and it lands on the first 15-second re-check past the two-minute mark. Measured end to end
+  through the real reconciler at 2m0.1s over nine passes. The `external-create-pending` timestamp is
+  stored to the second, so the window can end up to a second early.
+
+  The conflict branch upstream still does not stamp `failed`, which is why the window is waited out rather
+  than short-circuited. That remains open upstream and is an optimisation, not a second wedge.
 
   Do not confuse this with the **one-minute** `creationGracePeriod` this provider configures. That one
   covers a create known to have *succeeded* whose external resource is not yet visible; this one covers a
