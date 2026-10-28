@@ -44,8 +44,16 @@ Two consequences worth knowing:
 - **Resources already wedged recover by themselves** on this version. On 0.38.0 and earlier they could
   not, and the documented remedy was manual annotation surgery.
 - **Recovery takes up to about two minutes**, not until the next reconcile. The conflict branch upstream
-  still does not stamp `failed`, so the grace period is waited out rather than short-circuited. That
-  remains open upstream and is an optimisation, not a second wedge.
+  still does not stamp `failed`, so the window is waited out rather than short-circuited. It re-observes
+  every 15 seconds and is measured from when `external-create-pending` was stamped — which, for a conflict
+  during a fresh create, is effectively when the create was first attempted. That branch remains open
+  upstream and is an optimisation, not a second wedge.
+
+  Do not confuse this with the **one-minute** `creationGracePeriod` this provider configures. That one
+  covers a create known to have *succeeded* whose external resource is not yet visible; this one covers a
+  create whose outcome was never recorded at all. Different windows answering different questions, and
+  only the second is involved here — so a resource taking longer than a minute to recover is not evidence
+  of a second fault.
 
 If you maintain another provider on this runtime, check your pin. `git-provider` was already on v1.4.0;
 `core-provider` and `chart-inspector` were not.
