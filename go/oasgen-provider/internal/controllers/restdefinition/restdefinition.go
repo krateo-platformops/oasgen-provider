@@ -720,7 +720,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	// Taken AFTER every in-place step above and immediately before the write. A field set after this
 	// line is not in the snapshot and so is never persisted -- that is the one ordering rule this shape
 	// still has, and it is a single line to check rather than a nine-member list.
-	st := snapshotCreatedStatus(cr)
+	st := snapshotStatus(cr)
 
 	// Retried on conflict for the same reason phase 1 is (#259). This write is the one that records
 	// status.digest, status.oasHash and status.resourceHash -- the values Observe compares against to
@@ -1090,8 +1090,23 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
 	cr.Status.OASHash = oasHash
 
-	err = e.kube.Status().Update(ctx, cr)
-	if err != nil {
+	// Taken AFTER every in-place step above and immediately before the write, same rule as Create's
+	// phase 2. Update already sets the Creating condition a few lines up, which is what applyTo merges,
+	// so the two call sites want identical behaviour.
+	st := snapshotStatus(cr)
+
+	// Retried on conflict, through the same helper both Create phases use (#264). This was the last of
+	// the three status writes left as a bare Status().Update.
+	//
+	// It cannot WEDGE the resource the way a lost create-phase write can -- provider-runtime's refusal
+	// to proceed applies to an unresolved CREATE handshake, and by the time Update runs that handshake is
+	// long resolved, so a conflict here just fails the reconcile and the next one retries. What it costs
+	// instead is a redeploy loop that resolves itself: a lost write loses status.digest, status.oasHash
+	// and status.resourceHash, so the next Observe compares an empty or stale digest against a freshly
+	// rendered one, reports drift that does not exist, and Update runs again. Wasteful rather than
+	// terminal -- and on a bulk install it competes for exactly the API server attention that caused the
+	// conflict in the first place.
+	if err := e.persistStatusWithRetry(ctx, cr, st.applyTo); err != nil {
 		return fmt.Errorf("updating status: %w", err)
 	}
 
@@ -1511,7 +1526,8 @@ func (e *external) persistCreatePhaseStatus(ctx context.Context, cr *definitionv
 	})
 }
 
-// createdStatus is the COMPLETE set of status that Create's second phase persists, collected into one
+// statusSnapshot is the COMPLETE status a write persists, captured in one go. Used by Create's second
+// phase AND by Update, both of which set the Creating condition and then write the whole status.
 // value so it can be captured before the retry and applied to a re-read object.
 //
 // Why a named type rather than a closure over locals: this write used to be `Status().Update(ctx, cr)`,
@@ -1530,11 +1546,11 @@ func (e *external) persistCreatePhaseStatus(ctx context.Context, cr *definitionv
 // So the type exists to make the set enumerable and therefore checkable -- see
 // TestCreatedStatusCoversEveryStatusField, which fails if RestDefinitionStatus grows a field applyTo does
 // not set.
-type createdStatus struct {
+type statusSnapshot struct {
 	status definitionv1alpha1.RestDefinitionStatus
 }
 
-// snapshotCreatedStatus copies cr's status as it stands.
+// snapshotStatus copies cr's status as it stands.
 //
 // MUST be called after every step that sets a status field in place, and immediately before the write.
 // A field set after the snapshot is taken is not in it and is therefore never persisted.
@@ -1550,15 +1566,15 @@ type createdStatus struct {
 // A hand-written list is also only half-checkable: a guard can verify that the applier applies what it
 // is given, but not that the collection site collected everything -- 7 of 7 field drops at the
 // collection site passed the suite. A snapshot has no collection site to drop from.
-func snapshotCreatedStatus(cr *definitionv1alpha1.RestDefinition) createdStatus {
-	return createdStatus{status: *cr.Status.DeepCopy()}
+func snapshotStatus(cr *definitionv1alpha1.RestDefinition) statusSnapshot {
+	return statusSnapshot{status: *cr.Status.DeepCopy()}
 }
 
 // applyTo writes the snapshot's data fields onto target and merges a Creating condition.
 //
 // Idempotent and derives nothing from target except its conditions, because persistStatusWithRetry runs
 // this once per write attempt and once more to mirror onto the caller's copy.
-func (cs createdStatus) applyTo(target *definitionv1alpha1.RestDefinition) {
+func (cs statusSnapshot) applyTo(target *definitionv1alpha1.RestDefinition) {
 	next := *cs.status.DeepCopy()
 	// Conditions come from the TARGET, not the snapshot. target is a freshly read object, so replacing
 	// its condition list wholesale would discard one another writer set between our read and this write.
