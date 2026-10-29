@@ -31,6 +31,32 @@ spec:
         - name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
           image: {{ include "krateo.image" (dict "img" .Values.rdc.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.rdc.image.pullPolicy }}
+          {{- if .Values.rdc.otel.nodeLocalEndpoint }}
+          # Node-local OTLP endpoint for the C8 audit trail (#253).
+          #
+          # This has to be an `env:` block rather than a value in the ConfigMap that envFrom reads,
+          # because Kubernetes expands $(VAR) ONLY within env entries and only against entries that
+          # PRECEDE it in the list. A ConfigMap value containing $(HOST_IP) is delivered literally, so
+          # the exporter would try to resolve a host named "$(HOST_IP)" and the audit records would
+          # simply never arrive -- with no error from the controller, which does not know where its
+          # logs go.
+          #
+          # Order is therefore load-bearing: HOST_IP must come first.
+          #
+          # Why node-local at all: the OTLP collector service is headless, so there is no cluster IP to
+          # send to. status.hostIP gives each pod the node it is running on.
+          #
+          # An `env:` entry WINS over an `envFrom` entry of the same name, so this would silently
+          # override an OTEL_EXPORTER_OTLP_ENDPOINT set through rdc.env -- which is why it is gated off
+          # by default rather than always present.
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(HOST_IP):{{ .Values.rdc.otel.nodeLocalPort }}"
+          {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ "{{" }} .name {{ "}}" }}-configmap
