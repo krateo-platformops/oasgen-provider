@@ -17,8 +17,16 @@ rules:
 # create+get only: the policy is a per-group singleton, created if absent and never rewritten, so it
 # cannot fight another field manager (e.g. a chart that ships its own).
 #
-# Absent on clusters below Kubernetes 1.36, where the API does not exist. That is tolerated rather than
-# required -- rest-dynamic-controller stamps the label itself on first reconcile.
+# REQUIRED, not optional: the chart's kubeVersion floor is >=1.36.0-0 because of this. The API arrives in
+# 1.36, and since version-scoped watching there is no fallback -- rest-dynamic-controller watches with
+# exact equality on krateo.io/oas-version, so it never observes an unlabelled instance and therefore never
+# stamps one. Without the policy an instance is created, looks healthy, and is reconciled by nobody.
+#
+# This comment previously said the absence was "tolerated rather than required -- rest-dynamic-controller
+# stamps the label itself on first reconcile". That described the pre-version-scoped-watching world and
+# was left behind when the fallback was deliberately removed (see restResources.go's note on
+# needsVersionLabel/ensureVersionLabel, and policy.ErrPolicyAPIUnsupported). It argued for relaxing the
+# very floor that replaced it, and an installer session reasonably read it that way.
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
