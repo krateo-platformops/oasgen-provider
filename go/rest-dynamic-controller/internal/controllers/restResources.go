@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/krateo-platformops/audit"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	customcondition "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers/condition"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
@@ -79,6 +80,10 @@ type handler struct {
 	// self-provisioning secretRef RBAC (issue #31). main.go hard-fails at startup if it is unset, so by
 	// the time Create/Update/Delete run it is always populated.
 	selfServiceAccount types.NamespacedName
+	// auditEmitter writes the canonical Krateo AuditEvent for each EXTERNAL write (C8, #253). Left nil
+	// when -otel-logs-enabled is off; audit.Emitter is nil-safe by design, so every call site is an
+	// unconditional Emit with no guard.
+	auditEmitter *audit.Emitter
 }
 
 // SetEventRecorder wires a Kubernetes Event recorder used to emit Events on the
@@ -87,6 +92,77 @@ func (h *handler) SetEventRecorder(rec event.Recorder) {
 	if rec != nil {
 		h.eventRecorder = rec
 	}
+}
+
+// externalStatusCode extracts the external API's HTTP status from a native call's outcome.
+//
+// Two sources, because the value lives in different places depending on the outcome: a failure carries it
+// on *restclient.StatusError, a success on the Response. Returning 0 when neither has it is deliberate --
+// a transport error never reached a status, and audit.Emit omits a 0 rather than inventing one.
+func externalStatusCode(resp *restclient.Response, callErr error) int {
+	var se *restclient.StatusError
+	if errors.As(callErr, &se) {
+		return se.StatusCode
+	}
+	if callErr == nil {
+		return resp.StatusCode()
+	}
+	return 0
+}
+
+// emitAudit writes one canonical Krateo AuditEvent for an EXTERNAL write (C8, #253).
+//
+// Called beside the existing eventRecorder.Event calls, because those already sit at exactly the points
+// where an outcome is known -- so the audit record and the Kubernetes Event cannot disagree about whether
+// a write succeeded, and a new write path that records an Event is adjacent to the place it must also
+// audit.
+//
+// statusCode is 0 for a DELEGATED write, and that is deliberate rather than missing. A delegated call goes
+// through snowplow's /call, so the status RDC can observe is snowplow's, not the vendor's: reporting it as
+// http.response.status_code would state that the external API answered 200 when nothing of the sort has
+// been established. audit.Emit omits a 0, which is the same principle the module applies to an unparseable
+// server.address -- omit rather than write something untrue.
+//
+// No nil guard: audit.Emitter is nil-safe, so this is a no-op when -otel-logs-enabled is off.
+func (h *handler) emitAudit(ctx context.Context, mg *unstructured.Unstructured, serverURL, httpMethod string, statusCode int, callErr error) {
+	outcome := audit.OutcomeSuccess
+	msg := "external write succeeded"
+	if callErr != nil {
+		outcome = audit.OutcomeFailure
+		msg = "external write failed: " + callErr.Error()
+	}
+
+	gvk := mg.GroupVersionKind()
+	h.auditEmitter.Emit(ctx, audit.Event{
+		Message: msg,
+		// Option B's join key: uid plus the generation the reconcile acted on. snowplow audits the
+		// apiserver write that created the CR; these two fields are what let that record and this one be
+		// matched up, which is the entire point of C8.
+		ObjectUID:             string(mg.GetUID()),
+		ObjectGeneration:      mg.GetGeneration(),
+		ObjectResourceVersion: mg.GetResourceVersion(),
+
+		Namespace:  mg.GetNamespace(),
+		Group:      gvk.Group,
+		Version:    gvk.Version,
+		Kind:       gvk.Kind,
+		ObjectName: mg.GetName(),
+
+		// Full URL. Emit reduces it to host[:port] centrally, so no caller has to remember that a vendor
+		// path routinely carries an identifier and at least one carries a token-shaped segment.
+		ServerAddress: serverURL,
+		Action:        "rest.write",
+		HTTPMethod:    httpMethod,
+		StatusCode:    statusCode,
+		Outcome:       outcome,
+	})
+}
+
+// SetAuditEmitter wires the C8 audit emitter. A nil emitter is kept as nil rather than replaced with a
+// stub: audit.Emitter's own methods are nil-safe, so the call sites need no guard either way, and
+// pretending an emitter exists when OTLP logs are disabled would hide a misconfiguration that matters.
+func (h *handler) SetAuditEmitter(e *audit.Emitter) {
+	h.auditEmitter = e
 }
 
 // SetSnowplowClient wires the snowplow client used to resolve observeApiRef RESTActions. A nil client is
@@ -650,8 +726,11 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		if err := h.mutateViaRestAction(ctx, mg, ref, clientInfo.Resource.Identifiers, "create", log); err != nil {
 			log.Error(err, "Creating via RESTAction")
 			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", err))
+			// statusCode 0: delegated, so the vendor's status is snowplow's to report, not ours.
+			h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPost, 0, err)
 			return err
 		}
+		h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPost, 0, nil)
 		if err := unstructuredtools.SetConditions(mg, condition.Creating()); err != nil {
 			return err
 		}
@@ -668,6 +747,10 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	// create builder, which would otherwise find nothing and report a missing action for a resource that
 	// correctly declares none (#199).
 	if handled, derr := h.createDispatch(ctx, mg, cli, &http.Client{}, clientInfo, log); handled {
+		// A dispatch IS an external write -- the dispatch is this resource's create -- so it is audited
+		// like one. Leaving it out would make the audit trail silently incomplete for exactly the
+		// resources that have no create verb.
+		h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPost, 0, derr)
 		if derr != nil {
 			log.Error(derr, "Dispatching")
 			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Dispatch", derr))
@@ -731,6 +814,10 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		reqConfiguration.Body = tb
 	}
 	response, err := apiCall(ctx, &http.Client{}, callInfo.Path, reqConfiguration)
+	// NATIVE Create, so the vendor's own status is in hand -- unlike the delegated path, which can
+	// only see snowplow's. On failure it travels on *restclient.StatusError; on success it is on
+	// the Response. Either way this is the real external status code, not a stand-in (#253).
+	h.emitAudit(ctx, mg, cli.ServerURL(), callInfo.Method, externalStatusCode(&response, err), err)
 	if err != nil {
 		log.Error(err, "Performing REST call")
 		return err
@@ -855,8 +942,10 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		if err := h.mutateViaRestAction(ctx, mg, ref, clientInfo.Resource.Identifiers, "update", log); err != nil {
 			log.Error(err, "Updating via RESTAction")
 			h.eventRecorder.Event(mg, event.Warning(reasonUpdated, "Update", err))
+			h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPut, 0, err)
 			return err
 		}
+		h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPut, 0, nil)
 		if err := unstructuredtools.SetConditions(mg, condition.Available()); err != nil {
 			return err
 		}
@@ -916,6 +1005,10 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		reqConfiguration.Body = tb
 	}
 	response, err := apiCall(ctx, &http.Client{}, callInfo.Path, reqConfiguration)
+	// NATIVE Update, so the vendor's own status is in hand -- unlike the delegated path, which can
+	// only see snowplow's. On failure it travels on *restclient.StatusError; on success it is on
+	// the Response. Either way this is the real external status code, not a stand-in (#253).
+	h.emitAudit(ctx, mg, cli.ServerURL(), callInfo.Method, externalStatusCode(&response, err), err)
 	if err != nil {
 		log.Error(err, "Performing REST call")
 		return err
@@ -1075,8 +1168,10 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		if err := h.mutateViaRestAction(ctx, mg, ref, clientInfo.Resource.Identifiers, "delete", log); err != nil {
 			log.Error(err, "Deleting via RESTAction")
 			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
+			h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodDelete, 0, err)
 			return err
 		}
+		h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodDelete, 0, nil)
 		// One arbiter for every delete path (see resolveDeleteOutcome). The RESTAction reported success,
 		// so deleteErr is nil: an unverifiable resource falls back to trusting that result, as before.
 		if outcome := h.resolveDeleteOutcome(ctx, cs, clientInfo, mg, nil, log); outcome != nil {
@@ -1165,6 +1260,10 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// The delete call is now BEST EFFORT: its status code no longer decides the finalizer's fate on its
 	// own. Whatever it returns, resolveDeleteOutcome below asks the observe verb and applies one rule.
 	response, err := apiCall(ctx, &http.Client{}, callInfo.Path, reqConfiguration)
+	// NATIVE Delete, so the vendor's own status is in hand -- unlike the delegated path, which can
+	// only see snowplow's. On failure it travels on *restclient.StatusError; on success it is on
+	// the Response. Either way this is the real external status code, not a stand-in (#253).
+	h.emitAudit(ctx, mg, cli.ServerURL(), callInfo.Method, externalStatusCode(&response, err), err)
 	alreadyGone := false
 	var deleteErr error
 	if err != nil {

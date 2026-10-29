@@ -1863,3 +1863,7 @@ func TestUnresolvedPathParams(t *testing.T) {
 func (m *mockUnstructuredClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
 	return nil, nil
 }
+
+// ServerURL satisfies UnstructuredClientInterface. A real host so an audit event built from it
+// carries a parseable server.address rather than being silently omitted (#253).
+func (m *mockUnstructuredClient) ServerURL() string { return "https://api.example.com" }

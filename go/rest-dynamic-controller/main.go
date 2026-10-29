@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/krateo-platformops/audit"
 	"github.com/krateo-platformops/plumbing/env"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	"github.com/krateo-platformops/plumbing/kubeutil/eventrecorder"
@@ -19,6 +20,7 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/metrics/server"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/telemetry"
+	logglobal "go.opentelemetry.io/otel/log/global"
 
 	restResources "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/authn"
@@ -123,6 +125,13 @@ func main() {
 	otelExportInterval := flag.Duration("otel-export-interval",
 		env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval),
 		"The interval used to export OTLP metrics.")
+	// Separate from -otel-tracing-enabled on purpose. Audit events are a COMPLIANCE signal, not
+	// diagnostics: an operator may want them exported continuously while traces stay off, and may
+	// equally want traces while debugging without shipping audit records. Tying them to one flag would
+	// force a choice between the two that nothing about the implementation requires.
+	otelLogsEnabled := flag.Bool("otel-logs-enabled",
+		env.Bool("OTEL_LOGS_ENABLED", false),
+		"Enable OTLP log export, which carries the Krateo AuditEvent for each external write (C8).")
 	deploymentName := flag.String("deployment-name",
 		env.String("DEPLOYMENT_NAME", ""),
 		"The deployment name for stable resource identification in metrics.")
@@ -208,6 +217,7 @@ func main() {
 		WithValues("otelTracingEnabled", *otelTracingEnabled).
 		WithValues("otelServiceName", *otelServiceName).
 		WithValues("otelExportInterval", *otelExportInterval).
+		WithValues("otelLogsEnabled", *otelLogsEnabled).
 		WithValues("deploymentName", *deploymentName).
 		Info("Starting.", "serviceName", serviceName)
 
@@ -249,6 +259,21 @@ func main() {
 	}
 	defer telemetryShutdown(context.Background())
 
+	// OTLP logs, which is the transport the audit emitter writes through. SetupOTLPLogs installs a
+	// GLOBAL LoggerProvider, so the emitter is built from logglobal rather than from a handle returned
+	// here; a disabled config installs nothing and the emitter degrades to a no-op.
+	//
+	// Hard-fails on error rather than continuing, matching the metrics setup above. An audit trail that
+	// silently is not being written is worse than a pod that will not start: the whole point of C8 is
+	// that an external write leaves a record, and "no records" and "no writes" are indistinguishable
+	// after the fact.
+	logsShutdown, err := telemetry.SetupOTLPLogs(context.Background(), *otelLogsEnabled, *otelServiceName)
+	if err != nil {
+		log.Error(err, "Cannot initialize OpenTelemetry logs")
+		os.Exit(1)
+	}
+	defer logsShutdown(context.Background())
+
 	// Distributed reconcile traces (gated OTEL_TRACING_ENABLED). Installs the W3C
 	// propagator even when disabled so an inbound traceparent is honored; returns a
 	// no-op shutdown otherwise.
@@ -277,6 +302,15 @@ func main() {
 		SetEventRecorder(event.Recorder)
 	}); ok {
 		h.SetEventRecorder(apiRecorder)
+	}
+
+	// The C8 audit emitter (#253). Built from the GLOBAL LoggerProvider that SetupOTLPLogs installed,
+	// because that is the handle it publishes; with -otel-logs-enabled off nothing was installed, the
+	// global is a no-op provider, and audit.Emitter is nil-safe regardless.
+	if h, ok := handler.(interface {
+		SetAuditEmitter(*audit.Emitter)
+	}); ok {
+		h.SetAuditEmitter(audit.New(logglobal.GetLoggerProvider().Logger(serviceName + "/audit")))
 	}
 
 	// Self ServiceAccount identity for secretRef RBAC self-provisioning (issue #31): the RoleBinding
