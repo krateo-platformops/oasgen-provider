@@ -212,3 +212,7 @@ func TestBuildPollRequest_HandleParam(t *testing.T) {
 func (m *mockAsyncClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
 	return nil, nil
 }
+
+// ServerURL satisfies UnstructuredClientInterface. A real host so an audit event built from it
+// carries a parseable server.address rather than being silently omitted (#253).
+func (m *mockAsyncClient) ServerURL() string { return "https://api.example.com" }

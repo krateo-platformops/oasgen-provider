@@ -331,3 +331,7 @@ func TestResolveDeleteOutcomeStillHoldsOnTransientVerificationFailure(t *testing
 	assert.Equal(t, 1, cli.calls, "an addressable resource must be DIALLED -- this is a transient failure")
 	assert.Zero(t, cli.validationFailures, "and must not be rejected before dialling")
 }
+
+// ServerURL satisfies UnstructuredClientInterface. A real host so an audit event built from it
+// carries a parseable server.address rather than being silently omitted (#253).
+func (m *mockGetClient) ServerURL() string { return "https://api.example.com" }

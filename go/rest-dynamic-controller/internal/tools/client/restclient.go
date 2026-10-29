@@ -43,6 +43,20 @@ type Response struct {
 	statusCode int
 }
 
+// StatusCode is the external API's HTTP status for this response, or 0 when none was recorded (a
+// transport error never reaches a status).
+//
+// Exported for the C8 audit emitter (#253), which needs http.response.status_code on a SUCCESSFUL write.
+// A failure already carries it on *StatusError; a success had it only in this unexported field, so the
+// value existed and was unreachable -- instrumentation.go has been recording it as a metric attribute all
+// along. Same shape as IsPending: a reader for one field rather than exporting the field itself.
+func (r *Response) StatusCode() int {
+	if r == nil {
+		return 0
+	}
+	return r.statusCode
+}
+
 func (r *Response) IsPending() bool {
 	if r == nil {
 		return false

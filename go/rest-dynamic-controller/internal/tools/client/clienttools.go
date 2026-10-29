@@ -95,6 +95,18 @@ type UnstructuredClientInterface interface {
 	UpdatableBodyPaths(httpMethod string, path string) ([]string, error)
 	FindBy(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration, findByAction *getter.VerbsDescription) (Response, error)
 	Call(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration) (Response, error)
+	// ServerURL is the EXTERNAL endpoint this client calls -- the document's servers[0].url. Here for the
+	// same reason UpdatableBodyPaths is: it was reachable only through the concrete type, and the C8
+	// audit emitter needs it from a caller holding the interface (#253).
+	//
+	// It must identify the VENDOR, not the document: clientInfo.URL is a configmap:// path and names
+	// nothing reachable, so it would be the wrong value for server.address even though it is the one
+	// closest to hand.
+	//
+	// Returns the full URL. audit.Emit reduces it to host[:port], dropping scheme, userinfo, path, query
+	// and fragment -- centrally, so no caller has to remember that a vendor path routinely carries an
+	// identifier and at least one carries a token-shaped segment.
+	ServerURL() string
 	//Validate(req *http.Request) (bool, []error) // TODO: to be re-enabled when libopenapi-validator is stable (to be renamed to ValidateRequest)
 }
 
@@ -184,6 +196,9 @@ func (u *UnstructuredClient) isInResource(responseValue interface{}, fieldPath .
 
 // ValidateRequest is a method that validates the request parameters, query, headers, and cookies against the OpenAPI document.
 // It checks if the required parameters are present and returns an error if any required parameter is missing.
+// ServerURL implements UnstructuredClientInterface.
+func (u *UnstructuredClient) ServerURL() string { return u.Server }
+
 func (u *UnstructuredClient) ValidateRequest(httpMethod string, path string, parameters map[string]string, query map[string]string, headers map[string]string, cookies map[string]string) error {
 	pathItem, ok := u.DocScheme.Model.Paths.PathItems.Get(path)
 	if !ok {
