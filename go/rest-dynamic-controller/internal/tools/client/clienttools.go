@@ -9,6 +9,7 @@ import (
 	"os"
 	pathutil "path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -236,6 +237,67 @@ func (u *UnstructuredClient) ValidateRequest(httpMethod string, path string, par
 }
 
 // RequestedBody is a method that returns the body parameters for a given HTTP method and path.
+// resolveRequestBodyMedia picks the media type whose schema describes an operation's request body, and
+// reports when it cannot.
+//
+// `application/json` was hardcoded at both call sites, and a miss returned a zero value with a nil error
+// (#288). A document declaring `application/json-patch+json`, `application/merge-patch+json` or anything
+// else therefore lost its body schema SILENTLY: no body fields were reported, the builder composed
+// against nothing, compareScope "updatable" degraded -- and the request was still sent. The symptom is a
+// write that succeeds while carrying a subset of what the CR asked for, which is worse than a 415.
+//
+// Preference order, and the reason for it:
+//
+//  1. `application/json` exactly -- overwhelmingly the common case, and preferring it keeps every existing
+//     document resolving to precisely the schema it did before.
+//  2. the SINGLE declared entry, whatever it is -- a document declaring one media type has stated
+//     unambiguously which schema describes its body, so honouring it requires no guess.
+//
+// Deliberately NOT third: picking one of several non-JSON entries. With two or more and no JSON, which
+// schema applies depends on what the caller will actually send, which this layer does not know. Guessing
+// there would reintroduce exactly the silent-wrong-schema failure this function exists to remove, so it
+// returns an error and lets the caller say so out loud.
+func resolveRequestBodyMedia(body *v3.RequestBody) (*v3.MediaType, string, error) {
+	if body == nil || body.Content == nil {
+		return nil, "", nil
+	}
+	// A media type entry with no schema is NOT a usable answer. The previous code reached
+	// bodySchema.Schema.BuildSchema() directly, and a nil Schema panics inside libopenapi -- so a
+	// document declaring a body with no schema was only ever safe because the hardcoded
+	// Get("application/json") happened to miss it. Surfacing that as a panic would be worse than the
+	// silent return it replaced, so a schema-less entry is treated as unresolved and reported.
+	hasSchema := func(mt *v3.MediaType) bool { return mt != nil && mt.Schema != nil }
+
+	if mt, ok := body.Content.Get("application/json"); ok && hasSchema(mt) {
+		return mt, "application/json", nil
+	}
+
+	var only *v3.MediaType
+	var onlyName string
+	n := 0
+	for pair := body.Content.First(); pair != nil; pair = pair.Next() {
+		n++
+		only, onlyName = pair.Value(), pair.Key()
+	}
+	switch n {
+	case 0:
+		return nil, "", nil
+	case 1:
+		if !hasSchema(only) {
+			return nil, "", nil
+		}
+		return only, onlyName, nil
+	default:
+		names := make([]string, 0, n)
+		for pair := body.Content.First(); pair != nil; pair = pair.Next() {
+			names = append(names, pair.Key())
+		}
+		sort.Strings(names)
+		return nil, "", fmt.Errorf("request body declares %d media types and none is application/json (%s): "+
+			"cannot determine which schema describes the body", n, strings.Join(names, ", "))
+	}
+}
+
 func (u *UnstructuredClient) RequestedBody(httpMethod string, path string) (bodyParams stringset.StringSet, err error) {
 	if u.DocScheme == nil || u.DocScheme.Model.Paths == nil {
 		return nil, fmt.Errorf("document scheme or model is nil")
@@ -253,8 +315,15 @@ func (u *UnstructuredClient) RequestedBody(httpMethod string, path string) (body
 	if getDoc.RequestBody == nil {
 		return nil, nil
 	}
-	bodySchema, ok := getDoc.RequestBody.Content.Get("application/json")
-	if !ok {
+	bodySchema, _, mErr := resolveRequestBodyMedia(getDoc.RequestBody)
+	if mErr != nil {
+		return nil, fmt.Errorf("resolving request body media type for %s %s: %w", httpMethod, path, mErr)
+	}
+	if bodySchema == nil {
+		// No media type carries a schema -- e.g. a text/plain body. There are genuinely no JSON fields to
+		// enumerate, so an empty set is the right answer and not a silent drop. The #288 defect was a
+		// schema that EXISTS under a non-JSON media type, which resolveRequestBodyMedia now returns; real
+		// ambiguity comes back as an error above.
 		return bodyParams, nil
 	}
 	schema, err := bodySchema.Schema.BuildSchema()
@@ -305,8 +374,13 @@ func (u *UnstructuredClient) UpdatableBodyPaths(httpMethod string, path string) 
 	if op.RequestBody == nil || op.RequestBody.Content == nil {
 		return nil, nil
 	}
-	bodySchema, ok := op.RequestBody.Content.Get("application/json")
-	if !ok {
+	bodySchema, _, mErr := resolveRequestBodyMedia(op.RequestBody)
+	if mErr != nil {
+		return nil, fmt.Errorf("resolving request body media type for %s %s: %w", httpMethod, path, mErr)
+	}
+	if bodySchema == nil {
+		// As in RequestedBody: no schema under any media type means there are no updatable JSON paths to
+		// collect, which is a true answer rather than a dropped one.
 		return nil, nil
 	}
 	schema, err := bodySchema.Schema.BuildSchema()
