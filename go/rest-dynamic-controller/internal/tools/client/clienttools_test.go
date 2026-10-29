@@ -12,6 +12,8 @@ import (
 
 	"github.com/pb33f/libopenapi"
 	orderedmap "github.com/pb33f/libopenapi/orderedmap"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -708,4 +710,125 @@ func TestBuildPath_PathParamEscapedExactlyOnce(t *testing.T) {
 	if got.Path != wantDecoded {
 		t.Errorf("expected the server to decode the path to %q, got %q", wantDecoded, got.Path)
 	}
+}
+
+// --- #288: a request body declared under a non-JSON media type must not lose its schema ---
+
+// clientFromSpec builds a client the way production does: parse a real document and let libopenapi
+// resolve the schema proxies. Hand-constructing base.CreateSchemaProxy trees looks simpler and is not
+// equivalent -- an unresolved proxy makes prop.Value().Schema() nil, which panics inside
+// populateFromAllOf. A media-type test in particular has to exercise the parse path it is about.
+func clientFromSpec(t *testing.T, spec string) *UnstructuredClient {
+	t.Helper()
+	doc, err := libopenapi.NewDocument([]byte(spec))
+	if err != nil {
+		t.Fatalf("NewDocument() error = %v", err)
+	}
+	v3Doc, errs := doc.BuildV3Model()
+	if len(errs) > 0 {
+		t.Fatalf("BuildV3Model() errors = %v", errs)
+	}
+	return &UnstructuredClient{DocScheme: v3Doc}
+}
+
+func mediaSpec(entries string) string {
+	return `openapi: 3.0.3
+info: {title: t, version: 1.0.0}
+servers: [{url: "https://api.example.com"}]
+paths:
+  /test:
+    post:
+      requestBody:
+        content:
+` + entries + `
+      responses: {"200": {description: ok}}
+`
+}
+
+const patchOnlyBody = `          application/json-patch+json:
+            schema:
+              type: object
+              properties:
+                op: {type: string}
+                path: {type: string}
+                value: {type: string}`
+
+// TestRequestedBodyResolvesANonJSONMediaType is the #288 regression.
+//
+// The lookup was hardcoded to `application/json` and a miss returned an empty set with a NIL error. A
+// document declaring its body as application/json-patch+json therefore reported no body fields, the
+// builder composed against nothing, and the request was still sent -- a write that succeeds while
+// carrying a subset of what the CR asked for, which is worse than a 415.
+func TestRequestedBodyResolvesANonJSONMediaType(t *testing.T) {
+	cli := clientFromSpec(t, mediaSpec(patchOnlyBody))
+
+	got, err := cli.RequestedBody("POST", "/test")
+
+	require.NoError(t, err)
+	require.NotNil(t, got, "the schema must be found under the media type the document declares")
+	for _, want := range []string{"op", "path", "value"} {
+		assert.True(t, got.Contains(want), "expected body field %q to be reported", want)
+	}
+}
+
+// TestRequestedBodyStillPrefersApplicationJSON -- a document declaring BOTH must resolve exactly as it did
+// before this change, so no existing document's schema moves.
+func TestRequestedBodyStillPrefersApplicationJSON(t *testing.T) {
+	cli := clientFromSpec(t, mediaSpec(`          application/json:
+            schema:
+              type: object
+              properties:
+                jsonField: {type: string}
+          application/json-patch+json:
+            schema:
+              type: object
+              properties:
+                patchField: {type: string}`))
+
+	got, err := cli.RequestedBody("POST", "/test")
+
+	require.NoError(t, err)
+	assert.True(t, got.Contains("jsonField"), "application/json must win when declared")
+	assert.False(t, got.Contains("patchField"), "the non-JSON entry must not be consulted")
+}
+
+// TestRequestedBodyRefusesAmbiguousMediaTypes is the control arm, and the reason the fix is not simply
+// "take the first entry".
+//
+// With two or more non-JSON media types, WHICH schema applies depends on what the caller will send, which
+// this layer does not know. Guessing would reintroduce the silent-wrong-schema failure the fix exists to
+// remove -- so it refuses out loud rather than picks.
+func TestRequestedBodyRefusesAmbiguousMediaTypes(t *testing.T) {
+	cli := clientFromSpec(t, mediaSpec(`          application/json-patch+json:
+            schema:
+              type: object
+              properties:
+                a: {type: string}
+          application/merge-patch+json:
+            schema:
+              type: object
+              properties:
+                b: {type: string}`))
+
+	_, err := cli.RequestedBody("POST", "/test")
+
+	require.Error(t, err, "two candidate schemas and no way to choose must be an error, not a guess")
+	assert.Contains(t, err.Error(), "declares 2 media types")
+	assert.Contains(t, err.Error(), "application/json-patch+json")
+	assert.Contains(t, err.Error(), "application/merge-patch+json",
+		"the message must name the candidates, so the author can declare which applies")
+}
+
+// TestRequestedBodyTreatsASchemalessBodyAsEmpty -- a text/plain body has no JSON fields to enumerate, so
+// an empty set is a true answer rather than a dropped one.
+//
+// Pinned because the FIRST version of the #288 fix errored here, which would have rejected documents that
+// are correct. An existing test case caught it; this one names the intent so it is not re-broken.
+func TestRequestedBodyTreatsASchemalessBodyAsEmpty(t *testing.T) {
+	cli := clientFromSpec(t, mediaSpec(`          text/plain: {}`))
+
+	got, err := cli.RequestedBody("POST", "/test")
+
+	require.NoError(t, err, "a body with no schema is not an error")
+	assert.Equal(t, 0, len(got), "and reports no fields")
 }
