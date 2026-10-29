@@ -8,6 +8,7 @@ import (
 
 	stringset "github.com/krateo-platformops/rest-dynamic-controller/internal/text"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/stretchr/testify/assert"
@@ -30,11 +31,31 @@ func TestHasObserveVerb(t *testing.T) {
 // correct in isolation, and only one of them passed the body.
 type mockGetClient struct {
 	body    any   // the ResponseBody the GET answers with
-	callErr error // when set, Call fails with this instead
-	calls   int
+	callErr error // when set, Call fails with this instead -- AFTER validation, so it is a DIALLED failure
+	calls   int   // successful dials: validation passed and the request went out
+	// validationFailures counts requests rejected before dialling. Kept separate from calls because the
+	// #261 distinction is permanent-vs-transient, and "never dialled" is true in BOTH the wedged and the
+	// fixed case -- so a test that only reads calls cannot tell them apart.
+	validationFailures int
 }
 
 func (m *mockGetClient) Call(ctx context.Context, cli *http.Client, path string, conf *restclient.RequestConfiguration) (restclient.Response, error) {
+	// Validate BEFORE dialling, exactly as the real client does at restclient.go:93. This ordering is
+	// load-bearing for the #261 tests and the first version of this mock did not have it.
+	//
+	// The real ValidateRequest rejects an unresolved required path parameter (clienttools.go:200,
+	// "missing path parameter: %s"), so in production NOTHING IS EVER DIALLED for an unaddressable
+	// resource -- with or without the guard. A mock that returns nil from ValidateRequest and goes
+	// straight to the response makes `calls == 0` discriminate between fixed and unfixed in the test
+	// while discriminating nothing in production: the assertion passes for a reason that does not exist
+	// outside the mock. Found by the aruba-provider-kog session, from a live wedge whose logs show the
+	// path-build error and no HTTP attempt at all.
+	//
+	// So `calls` means DIALLED, and a validation failure is counted separately.
+	if err := m.ValidateRequest("GET", path, conf.Parameters, conf.Query, conf.Headers, conf.Cookies); err != nil {
+		m.validationFailures++
+		return restclient.Response{}, err
+	}
 	m.calls++
 	if m.callErr != nil {
 		return restclient.Response{}, m.callErr
@@ -42,14 +63,25 @@ func (m *mockGetClient) Call(ctx context.Context, cli *http.Client, path string,
 	return restclient.Response{ResponseBody: m.body}, nil
 }
 
+// ValidateRequest reproduces the one real validation these tests depend on: a required path parameter
+// that the request configuration does not supply is rejected before any HTTP happens
+// (clienttools.go:200). Approximated by scanning the path template rather than the OAS document, which
+// is equivalent for these fixtures and keeps the mock readable.
 func (m *mockGetClient) ValidateRequest(httpMethod, path string, parameters, query, headers, cookies map[string]string) error {
+	for _, name := range builder.UnresolvedPathParams(path, parameters) {
+		return fmt.Errorf("missing path parameter: %s", name)
+	}
 	return nil
 }
 func (m *mockGetClient) RequestedBody(httpMethod, path string) (stringset.StringSet, error) {
 	return nil, nil
 }
 func (m *mockGetClient) RequestedParams(httpMethod, path string) (stringset.StringSet, stringset.StringSet, stringset.StringSet, stringset.StringSet, error) {
-	return stringset.NewStringSet("id"), nil, nil, nil, nil
+	// BOTH placeholders the tombstoneInfo path contains. Declaring only "id" left {kmipId} unpopulated, so
+	// the URL these fixtures "called" would have carried the literal text "{kmipId}" -- a request
+	// production could never have sent. It went unnoticed because the GET is mocked, so the unbuildable
+	// URL never mattered; the delete-verification guard added for #261 is what surfaced it.
+	return stringset.NewStringSet("id", "kmipId"), nil, nil, nil, nil
 }
 func (m *mockGetClient) FindBy(ctx context.Context, cli *http.Client, path string, conf *restclient.RequestConfiguration, findByAction *getter.VerbsDescription) (restclient.Response, error) {
 	return restclient.Response{}, nil
@@ -81,6 +113,23 @@ func tombstoneInfo(predicate string) *getter.Info {
 }
 
 func kmipCR() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"spec": map[string]interface{}{
+			"id": "b132fb62-998d-479f-9c9d-794c6f1ea2fd",
+			// Required for the resource to be ADDRESSABLE: tombstoneInfo's path is
+			// /kms/{id}/kmip/{kmipId}, so a CR carrying only `id` describes something no request can be
+			// aimed at. These fixtures exist to exercise tombstone and liveness logic on a resource that
+			// CAN be fetched, so they must supply every placeholder in the path (#261).
+			"kmipId": "7c1f0b9e-3a44-4d1a-9f2b-55e0c3a81d47",
+		},
+		"status": map[string]interface{}{},
+	}}
+}
+
+// unaddressableKmipCR is the #261 shape: a CR whose create failed, so no identifier was ever written and
+// the GET path cannot be built. Deliberately missing kmipId rather than both, because one unresolved
+// placeholder is enough and it keeps the contrast with kmipCR to a single field.
+func unaddressableKmipCR() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"spec":   map[string]interface{}{"id": "b132fb62-998d-479f-9c9d-794c6f1ea2fd"},
 		"status": map[string]interface{}{},
@@ -198,4 +247,87 @@ func TestResolveDeleteOutcomeHoldsWhenResourceIsStillThere(t *testing.T) {
 
 func (m *mockGetClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
 	return nil, nil
+}
+
+// TestExternalResourceStillExistsReportsUnaddressableAsUnverifiable is the #261 fix.
+//
+// The delegated delete path verified deletion with a GET and returned that GET's error as its own. For a
+// TRANSIENT failure that is right -- "could not check" means retry. For a PERMANENT one it is a wedge: a CR
+// whose create failed has no identifier in its status, so the GET path can never be built, the error
+// repeats on every reconcile, and the finalizer is held until a human strips it by hand. Measured at eight
+// hours on a CloudServer whose create the vendor refused, while a Vpc in the same state deleted at once --
+// because the NATIVE delete path has always had this guard and this path never consulted it.
+//
+// Asserting calls == 0 rather than only the return values is the point: the fix is that the request is
+// never ATTEMPTED. A version that dialled anyway and swallowed the error would satisfy the return contract
+// while still waiting out a connection timeout per reconcile, and would pass a test that only read
+// (stillExists, verified, err).
+func TestExternalResourceStillExistsReportsUnaddressableAsUnverifiable(t *testing.T) {
+	h := &handler{}
+	// Answers 200/live if dialled at all, so a regression that attempts the call reports the resource
+	// PRESENT and holds the finalizer -- a loud failure here rather than an accidental pass.
+	cli := &mockGetClient{body: map[string]interface{}{"status": "Active"}}
+
+	info := tombstoneInfo(tombstonePredicate)
+	stillExists, verified, err := h.externalResourceStillExists(
+		context.Background(), setFor(info, cli), info, unaddressableKmipCR(), logging.NewNopLogger())
+
+	// THE discriminating assertion. Without the guard the path-build error surfaces here, the caller
+	// retries forever and the finalizer is held. With it, the condition is reported as permanent.
+	require.NoError(t, err, "an unresolved path placeholder is a PERMANENT inability to verify, so it must "+
+		"not surface as an error: the caller retries on error, and this condition can never clear")
+	assert.False(t, stillExists)
+	assert.False(t, verified, "nothing was checked, so nothing is verified")
+
+	// Secondary, and deliberately NOT the headline: nothing is dialled either way, because the real
+	// client rejects an unresolved path parameter before any HTTP (restclient.go:93 ->
+	// clienttools.go:200). Asserting only this would pass against the UNFIXED controller too -- confirmed
+	// against a live wedge, whose logs show the path-build error and no connection attempt.
+	assert.Zero(t, cli.calls, "no dial, with or without the guard")
+	assert.Zero(t, cli.validationFailures, "and with the guard it should not even reach validation")
+}
+
+// TestResolveDeleteOutcomeReleasesWhenUnaddressable is the same fix at the level that matters to a user: the
+// CR actually leaves Deleting.
+func TestResolveDeleteOutcomeReleasesWhenUnaddressable(t *testing.T) {
+	h := &handler{}
+	cli := &mockGetClient{body: map[string]interface{}{"status": "Active"}}
+
+	info := tombstoneInfo(tombstonePredicate)
+	err := h.resolveDeleteOutcome(context.Background(), setFor(info, cli), info, unaddressableKmipCR(),
+		nil, logging.NewNopLogger())
+
+	assert.NoError(t, err, "unverifiable means the delete result governs; the delete succeeded, so release")
+	assert.Zero(t, cli.calls)
+}
+
+// TestResolveDeleteOutcomeStillHoldsOnTransientVerificationFailure is the CONTROL ARM, and it is the more
+// important of the two.
+//
+// Without it the #261 fix could drift into "release the finalizer whenever verification is inconvenient",
+// which would orphan real external resources -- the failure mode the hold-on-error rule exists to prevent,
+// and a far worse one than the wedge being fixed. A 500 from the vendor, or a refused connection, is
+// exactly the case where the resource may well still be there and we cannot tell. That must still hold.
+//
+// The distinction the fix draws is PERMANENT vs TRANSIENT, not "verification failed". This test pins the
+// transient half so narrowing it is a test failure rather than a silent change of policy.
+func TestResolveDeleteOutcomeStillHoldsOnTransientVerificationFailure(t *testing.T) {
+	h := &handler{}
+	cli := &mockGetClient{callErr: &restclient.StatusError{StatusCode: http.StatusInternalServerError}}
+
+	info := tombstoneInfo(tombstonePredicate)
+	// Addressable: every placeholder resolves, so the guard does not apply and the call is made.
+	err := h.resolveDeleteOutcome(context.Background(), setFor(info, cli), info, kmipCR(),
+		nil, logging.NewNopLogger())
+
+	require.Error(t, err, "a 500 leaves the resource's state unknown, so the finalizer must be held and "+
+		"the delete retried -- releasing here would orphan a resource that is still present")
+
+	// The asymmetry that makes this a real control: a 500 means the request WAS dialled, whereas the
+	// unaddressable case never dials. "Verification failed" therefore covers two different situations --
+	// unresolvable path (permanent, release) and request failed (possibly transient, hold) -- and the
+	// whole point of the fix is telling them apart. If this arm ever stopped dialling it would be
+	// exercising the same branch as the fix and would prove nothing.
+	assert.Equal(t, 1, cli.calls, "an addressable resource must be DIALLED -- this is a transient failure")
+	assert.Zero(t, cli.validationFailures, "and must not be rejected before dialling")
 }
