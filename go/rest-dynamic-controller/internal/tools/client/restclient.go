@@ -137,6 +137,21 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 		Proto:  "HTTP/1.1",
 		Body:   io.NopCloser(bytes.NewReader(payload)),
 		Header: headers,
+		// Set explicitly, because this is a STRUCT LITERAL. http.NewRequest type-asserts the body to
+		// *bytes.Reader/*bytes.Buffer/*strings.Reader and derives ContentLength from it; a struct literal
+		// does not -- and io.NopCloser would defeat that assertion anyway, since it hides the reader
+		// behind an opaque io.ReadCloser.
+		//
+		// Left unset, ContentLength is 0 with a non-nil Body, which net/http reads as "length unknown"
+		// and sends Transfer-Encoding: chunked. That framing buys nothing for a body already fully
+		// buffered in memory, and some HTTP front ends refuse it (#307).
+		//
+		// Safe because payload is assigned exactly twice -- nil at the top, then the marshalled body --
+		// and nothing between that and here mutates it. GetBody below hands out a fresh reader over the
+		// SAME payload, so the declared length and the bytes written cannot diverge. They must not: a
+		// ContentLength that disagrees with the body makes net/http truncate the write or block waiting
+		// for bytes that never arrive, which would present as a network fault rather than a client bug.
+		ContentLength: int64(len(payload)),
 	}
 	// GetBody makes the body REPLAYABLE, which is what lets net/http follow a 307/308.
 	//
@@ -605,6 +620,21 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 		Proto:  "HTTP/1.1",
 		Body:   io.NopCloser(bytes.NewReader(payload)),
 		Header: headers,
+		// Set explicitly, because this is a STRUCT LITERAL. http.NewRequest type-asserts the body to
+		// *bytes.Reader/*bytes.Buffer/*strings.Reader and derives ContentLength from it; a struct literal
+		// does not -- and io.NopCloser would defeat that assertion anyway, since it hides the reader
+		// behind an opaque io.ReadCloser.
+		//
+		// Left unset, ContentLength is 0 with a non-nil Body, which net/http reads as "length unknown"
+		// and sends Transfer-Encoding: chunked. That framing buys nothing for a body already fully
+		// buffered in memory, and some HTTP front ends refuse it (#307).
+		//
+		// Safe because payload is assigned exactly twice -- nil at the top, then the marshalled body --
+		// and nothing between that and here mutates it. GetBody below hands out a fresh reader over the
+		// SAME payload, so the declared length and the bytes written cannot diverge. They must not: a
+		// ContentLength that disagrees with the body makes net/http truncate the write or block waiting
+		// for bytes that never arrive, which would present as a network fault rather than a client bug.
+		ContentLength: int64(len(payload)),
 	}
 	// GetBody makes the body REPLAYABLE, which is what lets net/http follow a 307/308.
 	//
