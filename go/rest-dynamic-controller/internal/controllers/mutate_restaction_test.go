@@ -8,6 +8,7 @@ import (
 
 	stringset "github.com/krateo-platformops/rest-dynamic-controller/internal/text"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/stretchr/testify/assert"
@@ -30,11 +31,31 @@ func TestHasObserveVerb(t *testing.T) {
 // correct in isolation, and only one of them passed the body.
 type mockGetClient struct {
 	body    any   // the ResponseBody the GET answers with
-	callErr error // when set, Call fails with this instead
-	calls   int
+	callErr error // when set, Call fails with this instead -- AFTER validation, so it is a DIALLED failure
+	calls   int   // successful dials: validation passed and the request went out
+	// validationFailures counts requests rejected before dialling. Kept separate from calls because the
+	// #261 distinction is permanent-vs-transient, and "never dialled" is true in BOTH the wedged and the
+	// fixed case -- so a test that only reads calls cannot tell them apart.
+	validationFailures int
 }
 
 func (m *mockGetClient) Call(ctx context.Context, cli *http.Client, path string, conf *restclient.RequestConfiguration) (restclient.Response, error) {
+	// Validate BEFORE dialling, exactly as the real client does at restclient.go:93. This ordering is
+	// load-bearing for the #261 tests and the first version of this mock did not have it.
+	//
+	// The real ValidateRequest rejects an unresolved required path parameter (clienttools.go:200,
+	// "missing path parameter: %s"), so in production NOTHING IS EVER DIALLED for an unaddressable
+	// resource -- with or without the guard. A mock that returns nil from ValidateRequest and goes
+	// straight to the response makes `calls == 0` discriminate between fixed and unfixed in the test
+	// while discriminating nothing in production: the assertion passes for a reason that does not exist
+	// outside the mock. Found by the aruba-provider-kog session, from a live wedge whose logs show the
+	// path-build error and no HTTP attempt at all.
+	//
+	// So `calls` means DIALLED, and a validation failure is counted separately.
+	if err := m.ValidateRequest("GET", path, conf.Parameters, conf.Query, conf.Headers, conf.Cookies); err != nil {
+		m.validationFailures++
+		return restclient.Response{}, err
+	}
 	m.calls++
 	if m.callErr != nil {
 		return restclient.Response{}, m.callErr
@@ -42,7 +63,14 @@ func (m *mockGetClient) Call(ctx context.Context, cli *http.Client, path string,
 	return restclient.Response{ResponseBody: m.body}, nil
 }
 
+// ValidateRequest reproduces the one real validation these tests depend on: a required path parameter
+// that the request configuration does not supply is rejected before any HTTP happens
+// (clienttools.go:200). Approximated by scanning the path template rather than the OAS document, which
+// is equivalent for these fixtures and keeps the mock readable.
 func (m *mockGetClient) ValidateRequest(httpMethod, path string, parameters, query, headers, cookies map[string]string) error {
+	for _, name := range builder.UnresolvedPathParams(path, parameters) {
+		return fmt.Errorf("missing path parameter: %s", name)
+	}
 	return nil
 }
 func (m *mockGetClient) RequestedBody(httpMethod, path string) (stringset.StringSet, error) {
@@ -244,12 +272,19 @@ func TestExternalResourceStillExistsReportsUnaddressableAsUnverifiable(t *testin
 	stillExists, verified, err := h.externalResourceStillExists(
 		context.Background(), setFor(info, cli), info, unaddressableKmipCR(), logging.NewNopLogger())
 
+	// THE discriminating assertion. Without the guard the path-build error surfaces here, the caller
+	// retries forever and the finalizer is held. With it, the condition is reported as permanent.
 	require.NoError(t, err, "an unresolved path placeholder is a PERMANENT inability to verify, so it must "+
 		"not surface as an error: the caller retries on error, and this condition can never clear")
 	assert.False(t, stillExists)
 	assert.False(t, verified, "nothing was checked, so nothing is verified")
-	assert.Zero(t, cli.calls, "the verification GET must never be attempted: its URL would carry the "+
-		"literal text {kmipId}, so the request cannot be aimed at anything")
+
+	// Secondary, and deliberately NOT the headline: nothing is dialled either way, because the real
+	// client rejects an unresolved path parameter before any HTTP (restclient.go:93 ->
+	// clienttools.go:200). Asserting only this would pass against the UNFIXED controller too -- confirmed
+	// against a live wedge, whose logs show the path-build error and no connection attempt.
+	assert.Zero(t, cli.calls, "no dial, with or without the guard")
+	assert.Zero(t, cli.validationFailures, "and with the guard it should not even reach validation")
 }
 
 // TestResolveDeleteOutcomeReleasesWhenUnaddressable is the same fix at the level that matters to a user: the
@@ -287,5 +322,12 @@ func TestResolveDeleteOutcomeStillHoldsOnTransientVerificationFailure(t *testing
 
 	require.Error(t, err, "a 500 leaves the resource's state unknown, so the finalizer must be held and "+
 		"the delete retried -- releasing here would orphan a resource that is still present")
-	assert.Equal(t, 1, cli.calls, "an addressable resource must still be dialled")
+
+	// The asymmetry that makes this a real control: a 500 means the request WAS dialled, whereas the
+	// unaddressable case never dials. "Verification failed" therefore covers two different situations --
+	// unresolvable path (permanent, release) and request failed (possibly transient, hold) -- and the
+	// whole point of the fix is telling them apart. If this arm ever stopped dialling it would be
+	// exercising the same branch as the fix and would prove nothing.
+	assert.Equal(t, 1, cli.calls, "an addressable resource must be DIALLED -- this is a transient failure")
+	assert.Zero(t, cli.validationFailures, "and must not be rejected before dialling")
 }
