@@ -695,6 +695,41 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		WithValues("name", mg.GetName()).
 		WithValues("namespace", mg.GetNamespace())
 
+	// REFUSE TO CREATE AN OBJECT THAT IS BEING DELETED (#279).
+	//
+	// A Create event queued before the object acquired a deletionTimestamp is still dispatched after it:
+	// unstructured-runtime's worker consults WasDeleted only to decide whether to ADD a finalizer
+	// (worker.go:454 in v1.6.1) and not to gate the dispatch switch below it, so a restart or requeue
+	// mid-delete runs handleCreate. Measured on a live cluster: three creates at 13:58:33, 13:58:53 and
+	// 13:59:22 against a CR whose deletionTimestamp was 13:58:27, interleaved with the delete attempts --
+	// it re-dispatches for as long as the delete is in flight, not once.
+	//
+	// Harmless when the vendor refuses the create. Where it SUCCEEDS: the create lands, the delete
+	// completes, the finalizer is released, the CR is reaped, and the external resource remains with
+	// nothing referencing it -- its identifier possibly never persisted, because the create's status write
+	// races the deletion. On billable infrastructure that is one orphan per reconcile for the duration of
+	// the delete, and no reconcile will ever notice.
+	//
+	// Fixed upstream in unstructured-runtime #25 (merged, untagged as of writing). This guard is kept
+	// REGARDLESS, and not as a stopgap: a controller should not create external infrastructure it is in
+	// the middle of deleting, whoever asked. It also covers every deployment pinned below whatever version
+	// carries that fix, which is all of them today.
+	//
+	// Create ONLY. Update is deliberately not gated: an update during deletion is wasteful rather than
+	// destructive, and the runtime's create-recovery path intentionally reconciles annotations on objects
+	// in odd states, so gating the whole dispatch would break it.
+	//
+	// Returns nil, not an error: the object is going away, so there is no later moment at which creating
+	// becomes correct and nothing is served by requeueing.
+	if !mg.GetDeletionTimestamp().IsZero() {
+		log.Info("Refusing to create: the resource is being deleted",
+			"deletionTimestamp", mg.GetDeletionTimestamp().String())
+		h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create",
+			fmt.Errorf("refused to create an external resource for a custom resource that is being "+
+				"deleted: creating now would leave it orphaned once the delete completes")))
+		return nil
+	}
+
 	if h.swaggerInfoGetter == nil {
 		return fmt.Errorf("swagger info getter must be specified")
 	}
