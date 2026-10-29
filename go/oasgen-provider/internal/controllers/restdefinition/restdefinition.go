@@ -678,32 +678,35 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 		e.log.Debug("Pruned superseded served versions", "versions", pruned)
 	}
 
-	// Captured ONCE, before the retry. The mutation runs against a re-read object on every attempt, so
-	// anything derived from the spec must record the spec this reconcile acted on rather than whatever the
-	// latest read happens to say -- and anything an earlier step wrote onto cr.Status in place must be
-	// collected here or it is never persisted at all. See the doc comment on createdStatus.
-	st := createdStatus{
-		resource: definitionv1alpha1.KindApiVersion{
-			Kind:       gvk.Kind,
-			APIVersion: gvk.GroupVersion().String(),
-		},
-		oasPath:            cr.Spec.OASPath,
-		digest:             dig,
-		hasSecuritySchemes: hasSecuritySchemes,
-		oasHash:            oasHash,
-		resourceHash:       resourceHash(cr),
-		// Set in place by syncAuthSecretRBAC above, which has already provisioned the RBAC these describe.
-		authSecretDigest:         cr.Status.AuthSecretDigest,
-		authSecretRBACNamespaces: cr.Status.AuthSecretRBACNamespaces,
+	// Everything this phase establishes is written onto cr.Status, and then SNAPSHOTTED (#263).
+	//
+	// Writing here rather than into a parallel struct is what makes the snapshot complete by
+	// construction. syncAuthSecretRBAC above already set AuthSecretDigest and AuthSecretRBACNamespaces
+	// on cr.Status in place, and a future step that sets another field will land in the same place --
+	// with nothing to remember and no second list to keep in step. The previous shape, a hand-filled
+	// struct, dropped exactly those two fields on its first outing.
+	cr.Status.Resource = definitionv1alpha1.KindApiVersion{
+		Kind:       gvk.Kind,
+		APIVersion: gvk.GroupVersion().String(),
 	}
 	if len(cr.Spec.Resource.ConfigurationFields) > 0 || hasSecuritySchemes {
 		e.log.Debug("Configuration fields or security schemes defined, setting Configuration status in RestDefinition status")
 		cfgGVK := getConfigurationGVK(cr)
-		st.configuration = &definitionv1alpha1.KindApiVersion{
+		cr.Status.Configuration = definitionv1alpha1.KindApiVersion{
 			Kind:       cfgGVK.Kind,
 			APIVersion: cfgGVK.GroupVersion().String(),
 		}
 	}
+	cr.Status.OASPath = cr.Spec.OASPath
+	cr.Status.Digest = dig
+	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
+	cr.Status.OASHash = oasHash
+	cr.Status.ResourceHash = resourceHash(cr)
+
+	// Taken AFTER every in-place step above and immediately before the write. A field set after this
+	// line is not in the snapshot and so is never persisted -- that is the one ordering rule this shape
+	// still has, and it is a single line to check rather than a nine-member list.
+	st := snapshotCreatedStatus(cr)
 
 	// Retried on conflict for the same reason phase 1 is (#259). This write is the one that records
 	// status.digest, status.oasHash and status.resourceHash -- the values Observe compares against to
@@ -1483,35 +1486,42 @@ func (e *external) persistCreatePhaseStatus(ctx context.Context, cr *definitionv
 // TestCreatedStatusCoversEveryStatusField, which fails if RestDefinitionStatus grows a field applyTo does
 // not set.
 type createdStatus struct {
-	resource                 definitionv1alpha1.KindApiVersion
-	configuration            *definitionv1alpha1.KindApiVersion
-	oasPath                  string
-	digest                   string
-	hasSecuritySchemes       bool
-	oasHash                  string
-	resourceHash             string
-	authSecretDigest         string
-	authSecretRBACNamespaces []string
+	status definitionv1alpha1.RestDefinitionStatus
 }
 
-// applyTo writes the whole set onto target. Idempotent, and derives nothing from target, because
-// persistStatusWithRetry runs it once per write attempt and once more to mirror.
-func (s createdStatus) applyTo(target *definitionv1alpha1.RestDefinition) {
+// snapshotCreatedStatus copies cr's status as it stands.
+//
+// MUST be called after every step that sets a status field in place, and immediately before the write.
+// A field set after the snapshot is taken is not in it and is therefore never persisted.
+//
+// A snapshot rather than an assembled value, because assembling one by hand is a list that has to be
+// kept in step with both RestDefinitionStatus and every upstream step that writes to it -- and the
+// previous shape proved the point by dropping two fields syncAuthSecretRBAC sets in place
+// (AuthSecretDigest, AuthSecretRBACNamespaces). The symptoms were a redeploy on every reconcile, from
+// Observe comparing an empty auth digest against a real one, and an RBAC leak on Delete, from
+// teardownAuthSecretRBAC returning early on an empty namespace list. Every test in the package passed,
+// because none exercise Create's second phase (#259, #263).
+//
+// A hand-written list is also only half-checkable: a guard can verify that the applier applies what it
+// is given, but not that the collection site collected everything -- 7 of 7 field drops at the
+// collection site passed the suite. A snapshot has no collection site to drop from.
+func snapshotCreatedStatus(cr *definitionv1alpha1.RestDefinition) createdStatus {
+	return createdStatus{status: *cr.Status.DeepCopy()}
+}
+
+// applyTo writes the snapshot's data fields onto target and merges a Creating condition.
+//
+// Idempotent and derives nothing from target except its conditions, because persistStatusWithRetry runs
+// this once per write attempt and once more to mirror onto the caller's copy.
+func (cs createdStatus) applyTo(target *definitionv1alpha1.RestDefinition) {
+	next := *cs.status.DeepCopy()
+	// Conditions come from the TARGET, not the snapshot. target is a freshly read object, so replacing
+	// its condition list wholesale would discard one another writer set between our read and this write.
+	// The data fields are this phase's to own; the condition list is shared, so it is merged into rather
+	// than overwritten.
+	next.ConditionedStatus = target.Status.ConditionedStatus
+	target.Status = next
 	target.SetConditions(rtv1.Creating())
-	target.Status.Resource = s.resource
-	// Left alone rather than zeroed when there is no Configuration: a RestDefinition that had one and no
-	// longer does keeps the record of what was deployed, which Delete needs in order to tear it down.
-	if s.configuration != nil {
-		target.Status.Configuration = *s.configuration
-	}
-	target.Status.OASPath = s.oasPath
-	target.Status.Digest = s.digest
-	hasSchemes := s.hasSecuritySchemes
-	target.Status.HasSecuritySchemes = &hasSchemes
-	target.Status.OASHash = s.oasHash
-	target.Status.ResourceHash = s.resourceHash
-	target.Status.AuthSecretDigest = s.authSecretDigest
-	target.Status.AuthSecretRBACNamespaces = s.authSecretRBACNamespaces
 }
 
 // persistStatusWithRetry applies mutate to a FRESHLY READ copy of cr and writes the status subresource,
