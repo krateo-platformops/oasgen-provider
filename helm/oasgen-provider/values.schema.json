@@ -457,6 +457,23 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "otel": {
+          "type": "object",
+          "description": "Node-local OTLP endpoint for the C8 audit trail. OFF by default: when enabled, an explicit env block sets OTEL_EXPORTER_OTLP_ENDPOINT to http://$(HOST_IP):<port>, which an env entry of the same name supplied via rdc.env would otherwise lose to.",
+          "additionalProperties": false,
+          "properties": {
+            "nodeLocalEndpoint": {
+              "type": "boolean",
+              "description": "Set OTEL_EXPORTER_OTLP_ENDPOINT from the pod's status.hostIP. Required to reach a node-local collector, whose service is headless and has no cluster IP. Does not by itself enable the audit trail -- that needs OTEL_LOGS_ENABLED=true through rdc.env."
+            },
+            "nodeLocalPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "OTLP/HTTP port on the node-local collector."
+            }
+          }
         }
       }
     },

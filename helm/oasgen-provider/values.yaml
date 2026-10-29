@@ -107,6 +107,22 @@ tolerations: []
 affinity: {}
 
 rdc:
+  # Node-local OTLP endpoint for the C8 audit trail (#253).
+  #
+  # OFF by default, deliberately. When enabled, the generated controllers get an explicit env block
+  # setting OTEL_EXPORTER_OTLP_ENDPOINT to http://$(HOST_IP):<port>, with HOST_IP from
+  # status.hostIP -- which is the only way to reach a node-local collector, because the OTLP
+  # collector service is headless and has no cluster IP to address.
+  #
+  # It is gated because an `env:` entry WINS over an `envFrom` one of the same name: with this on,
+  # an OTEL_EXPORTER_OTLP_ENDPOINT supplied through rdc.env is silently overridden. Leaving it off
+  # means an install that sets its own endpoint keeps it.
+  #
+  # Setting this alone does not start the audit trail: the controller also needs
+  # OTEL_LOGS_ENABLED=true, which travels through rdc.env.
+  otel:
+    nodeLocalEndpoint: false
+    nodeLocalPort: 4318
   image:
     registry: ghcr.io
     repository: krateo-platformops/rest-dynamic-controller
