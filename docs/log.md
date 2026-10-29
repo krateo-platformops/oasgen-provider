@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-28T17:05:00Z
+timestamp: 2026-10-29T14:05:00Z
 ---
 
 # Log
@@ -12,6 +12,108 @@ timestamp: 2026-10-28T17:05:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-29 — 0.40.0
+
+A security release as much as a correctness one. Four changes; the first is the one to act on.
+
+### 36 and 34 standard-library vulnerabilities the code actually called
+
+`govulncheck`'s symbol results, before and after:
+
+| | before | after |
+|---|---|---|
+| oasgen-provider | **36 called** | 0 called |
+| rest-dynamic-controller | **34 called** | none found |
+
+Thirty of them had **no fix at any dependency version** — `net/http` and `crypto/x509` in the standard
+library, including GO-2026-6809, *"distrust compromised intermediate certificates"*. Those close by
+building on a newer toolchain and by nothing else.
+
+That one matters most for **rest-dynamic-controller**, whose entire job is outbound TLS to vendor APIs: a
+certificate-trust defect there sits in the path of every external call it makes.
+
+Both modules move to `go 1.26.0` with `toolchain go1.26.10`, and all three Dockerfile stages to
+`golang:1.26-trixie` (currently 1.26.10). `golang.org/x/net` goes to v0.62.0, which also carries `x/text`
+to v0.43.0 and `x/tools` to v0.51.0 (#267).
+
+Two things worth knowing if you maintain something similar:
+
+- **The `go` line stays at 1.26.0, not 1.26.10, deliberately.** A patch-level `go` line would force every
+  consumer's floor up on every standard-library CVE — a recurring cost imposed downstream to make one
+  scanner quieter. The `toolchain` line does the same job for our builds and scans without touching
+  anyone's floor.
+- **No CI change was needed, and the reason is easy to get wrong.** The `go` command honours the
+  `toolchain` line by itself under `GOTOOLCHAIN=auto`, regardless of which Go is installed — measured with
+  a 1.25.1 install reporting `go1.26.10` inside the module. So whatever Go a runner installs is
+  superseded. What `govulncheck` responds to is the **selected toolchain**, not the `go` directive; a test
+  series that varies the directive moves two things at once and establishes neither.
+
+### A conflicted create is now prevented from wedging, not merely bounded
+
+0.39.0 moved to provider-runtime v1.5.1, which **bounds** an unresolved create handshake: Observe is asked
+whether the resource exists, and if it is absent the marker is re-observed for a two-minute grace period
+and then cleared so create runs again. Measured on a real cluster at 2m0.1s over nine passes.
+
+v1.7.0 **prevents** it. A conflicted create is stamped `external-create-failed` and retried on the **next
+reconcile** instead of waiting out the window. On a bulk install that window is incurred per object, so on
+the ~60-RestDefinition installs where this was measured 2 of 2 wedged, the saving is not marginal (#265).
+
+v1.7.0 also carries a diagnostic that matters here specifically: when Observe errors while a create
+handshake is unresolved, `Synced` reads *"external create pending since `<t>` cannot be resolved until
+observe succeeds: observe failed: `<err>`"*. That is the state #266 produces — and without it, a
+RestDefinition stalled by a permanent render failure shows only the Observe error, whose symptom ("CRDs
+present, no Deployment") is **indistinguishable from the expected two-phase intermediate state** described
+in the 0.39.0 entry. With it, the object names both facts.
+
+### The status Create persists is now snapshotted rather than listed
+
+0.39.0 fixed an instance of a dropped-status-field bug and left the class. The guard shipped with it
+verified that the applier applied what it was *given*; it could not verify that the collection site had
+collected everything — and the collection site was where the bug was. Deleting any of seven captures left
+the entire suite green, 7 of 7.
+
+The status this phase establishes is now written onto the object and **snapshotted**, so the set is
+complete by construction: the step that provisions auth-secret RBAC already writes its two fields there in
+place, and a future step that sets another lands in the same place with nothing to remember (#263).
+
+One deliberate subtlety: conditions come from the **target**, not the snapshot. The write runs against a
+freshly read object, so replacing its condition list wholesale would discard a condition another writer
+set between the read and the write — which is the whole reason the write re-reads per attempt. The data
+fields are the phase's to own; the condition list is shared.
+
+Create's **first** phase is deliberately unchanged, because it establishes a *subset* — it runs before the
+Deployment and auth-secret steps exist to be recorded, so snapshotting there would write back the rest of
+the persisted status and clobber fields it has no business touching.
+
+### Swagger 2.0 parameters carry their validation keywords
+
+0.38.0 carried `pattern`, `minLength`, `maximum` and the rest into the generated CRD — for **OAS 3
+documents only**. In OAS 3 a parameter has a `schema`, which goes through the same converter the request
+body uses, so parameters inherited the fix for free. Swagger 2.0 has no `schema` on a non-body parameter:
+the facets sit inline, so they have to be copied by hand, and they were not.
+
+The two notations therefore disagreed about whether a declared constraint was enforced — the same
+`pattern` on a path parameter reached the CRD from a 3.x document and vanished from a 2.0 one. Fixed, with
+a test that compares whole rendered field schemas between equivalent documents in both notations, so a
+keyword added to one path and not the other fails without anyone remembering to extend the assertions
+(#255).
+
+One limit worth stating, because it is not fixable here: `libopenapi` types 2.0's `minimum`, `maximum` and
+`multipleOf` as integers where the specification defines them as numbers. A fractional value fails to
+unmarshal and is discarded below both model levels, so it can be neither carried nor warned about —
+measured, `minimum: 0` survives while `maximum: 2.5` vanishes. Integer bounds, the common case, are
+unaffected.
+
+### Known and tracked
+
+- `Observe` still errors on permanent local failures, which stalls a RestDefinition entirely (#266).
+- `Update`'s status write still has no retry; it cannot wedge, but a lost conflict costs a redeploy loop
+  that resolves itself (#264).
+- A `uniqueItems` on an array of objects can emit a CEL rule whose static cost the API server may refuse,
+  and nothing tests that branch (#270). No document in use declares it.
+- A parameter whose name collides with a body property still loses its validation keywords to merge
+  precedence, in both notations (#257).
 
 ## 2026-10-28 — 0.39.0
 
