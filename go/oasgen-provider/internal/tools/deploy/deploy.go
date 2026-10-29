@@ -302,7 +302,9 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	sa, clusterrole, clusterrolebinding, role, rolebinding, err := createRBACResources(opts.GVR, opts.NamespacedName, opts.ConfigurationGVR, opts.RBACFolderPath)
 	if err != nil {
 		opts.Log("Error creating RBAC resources", "error", err)
-		return "", err
+		// createRBACResources is five templates.CreateK8sObject calls and nothing else -- no cluster
+		// access -- so every failure it can report is permanent.
+		return "", &PermanentRenderError{What: "RBAC manifests", Err: err}
 	}
 	applyOpts := kubecli.ApplyOptions{}
 
@@ -325,7 +327,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		"composition_controller_sa_namespace", sa.Namespace)
 	if err != nil {
 		opts.Log("Error creating configmap object", "error", err)
-		return "", err
+		return "", &PermanentRenderError{What: "the controller ConfigMap", Err: err}
 	}
 
 	err = kubecli.Apply(ctx, opts.KubeClient, &cm, applyOpts)
@@ -353,7 +355,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		"labelSelector", opts.LabelSelector)
 	if err != nil {
 		opts.Log("Error creating deployment object", "error", err)
-		return "", err
+		return "", &PermanentRenderError{What: "the controller Deployment", Err: err}
 	}
 
 	err = kubecli.Apply(ctx, opts.KubeClient, &dep, applyOpts)
@@ -401,6 +403,35 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 
 	return hsh.GetHash(), nil
 }
+
+// PermanentRenderError wraps a failure to RENDER a manifest -- reading a template off disk and
+// substituting values into it. It exists so Observe can tell a permanent local failure from a transient
+// cluster one, which it otherwise cannot: Deploy's render steps and its dry-run Apply steps returned the
+// same bare error, and Observe returned it upward either way.
+//
+// That conflation wedges a half-created RestDefinition (#266). provider-runtime's create-recovery guard
+// runs only when Observe ANSWERS -- an error return skips it -- so a resource whose create handshake is
+// unresolved and whose template will never render is stuck on every runtime version, forever, because
+// the guard never gets the chance to reconcile the handshake against reality.
+//
+// An error is the right answer only for a TRANSIENT cannot-tell. A permanent one must be reported as an
+// answer plus a condition saying why, so the object carries its own diagnosis instead of retrying a
+// render that cannot succeed.
+//
+// Rendering touches no cluster: templates.CreateK8sObject is os.ReadFile plus substitution. So a failure
+// is permanent by construction -- the same inputs will fail identically on every reconcile until a human
+// changes the template or the chart.
+type PermanentRenderError struct {
+	// What was being rendered, for the condition message: "configmap", "deployment", "RBAC".
+	What string
+	Err  error
+}
+
+func (e *PermanentRenderError) Error() string {
+	return fmt.Sprintf("rendering %s: %v (this will not succeed on retry)", e.What, e.Err)
+}
+
+func (e *PermanentRenderError) Unwrap() error { return e.Err }
 
 // ErrLiveInstances is returned when a CRD cannot be uninstalled because instances of it still exist.
 // Callers should treat it as "not yet", not as a failure to retry differently: the RestDefinition keeps
