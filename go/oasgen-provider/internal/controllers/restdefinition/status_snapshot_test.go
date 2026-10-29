@@ -61,7 +61,7 @@ func TestCreatedStatusSnapshotCarriesEveryField(t *testing.T) {
 	cr.Status = want
 
 	target := &definitionv1alpha1.RestDefinition{}
-	snapshotCreatedStatus(cr).applyTo(target)
+	snapshotStatus(cr).applyTo(target)
 
 	// Compare the whole status, conditions excluded -- applyTo merges those, and their timestamps differ
 	// per call.
@@ -79,7 +79,7 @@ func TestCreatedStatusSnapshotIsTakenByValue(t *testing.T) {
 	cr := restDefinitionForStatusTest()
 	cr.Status = fullyPopulatedStatus()
 
-	st := snapshotCreatedStatus(cr)
+	st := snapshotStatus(cr)
 
 	// Mutate the source after snapshotting, including through the slice.
 	cr.Status.Digest = "sha256:changed-after-the-snapshot"
@@ -115,7 +115,7 @@ func TestCreatedStatusApplyToMergesConditionsRatherThanReplacing(t *testing.T) {
 		Type: "SetByAnotherWriter", Status: "True", LastTransitionTime: metav1.Now(), Reason: "Concurrent",
 	}}}
 
-	snapshotCreatedStatus(cr).applyTo(target)
+	snapshotStatus(cr).applyTo(target)
 
 	types := map[rtv1.ConditionType]bool{}
 	for _, c := range target.Status.Conditions {
@@ -144,7 +144,7 @@ func TestCreatedStatusCarriesTheAuthSecretFields(t *testing.T) {
 	cr.Status.AuthSecretRBACNamespaces = []string{"krateo-system", "team-a"}
 
 	target := &definitionv1alpha1.RestDefinition{}
-	snapshotCreatedStatus(cr).applyTo(target)
+	snapshotStatus(cr).applyTo(target)
 
 	assert.Equal(t, "sha256:authsecret", target.Status.AuthSecretDigest,
 		"an empty authSecretDigest makes Observe report drift on every reconcile, redeploying forever")
@@ -157,7 +157,7 @@ func TestCreatedStatusCarriesTheAuthSecretFields(t *testing.T) {
 func TestCreatedStatusApplyToIsIdempotent(t *testing.T) {
 	cr := restDefinitionForStatusTest()
 	cr.Status = fullyPopulatedStatus()
-	st := snapshotCreatedStatus(cr)
+	st := snapshotStatus(cr)
 
 	once := &definitionv1alpha1.RestDefinition{}
 	st.applyTo(once)
