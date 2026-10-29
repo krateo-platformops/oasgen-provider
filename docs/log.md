@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-29T14:05:00Z
+timestamp: 2026-10-29T18:45:00Z
 ---
 
 # Log
@@ -12,6 +12,133 @@ timestamp: 2026-10-29T14:05:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-29 — 0.41.0
+
+Six changes. The first can destroy a customer's infrastructure and is the one to act on.
+
+### `deletion-policy: orphan` could delete the external resource anyway
+
+`krateo.io/deletion-policy=orphan` says "tear down the CR, leave the external resource". Up to and
+including 0.40.0 it did that **most of the time**.
+
+unstructured-runtime's worker removed the finalizer and then **did not return**. Execution fell through to
+`handleDelete`, whose fetch is a live apiserver `Get`, and called `externalClient.Delete`. So the external
+resource was destroyed on the very pass that honoured the orphan policy — whenever that fetch beat the
+apiserver's reap of the now-finalizer-free object.
+
+**`orphan` was therefore non-deterministic rather than safe**, which is worse than a plain bug: a handful
+of trials showing no delete looks like proof. Fixed upstream in `unstructured-runtime` v1.6.1 (#23/#24
+there) and picked up here (#286).
+
+Two things worth knowing beyond the fix:
+
+- **It removes the cliff; it does not enforce the precondition.** A single additional finalizer still
+  changes the behaviour completely and nothing warns you. v1.6.1 pins that distinction by test
+  (`orphan-one-finalizer`, `orphan-two-finalizers`) but does not enforce it at runtime. **For resources
+  you cannot replace, strip the finalizer explicitly rather than relying on the annotation.**
+- `composition.krateo.io/finalizer` is unchanged across v1.4.0, v1.5.0, v1.6.0 and v1.6.1 — checked at
+  each version rather than at the endpoints, because a constant that changed and changed back would pass
+  an endpoint comparison. Two downstream migration runbooks depend on that exact string.
+
+Found while answering a question from a session whose CRs manage physical hosts in production. The defect
+had survived for months **beside a test named for the exact scenario**, which drove the event as
+`EventType: Observe` — so the fall-through landed in `handleObserve` and the buggy branch never executed.
+
+### A delete that could never complete now completes
+
+A delegated delete verified its own success with a GET and returned that GET's error as its own. For a
+**transient** failure that is right — "could not check" means retry, and that rule is what stops a live
+resource being orphaned. For a **permanent** one it wedged: a CR whose create failed never had an
+identifier written to its status, so the GET path could never be built, the error repeated on every
+reconcile, and the finalizer was held until a human stripped it by hand.
+
+Measured at **eight hours** on a CloudServer whose create the vendor refused, while a Vpc in the same
+state deleted immediately — because the native delete path has had this guard all along and the delegated
+one never consulted it (#261).
+
+Live-validated on a real cluster: a CR wedged for 41 minutes deleted **20 seconds** after the fix rolled
+out, with the finalizer released and no verification GET attempted.
+
+One measurement note for anyone validating an RDC change the same way: RDC Deployments are rendered by
+oasgen from a ConfigMap template, so changing `rdc.image.tag` re-renders each generated controller **on
+its own reconcile schedule**. Controllers move at different times. Verify the candidate image is running
+on the specific controller under test before reading anything — the failure mode is a false negative,
+which is the kind that gets believed.
+
+### Every external write now leaves an audit record
+
+Each external write emits the canonical Krateo AuditEvent as an OTLP LogRecord, carrying the CR's `uid`
+and the `generation` the reconcile acted on — the keys that let a record of the *user's action* and a
+record of the *external effect* be matched (#253). Enable with `-otel-logs-enabled` /
+`OTEL_LOGS_ENABLED`, which is deliberately **separate** from `-otel-tracing-enabled`: audit records are a
+compliance signal, not diagnostics, and nobody should have to turn on traces to get them.
+
+**Ten emit sites, not three**, and the difference is the useful part. Enumerating the verbs gives
+Create/Update/Delete and looks complete once each native path is instrumented. Enumerating what actually
+*calls out* gives ten: each verb has a native path **and** a delegated one through snowplow's `/call`,
+plus `dispatch`, which is the external write for resources that declare no create verb at all. Reads are
+not audited.
+
+**`http.response.status_code` is present on native writes and absent on delegated ones.** That is
+deliberate. A delegated call goes through snowplow, so the only status this controller can observe is
+*snowplow's*, not the vendor's — reporting it would state in a compliance record that the external API
+answered when nothing of the sort was established. Correlation is unaffected: snowplow's own write audit
+carries the same keys for the call it served.
+
+`server.address` is reduced to `host[:port]`, dropping scheme, userinfo, path, query and fragment,
+centrally in the emitter rather than at each call site. That is not tidiness: vendor paths routinely carry
+identifiers and at least one in use carries a token-shaped segment.
+
+### `Observe` no longer strands a resource on a failure that will never clear
+
+`Observe` returned an error for failures that are permanent and **local** — a template that will never
+render — and provider-runtime resolves an unresolved create handshake only *after* Observe answers. An
+error return skips that, so a half-created RestDefinition whose template cannot render was wedged on every
+runtime version, and no bump could fix it (#266).
+
+`deploy.Deploy` was the hard part: it renders manifests **and** dry-run Applies them, and reported both as
+the same bare error. Only the render half is permanent; a dry-run Apply can fail because the apiserver is
+briefly unavailable and must still retry. The two are now distinguished at the source by a typed error
+rather than by inspecting a message, and Observe answers `ResourceExists: false` with an `Unavailable`
+condition **naming the template that cannot render** — without which the object shows only that it is not
+ready, which is indistinguishable from the expected two-phase intermediate state.
+
+### The provider image is 65% smaller, and that was never only about pull time
+
+331 MB → **116 MB**. The runtime stage shipped a full Go toolchain, apt and a shell to run two static
+binaries, none of which anything invokes (#271).
+
+The argument that justified touching it is second-order: the chart mounts `/tmp` as an `emptyDir` backed
+by the **node** filesystem, and the provider needs writable disk there to parse an OAS document at all. So
+the image competes for the same disk the parser needs. On a node whose disk filled, five RestDefinitions
+sat `READY=False` with no controllers created, surfacing upstream as an unexplained readiness timeout
+several layers from the cause. That error message is tracked separately (#277).
+
+### Update's status write is retried
+
+The last of the three status writes left as a bare `Status().Update`. It cannot wedge the resource the way
+a lost create-phase write can — by the time Update runs the create handshake is long resolved — but a lost
+write loses `status.digest`, `status.oasHash` and `status.resourceHash`, so the next Observe compares a
+stale digest against a freshly rendered one, reports drift that does not exist, and Update runs again. A
+redeploy loop that resolves itself, competing on a bulk install for exactly the API server attention that
+caused the conflict (#264).
+
+### Known and tracked
+
+- A `Create` can be dispatched against a CR whose `deletionTimestamp` is already set, repeatedly. On a
+  resource whose create succeeds this provisions something the in-flight delete then orphans, with the
+  identifier possibly never persisted (#279). **Pre-existing, not new in this release.**
+- RDC has no recording external client, so no delete-path test can assert whether the external call was
+  actually made (#284).
+- `charts.krateo.io` still serves oasgen-provider appVersion `0.10.0`, thirty releases old and below the
+  credential-redaction fix. Use the OCI charts (#278).
+- `helm package` strips `Chart.yaml` comments, so the `kubeVersion` floor's rationale is invisible in the
+  published chart (#280).
+- A node-disk failure is reported inside a sentence whose subject is a ConfigMap (#277).
+- A parameter whose name collides with a body property still loses its validation keywords (#257).
+- `uniqueItems` on an array of objects can emit a CEL rule whose static cost the API server may refuse
+  (#270).
 
 ## 2026-10-29 — 0.40.0
 
