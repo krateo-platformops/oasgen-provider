@@ -142,6 +142,29 @@ func (h *handler) externalResourceStillExists(ctx context.Context, cs *clientSet
 	if getReq == nil {
 		return false, false, nil
 	}
+
+	// An unresolved {placeholder} in the GET path means the external resource is NOT ADDRESSABLE -- almost
+	// always because the create failed, so no identifier was ever written to status. Report it unverifiable
+	// (the same as the three cases above) rather than attempting the call and returning its error (#261).
+	//
+	// This is the difference between a TRANSIENT and a PERMANENT inability to check, and the caller's rule
+	// -- "could not check" means retry -- is correct only for the transient kind. An id that was never
+	// recorded can never appear, so returning an error here holds the finalizer on every retry forever: the
+	// object sits in Deleting with no route out but a human stripping the finalizer by hand. Measured at
+	// eight hours on a CloudServer whose create was refused by the vendor, while a Vpc in the same state
+	// deleted immediately -- because the NATIVE delete path has had this guard all along
+	// (restResources.go), and this path never consulted it.
+	//
+	// Uses builder.UnresolvedPathParams, the same helper the native guard uses, deliberately: the two paths
+	// must agree on what "not addressable" means, and a shared helper makes that true by construction
+	// rather than by two implementations staying in step. Matching on the error string instead would couple
+	// this to a message and silently restore the wedge the next time it is reworded.
+	if missing := builder.UnresolvedPathParams(getInfo.Path, getReq.Parameters); len(missing) > 0 {
+		log.Warn("Cannot verify deletion: the external resource is not addressable, so the delete result governs",
+			"kind", mg.GetKind(), "path", getInfo.Path, "unresolvedPathParams", strings.Join(missing, ","))
+		return false, false, nil
+	}
+
 	body, cerr := getCall(ctx, &http.Client{}, getInfo.Path, getReq)
 	if restclient.IsNotFoundError(cerr) {
 		return false, true, nil // verifiably gone
