@@ -1,8 +1,9 @@
 ---
-type: Guide
+type: Runbook
 title: Migrating an install from before 0.20.0
 description: Three hazards a pre-monorepo install meets on the way to a current release, in the order they bite.
 tags: [kog, upgrade]
+timestamp: 2026-10-30T00:40:00Z
 ---
 
 # Migrating an install from before 0.20.0
