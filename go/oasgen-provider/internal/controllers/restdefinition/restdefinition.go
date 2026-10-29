@@ -378,7 +378,12 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	obj := appsv1.Deployment{}
 	err = objects.CreateK8sObject(&obj, gvr, deploymentNSName, RDCtemplateDeploymentPath)
 	if err != nil {
-		return reconciler.ExternalObservation{}, err
+		// PERMANENT: objects.CreateK8sObject is os.ReadFile plus a template render, with no cluster
+		// access, so the same inputs fail identically on every reconcile. Erroring here skips
+		// provider-runtime's create-recovery guard, which runs only when Observe ANSWERS -- so a
+		// RestDefinition whose create handshake is unresolved would be wedged forever on every runtime
+		// version (#266). Answer, and carry the diagnosis on the object.
+		return e.observePermanentFailure(cr, "the controller Deployment manifest", err)
 	}
 	deployOk, deployReady, err := deployment.LookupDeployment(ctx, e.kube, &obj)
 	if err != nil {
@@ -525,6 +530,15 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
+		// Deploy renders manifests AND dry-run Applies them, and used to report both as the same bare
+		// error. Only the render half is permanent; a dry-run Apply can fail because the apiserver is
+		// briefly unavailable, which must still retry. deploy.PermanentRenderError distinguishes them at
+		// the source rather than by inspecting the message here -- matching on a string would couple this
+		// to wording and silently reopen the wedge when it is reworded (#266).
+		var perr *deploy.PermanentRenderError
+		if errors.As(err, &perr) {
+			return e.observePermanentFailure(cr, perr.What, perr.Err)
+		}
 		return reconciler.ExternalObservation{}, err
 	}
 
@@ -1186,6 +1200,37 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 	e.rec.Eventf(cr, corev1.EventTypeNormal, "RestDefinitionDeleting",
 		"RestDefinition '%s/%s' deleting", cr.Spec.Resource.Kind, cr.Spec.ResourceGroup)
 	return err
+}
+
+// observePermanentFailure is Observe's answer for a failure that will never clear on its own: a manifest
+// that cannot be rendered. It reports the resource as absent-but-settled and records WHY on the object.
+//
+// Returning an answer rather than an error is the whole point. provider-runtime resolves an unresolved
+// create handshake only AFTER Observe answers:
+//
+//	observation, err := external.Observe(externalCtx, managed)
+//	if err != nil { return reconcile.Result{}, werr }   // returns HERE
+//	if unresolvedCreate { ... }                         // never reached
+//
+// So an error return on a permanent failure strands a half-created RestDefinition on every runtime
+// version, and no bump can fix it -- the guard is simply never given the chance to run (#266).
+//
+// ResourceExists:false with ResourceUpToDate:true matches the branch this file already takes when the
+// CRD is absent. It is safe against duplication here because oasgen's Create APPLIES manifests rather
+// than allocating anything: a repeated Create on an existing CRD is an apply, not a second resource.
+// That is the test provider-runtime#17 sets -- "if I answer false and it did exist, would Create
+// duplicate it?" -- and for this provider the answer is no.
+//
+// The condition is the deliverable as much as the answer. Without it the object shows only that it is
+// not ready, which is indistinguishable from the expected two-phase intermediate state; with it, the
+// RestDefinition names the template that cannot render.
+func (e *external) observePermanentFailure(cr *definitionv1alpha1.RestDefinition, what string, cause error) (reconciler.ExternalObservation, error) {
+	msg := fmt.Sprintf("cannot render %s and retrying will not help: %v", what, cause)
+	e.log.Info("Permanent render failure; reporting it as an answer so the create handshake can resolve",
+		"what", what, "error", cause)
+	cr.SetConditions(rtv1.Unavailable().WithMessage(msg))
+	e.rec.Eventf(cr, corev1.EventTypeWarning, "PermanentRenderFailure", "%s", msg)
+	return reconciler.ExternalObservation{ResourceExists: false, ResourceUpToDate: true}, nil
 }
 
 func getConfigurationGVR(cr *definitionv1alpha1.RestDefinition, hasSecuritySchemes bool) schema.GroupVersionResource {
