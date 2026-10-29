@@ -258,8 +258,11 @@ type SecuritySchemeType string
 
 // Source: https://swagger.io/docs/specification/v3_0/authentication/
 const (
-	SchemeTypeHTTP          SecuritySchemeType = "http"
-	SchemeTypeAPIKey        SecuritySchemeType = "apiKey"        // Currently not supported
+	SchemeTypeHTTP SecuritySchemeType = "http"
+	// apiKey is supported for `in: header` only. A scheme with any other `in`
+	// (query, cookie) is not rejected outright: buildAuthMethodsSchemaMap
+	// collects it, with its type and `in`, into the skipped list it returns.
+	SchemeTypeAPIKey        SecuritySchemeType = "apiKey"
 	SchemeTypeOAuth2        SecuritySchemeType = "oauth2"        // Currently not supported
 	SchemeTypeOpenIDConnect SecuritySchemeType = "openIdConnect" // Currently not supported
 )
