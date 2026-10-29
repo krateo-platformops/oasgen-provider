@@ -37,6 +37,16 @@ Two things worth knowing beyond the fix:
   changes the behaviour completely and nothing warns you. v1.6.1 pins that distinction by test
   (`orphan-one-finalizer`, `orphan-two-finalizers`) but does not enforce it at runtime. **For resources
   you cannot replace, strip the finalizer explicitly rather than relying on the annotation.**
+  <br><br>
+  **Measured, so this is not a theoretical caution** — 400 trials across four timing offsets by the
+  installer session: the **sole**-finalizer case failed **0 of 40** at every offset, and an **extra**
+  finalizer failed **40 of 40**. Not "may"; every time. The checkable pre-check is therefore the rule
+  rather than any claim about controller behaviour:
+  <br><br>
+  ```
+  kubectl get <kind> <name> -n <ns> -o jsonpath='{.metadata.finalizers}'
+  # SAFE only if exactly ["composition.krateo.io/finalizer"].
+  ```
 - `composition.krateo.io/finalizer` is unchanged across v1.4.0, v1.5.0, v1.6.0 and v1.6.1 — checked at
   each version rather than at the endpoints, because a constant that changed and changed back would pass
   an endpoint comparison. Two downstream migration runbooks depend on that exact string.
@@ -108,6 +118,21 @@ ready, which is indistinguishable from the expected two-phase intermediate state
 
 331 MB → **116 MB**. The runtime stage shipped a full Go toolchain, apt and a shell to run two static
 binaries, none of which anything invokes (#271).
+
+> **Correction (2026-10-29):** 331 MB → 116 MB is the **on-disk** size, which is what `docker images`
+> reports and the right figure for the disk-competition argument below. It is the **wrong** figure for
+> pull time, which moves compressed layer bytes. Measured from the registry manifests:
+>
+> ```
+> 0.40.0  arm64  338.4 MB compressed, 11 layers
+> 0.41.0  arm64   33.9 MB compressed, 16 layers      -> ~10x, not 2.8x
+> 0.41.0  amd64   38.0 MB compressed, 16 layers
+> ```
+>
+> So the pull improvement is an order of magnitude and this entry understated it. Both numbers matter and
+> they answer different questions: on-disk for what the image costs a node, compressed for what a pull
+> costs. Quote whichever the claim actually rests on. Raised by the aruba-provider-kog session, who
+> measured it independently before I did.
 
 The argument that justified touching it is second-order: the chart mounts `/tmp` as an `emptyDir` backed
 by the **node** filesystem, and the provider needs writable disk there to parse an OAS document at all. So
