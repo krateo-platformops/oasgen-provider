@@ -1162,15 +1162,36 @@ type RestDefinitionStatus struct {
 	AuthSecretRBACNamespaces []string `json:"authSecretRBACNamespaces,omitempty"`
 }
 
+// Why the printer columns below are arranged as they are.
+//
+// This block is deliberately separated from the doc comment by a blank line: controller-gen folds any
+// contiguous prose above a type into the CRD's published `description`, so rationale written adjacent to the
+// markers ends up shipped to every consumer of the API. It belongs in the source, not in the schema.
+//
+// API VERSION is in the DEFAULT view rather than priority=10, because it is the one fact a reader needs from
+// this object and cannot derive. The resource CRD's version comes from the OAS info.version (normalized by
+// crdgen); the Configuration CRD is always v1alpha1. The two halves this object generates are therefore
+// served at DIFFERENT versions, and nothing else on the cluster says which.
+//
+// It was priority=10 -- `-o wide` only -- so the default view was NAME/READY/AGE. Three separate parties then
+// concluded the value was unpublished: a blueprint author hardcoded v1alpha1 in seven examples, a consumer
+// reimplemented crdgen's normalizer in their own validator, and an issue was filed asking for a field that
+// already existed. The answer was one flag away and nobody passed it.
+//
+// CONFIGURATION shows the other half's apiVersion -- the asymmetry that causes the confusion. Empty is
+// meaningful rather than missing: no Configuration CRD is generated unless configurationFields or security
+// schemes are present. It stays at priority=10 so the default view remains short.
+
+// RestDefinition is a RestDefinition type with a spec and a status.
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,categories={krateo,restdefinition,core}
 // +kubebuilder:printcolumn:name="READY",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:printcolumn:name="API VERSION",type="string",JSONPath=".status.resource.apiVersion",priority=10
+// +kubebuilder:printcolumn:name="API VERSION",type="string",JSONPath=".status.resource.apiVersion"
 // +kubebuilder:printcolumn:name="KIND",type="string",JSONPath=".status.resource.kind",priority=10
+// +kubebuilder:printcolumn:name="CONFIGURATION",type="string",JSONPath=".status.configuration.apiVersion",priority=10
 // +kubebuilder:printcolumn:name="OAS PATH",type="string",JSONPath=".status.oasPath",priority=10
-// RestDefinition is a RestDefinition type with a spec and a status.
 type RestDefinition struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
