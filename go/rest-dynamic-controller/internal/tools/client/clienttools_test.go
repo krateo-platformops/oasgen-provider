@@ -2,6 +2,7 @@ package restclient
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -915,4 +916,90 @@ func TestChunkedIsWhatHappensWithoutContentLength(t *testing.T) {
 
 	assert.Equal(t, []string{"chunked"}, <-got,
 		"without ContentLength net/http chunks -- this is the behaviour #307 removes")
+}
+
+// --- #308: a JSON Patch body is a top-level ARRAY ---
+
+// TestArrayBodyIsSentAsReceived calls the REAL Call method against a live server, so the type switch under
+// test is the one that runs.
+//
+// It deliberately does NOT rebuild the request the way production does and assert on that: the defect was a
+// type assertion that refused to assemble a request at all, so a test reproducing the assembly would have
+// passed against the broken code. The assertion is on what the SERVER received, having gone through Call.
+func TestArrayBodyIsSentAsReceived(t *testing.T) {
+	cases := []struct {
+		name string
+		body any
+		// wantBody is the exact bytes the server must see. "" means no body at all.
+		wantBody string
+	}{
+		{
+			// The measured case: Ironic's PATCH accepts ONLY a top-level array.
+			name: "a JSON Patch array reaches the server",
+			body: []any{
+				map[string]any{"op": "replace", "path": "/instance_info", "value": map[string]any{"image_source": "http://x/img"}},
+			},
+			wantBody: `[{"op":"replace","path":"/instance_info","value":{"image_source":"http://x/img"}}]`,
+		},
+		{
+			// An empty array is a well-formed NO-OP patch and must be SENT. This is the case most likely to
+			// be "simplified" into the empty-map branch by a later reader, which would make a legitimate
+			// no-op indistinguishable from "nothing to send".
+			name:     "an EMPTY array is still sent, unlike an empty object",
+			body:     []any{},
+			wantBody: `[]`,
+		},
+		{
+			name:     "an empty object sends no body",
+			body:     map[string]any{},
+			wantBody: "",
+		},
+		{
+			name:     "a populated object is unaffected",
+			body:     map[string]any{"target": "power on"},
+			wantBody: `{"target":"power on"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := make(chan string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				got <- string(b)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			client := clientFromSpec(t, patchSpec())
+			client.Server = srv.URL
+
+			_, err := client.Call(context.Background(), srv.Client(), "/things",
+				&RequestConfiguration{Method: http.MethodPatch, Body: tc.body})
+			require.NoError(t, err, "Call must accept this body shape; an error here IS the #308 defect")
+
+			assert.Equal(t, tc.wantBody, <-got,
+				"the server must receive exactly this body; an empty array is a no-op patch, not an absent body")
+		})
+	}
+}
+
+// patchSpec is a minimal document declaring PATCH on /things, enough for Call to resolve an operation.
+func patchSpec() string {
+	return `openapi: 3.0.3
+info: {title: t, version: 1.0.0}
+servers: [{url: "https://api.example.com"}]
+paths:
+  /things:
+    patch:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200": {description: ok}
+`
 }
