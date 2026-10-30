@@ -169,6 +169,17 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 
 	// Internal helper function to check if property is already required in schema
 	requiredParameters := map[string]bool{}
+	// Parameters a request-direction fieldMapping supplies. See mappingSuppliedParams: these are omitted
+	// from the spec entirely rather than merely un-required, because an optional field that nothing reads
+	// is its own trap -- an author who sets it is silently ignored, since the request takes the mapped
+	// value. They are also kept OUT of requiredParameters, which exists to protect a field from
+	// excludedSpecFields pruning on the grounds that "dropping one leaves a kind that cannot build its own
+	// URL" -- false once a mapping supplies it, so the protection would be guarding nothing.
+	//
+	// Safe to omit the property: addIdentifiersToSpec runs AFTER this and re-adds any identifier it does
+	// not find, so a parameter that is also a declared identifier still gets its spec field (as an
+	// optional string) when includeIdentifiersInSpec is on.
+	mappingSupplied := mappingSuppliedParams(g.resourceConfig.Verbs)
 
 	propertyAlreadyRequired := func(name string) bool {
 		for _, req := range schema.Required {
@@ -224,6 +235,21 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 						Expected: prior.schema,
 					}
 				}
+			}
+
+			if mappingSupplied[param.Name] {
+				// Supplied by a fieldMapping: not the author's to provide, so neither required, nor
+				// present in spec, nor protected from excludedSpecFields pruning.
+				//
+				// uniqueParams IS still recorded. The cross-document conflict check above reads it, and a
+				// mapped parameter is still SENT -- only its source changes -- so two verbs declaring it
+				// from documents whose schemas disagree is just as much an authoring error as before.
+				// Skipping the bookkeeping would have silently disabled that check for exactly the
+				// parameters this change touches.
+				if _, exists := uniqueParams[param.Name]; !exists {
+					uniqueParams[param.Name] = paramOrigin{action: verb.Action, doc: verbDoc, schema: param.Schema}
+				}
+				continue
 			}
 
 			if param.Required {
@@ -556,6 +582,50 @@ func (g *OASSchemaGenerator) removeFieldAtPathRec(ctx context.Context, schema *S
 // The property itself stays in the schema: the API still accepts the field, a CR may still set it (an
 // explicitly supplied value is what a dependentLookup's `when` guard exists to honour), and removing the
 // property would also remove the thing the mapping is anchored on.
+// mappingSuppliedParams returns the PARAMETER names whose value a request-direction fieldMapping supplies,
+// so they are not demanded of the author.
+//
+// This is #246's rule for parameters. That fix established the principle for resolver-supplied BODY fields:
+//
+//	"A body field a RESOLVER supplies must not be required of the user [...] requiring it forces the author
+//	 to write a value that is then overwritten."
+//
+// It was never extended to parameters, so every path parameter stayed a required top-level spec field named
+// after the PARAMETER, regardless of what the mapping said. For a parameter mapped from status.* that is not
+// merely redundant, it is IMPOSSIBLE to satisfy: the vendor assigns the id at create and the controller
+// reads it back, so the author cannot supply a value that does not exist yet, and the kind is uncreatable.
+// Measured on five generated CRDs, five for five (#325).
+//
+// A mapping from spec.* -- e.g. inCustomResource: spec.keypair.name for path parameter {name} -- is the
+// milder case: the value IS author-supplied, just at another path, and the flat duplicate is redundant
+// rather than unsatisfiable. Both are suppressed; only one was fatal.
+//
+// InPath and InQuery are the request-direction destinations that address a parameter. InBody is #246's
+// territory and is left to dropResolverSuppliedRequired, which runs before this and prunes the request
+// body's own `required` -- the two must not overlap, because that function's doc comment is explicit that
+// pruning a PARAMETER afterwards would silently unrequire one that merely shares a name with a
+// resolver-supplied body field.
+func mappingSuppliedParams(verbs []Verb) map[string]bool {
+	supplied := map[string]bool{}
+	for _, verb := range verbs {
+		for _, m := range verb.FieldMapping {
+			// A request-direction entry names its source in the CR. An entry with no source is a
+			// response-direction mapping (inResponse -> inCustomResource) or malformed; neither supplies a
+			// request parameter.
+			if m.InCustomResource == "" {
+				continue
+			}
+			if m.InPath != "" {
+				supplied[m.InPath] = true
+			}
+			if m.InQuery != "" {
+				supplied[m.InQuery] = true
+			}
+		}
+	}
+	return supplied
+}
+
 func dropResolverSuppliedRequired(schema *Schema, verbs []Verb) {
 	if schema == nil || len(schema.Required) == 0 {
 		return
