@@ -1,7 +1,12 @@
 package restclient
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"sort"
@@ -831,4 +836,83 @@ func TestRequestedBodyTreatsASchemalessBodyAsEmpty(t *testing.T) {
 
 	require.NoError(t, err, "a body with no schema is not an error")
 	assert.Equal(t, 0, len(got), "and reports no fields")
+}
+
+// --- #307: a buffered body must declare its length, not be chunked ---
+
+// TestRequestDeclaresContentLength asserts the framing a server actually receives.
+//
+// The request is built as a struct literal, so http.NewRequest's type assertion never runs and nothing
+// derives ContentLength -- io.NopCloser would defeat that assertion anyway. Left unset it is 0 with a
+// non-nil Body, which net/http reads as "length unknown" and sends Transfer-Encoding: chunked.
+//
+// Asserted through a real server rather than by inspecting the Request, because the Request's fields are
+// what we set and the ENCODING is what the server sees. A test reading back req.ContentLength would pass
+// against a transport that chunked anyway.
+func TestRequestDeclaresContentLength(t *testing.T) {
+	type seen struct {
+		transferEncoding []string
+		contentLength    int64
+		body             string
+	}
+	got := make(chan seen, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got <- seen{transferEncoding: r.TransferEncoding, contentLength: r.ContentLength, body: string(b)}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	payload := map[string]any{"target": "power on"}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPut, srv.URL, nil)
+	require.NoError(t, err)
+	// Reproduce the production construction exactly: NopCloser over a bytes.Reader, length set by hand.
+	req.Body = io.NopCloser(bytes.NewReader(raw))
+	req.ContentLength = int64(len(raw))
+
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	s := <-got
+	assert.Empty(t, s.transferEncoding,
+		"a fully buffered body must NOT be chunked: some HTTP front ends refuse chunked requests (#307)")
+	assert.Equal(t, int64(len(raw)), s.contentLength,
+		"the server must receive the declared length")
+	assert.JSONEq(t, string(raw), s.body,
+		"and the body must arrive intact -- a ContentLength disagreeing with the bytes truncates or hangs")
+}
+
+// TestChunkedIsWhatHappensWithoutContentLength is the control arm: it pins that the bug being fixed is
+// real and that the assertion above is not true for free.
+//
+// Without ContentLength, net/http chunks. If this ever stops chunking, the test above stops proving
+// anything and should be revisited rather than trusted.
+func TestChunkedIsWhatHappensWithoutContentLength(t *testing.T) {
+	got := make(chan []string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		got <- r.TransferEncoding
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	raw := []byte(`{"target":"power on"}`)
+	req, err := http.NewRequest(http.MethodPut, srv.URL, nil)
+	require.NoError(t, err)
+	req.Body = io.NopCloser(bytes.NewReader(raw))
+	// ContentLength deliberately NOT set -- the pre-fix construction.
+
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, []string{"chunked"}, <-got,
+		"without ContentLength net/http chunks -- this is the behaviour #307 removes")
 }
