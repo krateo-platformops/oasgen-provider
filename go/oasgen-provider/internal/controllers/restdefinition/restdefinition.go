@@ -1345,7 +1345,16 @@ func (e *external) fetchOASBytesAt(ctx context.Context, cr *definitionv1alpha1.R
 	)
 	basePath, err := os.MkdirTemp("", "ogen-oas-")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create directory: %w", err)
+		// Name the SUBSYSTEM, because the frames wrapping this one name the ConfigMap. The outer frames
+		// answer "what were we doing" -- fetching an OAS document from configmap://ns/name/key -- which is
+		// the right thing for a wrapped error until the inner failure is in an unrelated subsystem. A node
+		// with a full disk then produced a message whose only identifier was a ConfigMap path, and the
+		// reader checked all twelve ConfigMaps before reading to the end of the line (#277).
+		//
+		// "node-local scratch space" says where to look. The chart mounts /tmp as an emptyDir backed by the
+		// node filesystem, so this failing means the NODE is out of space (or /tmp is unwritable) -- nothing
+		// about the ConfigMap, its contents or its availability is implicated.
+		return nil, fmt.Errorf("creating a temporary directory for OAS parsing in node-local scratch space (%s): %w", os.TempDir(), err)
 	}
 	defer os.RemoveAll(basePath)
 
