@@ -114,11 +114,31 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 
 	headers := make(http.Header)
 	payload = nil
-	m, ok := opts.Body.(map[string]any)
-	if !ok && opts.Body != nil {
+	// A JSON Patch body is a top-level ARRAY, so a map-only type assertion rejected it.
+	//
+	// ApplyRequestTransform returns `any` and happily emits a slice, so a requestTransform producing
+	// RFC-6902 was reachable, documented, and non-functional: it died one layer later as
+	// `invalid body type: []interface {}`. Confirmed against a real Ironic, whose PATCH accepts ONLY a
+	// top-level array -- with this, `PATCH /v1/nodes/<id>` carrying
+	// `[{"op":"replace","path":"/instance_info",...}]` returns 200 (#308).
+	//
+	// An EMPTY ARRAY is deliberately NOT treated like an empty map. `[]` is a well-formed no-op JSON Patch
+	// and must reach the server; `{}` is the assembled-but-unset body this code declines to send. Folding
+	// them together would make a legitimate no-op indistinguishable from "nothing to send".
+	//
+	// `default` still rejects genuinely wrong types, so this widens the accepted set by exactly one shape
+	// rather than removing the guard.
+	hasBody := false
+	switch b := opts.Body.(type) {
+	case nil:
+	case map[string]any:
+		hasBody = len(b) != 0
+	case []any:
+		hasBody = true
+	default:
 		return Response{}, fmt.Errorf("invalid body type: %T", opts.Body)
 	}
-	if len(m) != 0 {
+	if hasBody {
 		jsonBody, err := json.Marshal(opts.Body)
 		if err != nil {
 			return Response{}, err
@@ -597,11 +617,31 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 
 	headers := make(http.Header)
 	payload = nil
-	m, ok := opts.Body.(map[string]any)
-	if !ok && opts.Body != nil {
+	// A JSON Patch body is a top-level ARRAY, so a map-only type assertion rejected it.
+	//
+	// ApplyRequestTransform returns `any` and happily emits a slice, so a requestTransform producing
+	// RFC-6902 was reachable, documented, and non-functional: it died one layer later as
+	// `invalid body type: []interface {}`. Confirmed against a real Ironic, whose PATCH accepts ONLY a
+	// top-level array -- with this, `PATCH /v1/nodes/<id>` carrying
+	// `[{"op":"replace","path":"/instance_info",...}]` returns 200 (#308).
+	//
+	// An EMPTY ARRAY is deliberately NOT treated like an empty map. `[]` is a well-formed no-op JSON Patch
+	// and must reach the server; `{}` is the assembled-but-unset body this code declines to send. Folding
+	// them together would make a legitimate no-op indistinguishable from "nothing to send".
+	//
+	// `default` still rejects genuinely wrong types, so this widens the accepted set by exactly one shape
+	// rather than removing the guard.
+	hasBody := false
+	switch b := opts.Body.(type) {
+	case nil:
+	case map[string]any:
+		hasBody = len(b) != 0
+	case []any:
+		hasBody = true
+	default:
 		return Response{}, nil, fmt.Errorf("invalid body type: %T", opts.Body)
 	}
-	if len(m) != 0 {
+	if hasBody {
 		jsonBody, err := json.Marshal(opts.Body)
 		if err != nil {
 			return Response{}, nil, err
