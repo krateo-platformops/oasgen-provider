@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-29T18:45:00Z
+timestamp: 2026-10-30T10:30:00Z
 ---
 
 # Log
@@ -12,6 +12,145 @@ timestamp: 2026-10-29T18:45:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-30 — 0.42.0
+
+Eight changes. Nothing here can destroy infrastructure; the theme is that several signals were reporting
+something the code had never established, and consumers acted on them.
+
+### Ready did not mean "you can apply a CR of this kind"
+
+A RestDefinition reported `Ready=True` before the apiserver was serving the kinds it generates. The obvious
+workflow — **wait for Ready, then apply** — failed with `no matches for kind`, which is indistinguishable
+from a missing CRD.
+
+Measured on fresh clusters, twice: five RestDefinitions reported Ready at t+148s while five of the ten
+generated CRDs appeared at t+149s. Small window, reproducible, and far more expensive to diagnose than to
+hit — it took three rounds and a wrong hypothesis to localise, against a controller that was behaving
+correctly throughout.
+
+Nothing on the readiness path read a CRD. `deploy.Lookup` hashes the ConfigMap and fetches nothing else, and
+no `Established` condition was read anywhere in the provider.
+
+**The gate asks the RESTMapper, not the CRD object**, and that distinction is the fix rather than a detail. A
+CRD can exist and report `Established` while the specific **version** a CR will be written through is not
+served — and the two generated halves are served at *different* versions. `no matches for kind X in version
+V` names a version, and the RESTMapper is what produces it, so asking the component that rejects the apply
+is the only check that cannot disagree with it. A first attempt at this fix gated on `Established` and was
+withdrawn after a measurement showed `Established` **and** discoverable **and** the apply still failing.
+
+A `NoMatch` is an answer; discovery being unreachable is not. The latter returns an error and leaves the
+condition alone, because reporting `Creating` on every discovery hiccup would make a healthy install flap.
+
+### The generated API version is now in the default `kubectl get` output
+
+`kubectl get restdefinition` showed `NAME/READY/AGE`. The `API VERSION` column existed but was
+`priority=10`, so it appeared only under `-o wide`.
+
+The resource CRD's version derives from the OAS `info.version` (normalized by crdgen) while the
+Configuration CRD is always `v1alpha1` — so **the two halves one RestDefinition generates are served at
+different versions**, and an OAS declaring `info.version: "2.1"` yields `v2-1` for one and `v1alpha1` for the
+other. That split is not guessable.
+
+Three parties independently concluded the value was unpublished: a blueprint author hardcoded `v1alpha1` in
+seven examples, a consumer reimplemented crdgen's version normalizer in their own validator, and an issue
+was filed asking the provider to publish a field that already existed. **`.status.resource.apiVersion` and
+`.status.configuration.apiVersion` had carried it all along.** Nobody ran `kubectl get restdefinition -o
+yaml`.
+
+So this was a discoverability defect, not a missing capability, and a column fixes more than documentation
+would: it puts the answer in front of the reader at the moment they are asking. `CONFIGURATION` is added at
+`priority=10` as well, since the asymmetry is what causes the confusion. An empty value there means **no
+Configuration CRD was generated** — only `configurationFields` or security schemes produce one — rather than
+"unknown".
+
+### Request bodies are no longer sent chunked
+
+Every bodied request went out with `Transfer-Encoding: chunked`. The request is built as a struct literal,
+so `http.NewRequest`'s type assertion never runs — and `io.NopCloser` would defeat it anyway — leaving
+`ContentLength` at 0 with a non-nil body, which `net/http` reads as "length unknown".
+
+Chunked framing buys nothing for a body already fully buffered in memory, and some HTTP front ends refuse
+it. **Confirmed on real hardware**: against a lab Ironic, a power-on `PUT` went from `400 "Missing mandatory
+parameter: target"` to `202 Accepted` on identical bytes through the same relay, and a provision transition
+moved a physical blade from `manageable` to `available`.
+
+Worth recording what this is *not*: it was first reported as the cause of those 400s, then a control — same
+client, same framing, same relay, different server — showed a local Ironic parsing the identical chunked
+body. So chunked bodies are readable as sent, and that lab's front end is what could not read them. The fix
+removes an unnecessary framing layer and a legitimate reason for a front end to refuse us; it is not a
+server-side bug fix, and nobody should expect it to resolve a specific 400.
+
+**Upgrade note.** This fixes the *cause* of an interrupted create but does not clear what one leaves behind.
+A resource that failed this way keeps `krateo.io/external-create-pending`, and in unstructured-runtime up to
+v1.6.1 that marker triggers a separate wedge whose own recovery `Update` conflicts with the status write its
+own `Observe` just performed — measured at 51 consecutive failures and 0 recoveries over 20 minutes. After
+upgrading, check for leftover markers:
+
+```sh
+kubectl get <kind> -A -o json | jq -r '
+  .items[] | select(.metadata.annotations["krateo.io/external-create-pending"])
+  | "\(.metadata.namespace)/\(.metadata.name)"'
+```
+
+Anything listed needs unstructured-runtime v1.7.1 to recover. The symptom otherwise surfaces two layers away
+as an application error that never mentions annotations.
+
+### A request body's media type is resolved instead of assumed
+
+The request-body schema was looked up as `application/json` and nothing else. A document declaring
+`application/json-patch+json`, or any other single media type, lost its body schema entirely — and the
+request was still **sent**, built from no schema, with `compareScope: updatable` degraded. A vendor's 415
+would have been legible; this was not.
+
+The media type is now resolved: `application/json` when present with a schema, a single declared entry
+otherwise, and an error naming the candidates when the document is genuinely ambiguous. A body with no
+schema at all returns empty rather than erroring — an earlier version of this change was too strict and an
+existing test caught it.
+
+### Create refuses to run for an object that is being deleted
+
+`Create` could issue an external create for a CR whose `deletionTimestamp` was already set, producing an
+external resource that nothing would ever reconcile or remove once the delete completed.
+
+### Three signals that reported something the code never established
+
+**A delete with no `delete` verb logged at ERROR.** A RestDefinition declaring no delete verb is a
+supported shape — a kind whose external resource is deliberately not removed by Krateo — and that branch
+logged an error on its own success path. A session migrating 17 live `PullRequest` records against a real
+GitHub organisation would have seen 17 ERROR lines at exactly the moment an operator's correct instinct is
+to stop at the first error; they had to be warned in advance to ignore them. Now Info, naming the
+deliberate consequence.
+
+**A node-disk failure was reported inside a ConfigMap sentence.** A full node disk produced `fetching OAS
+document "configmap://…": failed to create directory: no space left on device`. Every frame was true, but
+the only identifier was a ConfigMap path while the failure was the node's filesystem, so the reader checked
+all twelve ConfigMaps before reading to the end of the line. The inner error now names the subsystem.
+
+**snowplow's failed-stage header was discarded.** `Resolve` read the response and threw away every header,
+including `X-Snowplow-Stage-Outcomes`. snowplow answers 200 whether or not a stage failed, so a RESTAction
+whose teardown stage **failed** was indistinguishable from one that succeeded. The value now reaches the
+caller, with the observe path warned separately because a partial `.status` feeds both the existence and the
+drift predicates — it can create a resource that already exists, or report drift forever.
+
+One thing that does **not** follow from this: the header lists only *failed* stages, so empty means "nothing
+reported a failure", not "work was done". A stage that ran, fetched and iterated over **zero items**
+succeeds and appears nowhere in it. That was the real shape of a delete campaign where snowplow returned
+200, outcomes were `[]`, the controller logged a successful dispatch, and only a verification GET knew the
+resource was still there.
+
+### An optional node-local OTLP endpoint for the generated controllers
+
+`rdc.otel.nodeLocalEndpoint`, default false. When enabled, the generated controllers send OTLP to a
+collector on their own node via `HOST_IP` rather than to a cluster-wide service.
+
+### Documentation
+
+A migration guide for installs made before 0.20.0, when the rest-dynamic-controller was a separate
+repository and chart. Also corrections to the 0.41.0 entry: the image-size figures now say which is
+compressed and which is on-disk — 33.9 MB over the wire against 117 MB unpacked, where the earlier text
+quoted one number for both questions — and the orphan-delete precondition is quantified from the 400-trial
+measurement rather than described.
 
 ## 2026-10-29 — 0.41.0
 
