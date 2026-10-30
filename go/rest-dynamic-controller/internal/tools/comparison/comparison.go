@@ -81,6 +81,44 @@ func childPath(path []string, seg string) []string {
 }
 
 func CompareExisting(mg map[string]interface{}, rm map[string]interface{}, path ...string) (ComparisonResult, error) {
+	// A populated CR object against an EMPTY remote object is a difference, not an absence.
+	//
+	// Without this, the loop below looks up every one of mg's keys in an empty rm, finds none of them,
+	// skips them all by the absent-key rule, and returns equal. Measured against a real Ironic: the node
+	// answered `"instance_info": {}` while the CR carried instance_info.image_source and image_checksum,
+	// so no drift was reported, no PATCH was issued, and the resource went Synced=True having NEVER had
+	// its desired state applied. It surfaced two layers away as a deploy rejected for
+	// `Missing are: ['instance_info.image_source']` -- an application error that reads like a chart bug.
+	//
+	// This is the map-shaped twin of the slice defect fixed in #76, and compareSlices has compared lengths
+	// ever since for the same reason: present-and-empty is the user declaring the thing empty, not
+	// declining to have an opinion. The map branch never got the same treatment.
+	//
+	// AT THE FUNCTION ENTRY, deliberately, not before each recursive call. There are three call sites --
+	// the external entry from the observe comparison, the nested-map branch, and the map-element-inside-a-
+	// slice branch -- and a guard repeated at each one would reproduce the exact asymmetry that caused
+	// this bug: a rule applied in one branch and forgotten in another. Here a fourth caller is safe by
+	// construction.
+	//
+	// ONE-DIRECTIONAL. Empty-vs-empty is equal, and an EMPTY CR object against a populated remote stays
+	// equal: a map key may legitimately be absent upstream, so CR-side `{}` is not the assertion that
+	// CR-side `[]` is for a list.
+	//
+	// It does not disturb the absent-key rule below, which #309's remedy depends on: a responseTransform
+	// that DELETES a masked field makes the key absent, not empty, and absent is still skipped. The two
+	// compose -- deliberately unobservable stays silent, observably-empty now speaks.
+	if len(mg) > 0 && len(rm) == 0 {
+		return ComparisonResult{
+			IsEqual: false,
+			Reason: &Reason{
+				Reason:      "object is set in the custom resource but empty on the remote",
+				FirstValue:  mg,
+				SecondValue: rm,
+				Path:        path,
+			},
+		}, nil
+	}
+
 	// Iterate over keys in the first map (mg, representing the CR on the cluster) in SORTED order.
 	//
 	// The order is load-bearing, not tidiness. This function returns on the FIRST difference it finds, so
