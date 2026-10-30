@@ -17,6 +17,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/krateo-platformops/plumbing/env"
 	"github.com/krateo-platformops/plumbing/kubeutil/dynamicwatch"
@@ -565,6 +566,36 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	err = manageFinalizers(ctx, e.kube, cr, e.log.Debug)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("managing finalizers: %w", err)
+	}
+
+	// Ready must mean "you can apply a CR of this kind". Nothing above establishes that.
+	//
+	// Everything checked so far is about the RENDER and the controller: the Deployment is ready, the
+	// ConfigMap digest matches, finalizers are managed. deploy.Lookup hashes the ConfigMap and fetches
+	// nothing else -- no CRD is read anywhere on this path. So Available() used to be set while the
+	// apiserver was not yet serving the generated kind, and "wait for Ready, then apply" failed with
+	// `no matches for kind`, which is indistinguishable from a missing CRD (#314).
+	//
+	// Measured on a fresh cluster before this guard: five RestDefinitions reported Ready at t+148s while
+	// five of the ten generated CRDs appeared at t+149s. Small window, reproducible, and the failure it
+	// produces costs far more to diagnose than it does to hit.
+	if served, pending, serr := e.generatedKindsServed(ctx, cr); serr != nil {
+		// Could not determine servability. NOT the same as "not served": claiming Available here would be
+		// the guess, and claiming Creating would hide a working install behind a transient API error. Return
+		// the error so the reconcile retries and the condition is left as it was.
+		return reconciler.ExternalObservation{}, fmt.Errorf("checking whether the generated kinds are served: %w", serr)
+	} else if !served {
+		e.log.Debug("Generated kind not yet served by the apiserver; holding Creating",
+			"name", cr.Name, "pending", pending)
+		cr.SetConditions(rtv1.Creating().WithMessage(
+			fmt.Sprintf("the generated CRD is applied but the apiserver is not serving %s yet", pending)))
+		// UpToDate so the runtime waits in the observe path: there is nothing for Update to fix, the
+		// apiserver simply has not finished. Reporting drift here would send Update to re-render a CRD that
+		// is already correct.
+		return reconciler.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: true,
+		}, nil
 	}
 
 	cr.SetConditions(rtv1.Available())
@@ -1626,4 +1657,61 @@ func (e *external) persistStatusWithRetry(ctx context.Context, cr *definitionv1a
 
 	mutate(cr)
 	return nil
+}
+
+// generatedKindsServed reports whether the apiserver is actually serving the kinds this RestDefinition
+// generated. It returns the first kind that is not yet served, for the condition message.
+//
+// It asks the RESTMapper, not the CRD object, deliberately. A CRD can exist and report Established while the
+// specific VERSION a CR will be written through is not served -- the two generated halves are served at
+// DIFFERENT versions (the resource half derives from the OAS info.version, the Configuration half is always
+// DefaultVersion), so "the CRD is Established" is not the question. `no matches for kind X in version V`
+// names a version, and the RESTMapper is what produces it; asking the same component that rejects the apply
+// is the only check that cannot disagree with it.
+//
+// The mapper is controller-runtime's default dynamic mapper, which reloads on a miss rather than caching a
+// negative forever, so a kind that becomes served is picked up on a subsequent pass.
+//
+// Both GVKs come from cr.Status, which Create/Update already populate from the same TargetGVK and
+// getConfigurationGVK used to render the CRDs. Re-deriving them here would be a second source of truth for a
+// value the object already carries -- and an empty Status.Configuration.APIVersion is MEANINGFUL: it means no
+// Configuration CRD was generated (only configurationFields or security schemes produce one), so it must be
+// skipped rather than treated as unknown.
+func (e *external) generatedKindsServed(ctx context.Context, cr *definitionv1alpha1.RestDefinition) (served bool, pending string, err error) {
+	type half struct {
+		label string
+		kav   definitionv1alpha1.KindApiVersion
+	}
+	halves := []half{
+		{label: "resource", kav: cr.Status.Resource},
+		{label: "configuration", kav: cr.Status.Configuration},
+	}
+
+	mapper := e.kube.RESTMapper()
+	for _, h := range halves {
+		// Not yet recorded (first Create has not stored it) or not generated at all. Either way there is
+		// nothing to check for this half.
+		if h.kav.APIVersion == "" || h.kav.Kind == "" {
+			continue
+		}
+		gv, perr := schema.ParseGroupVersion(h.kav.APIVersion)
+		if perr != nil {
+			// A status we wrote ourselves should always parse. If it does not, say so rather than treat the
+			// half as served.
+			return false, "", fmt.Errorf("parsing status.%s.apiVersion %q: %w", h.label, h.kav.APIVersion, perr)
+		}
+		gvk := gv.WithKind(h.kav.Kind)
+
+		if _, merr := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); merr != nil {
+			if apimeta.IsNoMatchError(merr) {
+				// Definitely not served yet. This is the one case that is an answer rather than a failure.
+				return false, gvk.String(), nil
+			}
+			// Anything else -- discovery unreachable, an unhealthy aggregated APIService, a timeout -- is
+			// "could not look", not "not served". Returning false here would report Creating on a healthy
+			// install every time discovery hiccuped.
+			return false, "", fmt.Errorf("resolving %s: %w", gvk.String(), merr)
+		}
+	}
+	return true, "", nil
 }

@@ -27,10 +27,13 @@ spec:
       type: date
     - jsonPath: .status.resource.apiVersion
       name: API VERSION
-      priority: 10
       type: string
     - jsonPath: .status.resource.kind
       name: KIND
+      priority: 10
+      type: string
+    - jsonPath: .status.configuration.apiVersion
+      name: CONFIGURATION
       priority: 10
       type: string
     - jsonPath: .status.oasPath
