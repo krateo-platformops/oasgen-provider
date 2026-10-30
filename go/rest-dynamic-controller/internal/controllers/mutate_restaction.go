@@ -37,7 +37,7 @@ func (h *handler) mutateViaRestAction(ctx context.Context, mg *unstructured.Unst
 	// locating a resource on a parent-scoped API needs spec fields that are not identifiers (issue #41).
 	writesDesiredState := strings.EqualFold(action, "create") || strings.EqualFold(action, "update")
 	extras := buildExtras(mg, ref.Extras, identifiers)
-	result, err := h.snowplowClient.Resolve(ctx, snowplow.ApiRef{Name: ref.Name, Namespace: ref.Namespace}, extras)
+	result, failedStages, err := h.snowplowClient.Resolve(ctx, snowplow.ApiRef{Name: ref.Name, Namespace: ref.Namespace}, extras)
 	if err != nil {
 		return fmt.Errorf("resolving %s RESTAction %s/%s: %w", action, ref.Namespace, ref.Name, err)
 	}
@@ -46,6 +46,15 @@ func (h *handler) mutateViaRestAction(ctx context.Context, mg *unstructured.Unst
 		if werr := writeObservedStatus(mg, result); werr != nil {
 			return werr
 		}
+	}
+	// snowplow answers 200 even when a stage failed, so without this the only record of a failed teardown or
+	// create stage was discarded with the response headers (#292). Warn rather than error: the stage result
+	// does not decide the outcome -- for delete, the verification GET governs, and for create the next
+	// Observe does -- but an operator reading why a resource did not change needs to see it.
+	if failedStages != "" {
+		log.Warn("RESTAction reported one or more FAILED stages; the external resource may not have been changed",
+			"action", action, "restAction", ref.Namespace+"/"+ref.Name,
+			"kind", mg.GetKind(), "failedStages", failedStages)
 	}
 	log.Debug("Mutated via RESTAction", "action", action, "restAction", ref.Namespace+"/"+ref.Name)
 	return nil

@@ -41,10 +41,26 @@ func (h *handler) observeViaRestAction(ctx context.Context, mg *unstructured.Uns
 	}
 
 	extras := buildExtras(mg, ref.Extras, identifiers)
-	result, err := h.snowplowClient.Resolve(ctx, snowplow.ApiRef{Name: ref.Name, Namespace: ref.Namespace}, extras)
+	result, failedStages, err := h.snowplowClient.Resolve(ctx, snowplow.ApiRef{Name: ref.Name, Namespace: ref.Namespace}, extras)
 	if err != nil {
 		log.Error(err, "Resolving observe RESTAction", "restAction", ref.Namespace+"/"+ref.Name)
 		return controller.ExternalObservation{}, true, fmt.Errorf("resolving observe RESTAction %s/%s: %w", ref.Namespace, ref.Name, err)
+	}
+
+	// A failed OBSERVE stage is more insidious than a failed write stage, so it gets its own message rather
+	// than sharing the mutate path's wording.
+	//
+	// snowplow still answers 200 and still composes a .status -- just one missing whatever the failed stage
+	// would have contributed. That partial status then feeds BOTH predicates below: a notFoundExpr can read
+	// a missing field as "absent" and trigger a create for a resource that exists, and the drift comparison
+	// can read it as a difference and update forever (the #309 shape). Neither failure mentions snowplow.
+	//
+	// Not an error: a partial observation is still the best information available, and erroring here would
+	// wedge the resource on a transient stage failure. But it must be visible, because every symptom it
+	// causes appears somewhere else (#292).
+	if failedStages != "" {
+		log.Warn("Observe RESTAction reported one or more FAILED stages; the composed status may be INCOMPLETE, which can present as spurious drift or as a missing resource",
+			"restAction", ref.Namespace+"/"+ref.Name, "kind", mg.GetKind(), "failedStages", failedStages)
 	}
 
 	// The existence / drift predicates evaluate against {spec, status}, where status is the composed result.

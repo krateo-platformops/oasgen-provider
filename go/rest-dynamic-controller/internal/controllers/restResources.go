@@ -1228,7 +1228,16 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		return err
 	}
 	if apiCall == nil || callInfo == nil {
-		log.Error(fmt.Errorf("API action delete not found"), "action", apiaction.Delete)
+		// A RestDefinition that declares no delete verb is a legitimate, supported shape: a kind whose
+		// external resource is deliberately NOT removed by Krateo. This branch IS that outcome -- the
+		// finalizer is released and the external resource is left alone on purpose -- so it is logged at
+		// Info, naming the deliberate consequence.
+		//
+		// It used to log at ERROR ("API action delete not found") on this same path. An operator deleting a
+		// batch of such CRs saw one ERROR line per resource at exactly the moment their correct instinct was
+		// to stop at the first error, and had to be told in advance to ignore them (#291).
+		log.Info("No delete verb is declared for this kind, so the external resource is intentionally left in place; releasing the finalizer",
+			"kind", mg.GetKind(), "action", apiaction.Delete)
 		if derr := h.deleteSecretRefRBAC(ctx, mg); derr != nil {
 			log.Warn("secretRef RBAC teardown failed, continuing", "error", derr)
 		}
