@@ -82,15 +82,39 @@ func TestMappedPathParamIsNotDemandedOfTheAuthor(t *testing.T) {
 		assert.Contains(t, req, "flavor", "an unrelated required body field must stay required")
 	})
 
-	t.Run("mapped from spec at another path: also absent", func(t *testing.T) {
+	t.Run("mapped from spec at another path: flat field absent, SOURCE field intact", func(t *testing.T) {
 		// The keypair shape: inCustomResource points INTO spec, so the value is author-supplied -- just not
 		// at the flat name. The flat duplicate is redundant rather than unsatisfiable, but still wrong.
+		//
+		// The last two assertions document an INVARIANT; they are not a discriminating test, and saying so
+		// matters more than having them.
+		//
+		// The worry they were added for -- raised by the openstack-nova-operator-kog session, who fixed a
+		// three-way verdict before their run rather than pass/fail -- was a fix that over-suppressed: one
+		// dropping any property whose name appears anywhere in a mapping's path, which would delete `flavor`
+		// too, since the mapping reads `spec.flavor.id`. That would remove the author's ACTUAL input field
+		// while still making the flat `id` absent, so it passes a "flat field is gone" check AND a
+		// server-side dry-run: the CR validates, it just can no longer express anything.
+		//
+		// I mutated for it. The mutation COMPILED and was NOT caught, and the reason is structural:
+		// mappingSupplied is consulted only inside addParametersToSpec, which iterates PARAMETERS, while
+		// `flavor` is a request-BODY property that suppression never examines. The feared failure mode
+		// cannot occur in this arrangement, so these assertions cannot fail -- they pin the boundary rather
+		// than guard a reachable bug.
+		//
+		// Kept deliberately, because the boundary is the thing worth pinning: if suppression ever moves
+		// somewhere that also sees body properties, they stop being vacuous and start being the test that
+		// catches it.
 		req, props := specFor(t, doc, nil, []Verb{
 			flavorCreate,
 			flavorGetWith(FieldMappingEntry{InPath: "id", InCustomResource: "spec.flavor.id"}),
 		})
 		assert.NotContains(t, req, "id")
 		assert.False(t, props["id"], "the author already supplies this at spec.flavor.id; a second flat field is a duplicate")
+		assert.True(t, props["flavor"],
+			"the mapping's SOURCE field must survive: suppressing it would delete the author's only way to supply the value")
+		assert.Contains(t, req, "flavor",
+			"and it must stay required, because the request body requires it independently of any mapping")
 	})
 
 	t.Run("NOT mapped: the parameter stays required and present", func(t *testing.T) {
