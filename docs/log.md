@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-30T10:30:00Z
+timestamp: 2026-10-30T13:40:00Z
 ---
 
 # Log
@@ -12,6 +12,90 @@ timestamp: 2026-10-30T10:30:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-30 — 0.43.0
+
+Three changes, all found by installing the previous release against real infrastructure rather than by
+review. Each was in a code path that looked correct until something ran against it, and each reported
+success while doing less than asked.
+
+### Four of five resources in a real blueprint were uncreatable
+
+`addParametersToSpec` made every path parameter a **required** top-level spec field named after the
+*parameter*, and nothing consulted `requestFieldMapping`.
+
+A definition mapping `{id}` from `status.flavor.id` is correct modelling: the vendor assigns the id at
+create and the controller reads it back for get and delete. But the generated CRD required `spec.id`, and
+**an author cannot supply a value that does not exist yet.** Measured on generated CRDs, five for five:
+
+```
+ComputeFlavor      invalid: spec.id: Required value
+ComputeKeypair     invalid: spec.name: Required value
+ComputeServerGroup invalid: spec.id: Required value
+ComputeAggregate   invalid: spec.id: Required value
+Instance           invalid: spec.id: Required value
+```
+
+The rule already existed. **0.38.0** established it for resolver-supplied *body* fields — *"requiring
+it forces the author to write a value that is then overwritten"* — **eleven lines above this defect**, and
+it was never extended to parameters.
+
+A mapped parameter is now **absent from spec entirely**, not merely un-required. An optional `spec.id` that
+nothing reads is worse than a hard error: the request takes the mapped value, so an author who set it would
+be silently ignored. It is also kept out of the list that protects a field from `excludedSpecFields`
+pruning, which exists on the grounds that *"dropping one leaves a kind that cannot build its own URL"* —
+false once a mapping supplies it.
+
+The cross-document parameter-conflict check still runs for a suppressed parameter. A mapped parameter is
+still **sent**; only its source changes, so two verbs sourcing it from documents whose schemas disagree
+remains an authoring error. The first version of this fix skipped that bookkeeping and would have switched
+the check off for precisely the parameters it touches.
+
+### A populated spec object compared EQUAL to an empty remote object
+
+`CompareExisting` skips a key the response does not hold — correct, and the mechanism a `responseTransform`
+relies on when it deletes a field an API masks. But the map branch recursed **without comparing sizes**, so
+when the response held a parent as `{}`, every child key was looked up in an empty map, found absent,
+skipped by that rule, and the result was **equal**.
+
+Measured against a real Ironic: the node answered `"instance_info": {}` while the CR carried
+`instance_info.image_source` and `image_checksum`. No drift, no PATCH, **`Synced=True` having never applied
+the desired state.** It surfaced two layers away as a deploy rejected for a missing image field — an
+application error that reads like a chart bug and says nothing about comparison.
+
+This is the map-shaped twin of a slice defect fixed earlier; `compareSlices` has compared lengths ever
+since, for the same reason: **present-and-empty is the author declaring the thing empty, not declining to
+have an opinion.**
+
+The guard is at the function entry rather than before each recursive call. There are three call sites, and
+a guard repeated at each would reproduce the exact asymmetry that caused the bug — a rule applied in one
+branch and forgotten in another. At the entry a future fourth caller is safe by construction.
+
+It composes with the masked-field remedy rather than conflicting: a transform that **deletes** a key makes
+it *absent*, not *empty*, and absent is still skipped. Deliberately unobservable stays silent;
+observably-empty now speaks. There is an explicit test for that, because if it regresses every
+`responseTransform` using `del()` starts drifting forever.
+
+### A JSON Patch body could not be sent
+
+Both request-building sites asserted the body was a `map[string]any` and errored otherwise, while
+`ApplyRequestTransform` returns `any` and happily emits a slice. **So a `requestTransform` producing
+RFC-6902 was reachable, documented, and non-functional** — it died one layer later as
+`invalid body type: []interface {}`.
+
+Confirmed against a real Ironic, whose PATCH accepts only a top-level array: `PATCH /v1/nodes/<id>` with a
+559-byte patch array now returns 200.
+
+An **empty array is deliberately not treated like an empty object**. `[]` is a well-formed no-op patch and
+must reach the server; `{}` is the assembled-but-unset body this code declines to send. Folding them
+together would make a legitimate no-op indistinguishable from "nothing to send".
+
+### Why these three are one release
+
+The first makes a resource creatable; the second makes drift detectable; the third makes the resulting
+write sendable. A node whose `instance_info` existed as `{}` upstream needed all three: without the second
+no PATCH was issued, without the third the patch could not be built, and without the first the kind could
+not be created at all.
 
 ## 2026-10-30 — 0.42.0
 
