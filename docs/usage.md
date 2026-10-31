@@ -216,6 +216,59 @@ If an action genuinely has no observable result — nothing the API will tell yo
 differs from before — then it cannot be modelled here, and declaring it anyway produces the loop
 above. Say so in your blueprint rather than writing a `findby` that never matches.
 
+### An enveloped API: declare the unwrapped body and wrap on the wire
+
+Some API families wrap every body in both directions — Zendesk sends and returns
+`{"ticket": {…}}`, `{"group": {…}}`, and so on for every resource. **Declaring that envelope in the
+OpenAPI document looks like it works and silently does the wrong thing.**
+
+The body's field list comes from the **top-level properties only**:
+
+```go
+// clienttools.go, RequestedBody
+for sch := schema.Properties.First(); sch != nil; sch = sch.Next() {
+    bodyParams.Add(sch.Key())
+}
+```
+
+So an envelope-declaring document yields a body of exactly one field, `{"ticket"}`, and everything
+under `spec.ticket` is passed through **unfiltered**. The visible result is a working create. The
+invisible one is that write-only fields travel too — a Zendesk `comment`, for instance, is re-posted
+on **every drift-triggered PATCH**, adding a comment to the ticket each time. Nothing errors.
+
+**Declare the unwrapped body and move the envelope into the transforms:**
+
+```yaml
+# on create and update
+requestTransform:  { inline: '{ticket: .}' }
+# on create, get and update
+responseTransform: { inline: '.ticket' }
+# none on delete -- there is no body in either direction
+```
+
+This is the intended mechanism rather than a workaround, and the code says so — `builder.go` on
+`RequestTransform`:
+
+> this verb's whole-document jq program for the outgoing body […] applied by
+> `fieldmapping.ApplyRequestTransform`, **after the body is assembled** and immediately before the call.
+
+So the field filtering still happens on the real fields and only the finished body is wrapped. The
+`github-provider-kog` blueprint is reported to use this same shape for `PullRequest` and `GitRef`; that
+is a separate repository and not verified here.
+
+#### The cost, stated plainly
+
+> the assets describe the CR shape, not the wire shape
+
+That inverts the premise the provider is built on. An OpenAPI document is supposed to describe the
+**vendor's API**, so one edited to remove envelopes is no longer a vendor artifact you can refresh from
+upstream — the envelope knowledge now lives in a hand-maintained asset that a human has to keep in step
+with the vendor. For an API family where *every* resource is enveloped, that cost is paid per resource.
+
+Keep the envelope in the `requestTransform`/`responseTransform` pair rather than anywhere else: those
+two lines are the entire diff from the vendor's own shape, so when the upstream document is refreshed,
+re-applying them is a mechanical step rather than an audit.
+
 ## Local render (no cluster)
 
 The chart working tree carries CI placeholders (`version: CHART_VERSION`,
