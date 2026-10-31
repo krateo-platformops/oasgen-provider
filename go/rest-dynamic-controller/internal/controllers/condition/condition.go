@@ -63,6 +63,29 @@ func Pending() metav1.Condition {
 	}
 }
 
+// PendingReferent returns the SAME condition as Pending, with a message naming what the resource is
+// waiting for.
+//
+// Identical Type, Status and Reason, deliberately. `IsConditionSet` compares those three and NOT the
+// message, so the `notfound && IsConditionSet(mg, Pending())` guard in Observe keeps matching and no
+// control flow changes -- this adds information to the CR and nothing else. A distinct Reason would stop
+// that guard matching and silently turn a waiting resource into one reported as not existing, which is a
+// behaviour change masquerading as a diagnostic improvement.
+//
+// It exists because `Pending` alone cannot be acted on (#323). Four code paths set it, and two of them are
+// not async at all: a dependentLookup whose referent is missing sets Pending with NO operation handle, so
+// nothing in the async machinery will ever move it off. If that referent never appears -- a typo in a
+// lookup, a CR nobody created -- the resource waits forever, correctly reporting Ready=False/Pending, and
+// an operator cannot tell it apart from an async create that is thirty seconds in and about to succeed.
+//
+// The detail is already structured where it is produced: errLookupReferentMissing names the lookup and the
+// value it was matching. It reached only a Debug log, which is off by default.
+func PendingReferent(detail string) metav1.Condition {
+	c := Pending()
+	c.Message = detail
+	return c
+}
+
 // Updating returns a condition indicating that an update has been issued and its effect is not yet
 // observed. Not Ready: the resource is known to differ from its spec, and whether the update fixed that is
 // exactly what the next observe decides.
