@@ -93,12 +93,23 @@ func statusCodeError(code int, snippet string) error {
 // the entire explanation for a 34-minute investigation, and it existed in the response the controller was
 // holding when it threw it away (#334).
 //
-// IT GOES IN THE ERROR, NOT IN A CONDITION. A condition is readable by anyone with `get` on the CR, while an
-// error reaches logs and events, which are operator-only. A vendor error body is attacker-influenced text
-// that may echo submitted content, so moving it into an API object is a separate decision with a wider
-// blast radius; this repo already strips the request URL out of transport errors for the same reason. The
-// body is already in hand -- today it is thrown away rather than withheld, and reading it changes nothing
-// about who can see what.
+// CORRECTION (2026-10-31): the paragraph that stood here claimed this body goes "in the error, not in a
+// condition", on the reasoning that errors reach only logs and events while conditions are readable by
+// anyone with `get` on the CR. THAT REASONING IS WRONG IN THIS ARCHITECTURE, and it was wrong when it was
+// written:
+//
+//	func ReconcileError(err error) metav1.Condition { ... Message: err.Error() ... }
+//
+// The runtime turns EVERY error a handler returns into the Synced condition's message. So this snippet has
+// been CR-visible since the moment it was added, on every failed create, update and delete -- and the
+// distinction the comment drew does not exist. (It is not new exposure that #334 introduced: returned
+// errors became condition messages long before it. What #334 changed is how much vendor text travels that
+// path.)
+//
+// The underlying caution still stands on its own merits: a vendor error body is attacker-influenced text
+// that may echo submitted content, and it now lands in an API object readable with `get`. That is a real
+// consideration and it deserves a real decision rather than a comment asserting it has been avoided. What
+// is NOT true is that keeping the body out of a hand-built condition keeps it off the CR.
 //
 // NO PATTERN-BASED REDACTION, deliberately. A redactor that misses is worse than none: it invites the
 // assumption that what got through is safe.

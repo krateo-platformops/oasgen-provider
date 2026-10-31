@@ -109,6 +109,19 @@ func (h *handler) resolveDeleteOutcome(ctx context.Context, cs *clientSet, clien
 		log.Debug("External resource still present after delete; holding finalizer")
 		// Phrasing is load-bearing: DeleteHoldsFinalizerWhileResourceLingers asserts on "still present"
 		// so it cannot pass on an unrelated error, which is how an earlier delete test passed vacuously.
+		//
+		// deleteErr is WRAPPED rather than dropped. This branch is the most informative combination
+		// available -- the vendor refused the delete AND the get verb confirms the resource is still
+		// there -- and it was the one that discarded the vendor's reason. A consumer watching six CRs
+		// sit in Terminating, each retrying a DELETE their API refuses because the node is in an active
+		// state, read only "still present; retrying": true, and useless for deciding what to do.
+		//
+		// Same defect as #334, in the one place #334 did not reach: the explanation was in hand and
+		// thrown away rather than withheld. %w keeps the error's identity, so restclient.HasStatusErr
+		// and IsNotFoundError still see through it.
+		if deleteErr != nil {
+			return fmt.Errorf("delete of %s did not remove the external resource, which is still present; retrying: %w", mg.GetName(), deleteErr)
+		}
 		return fmt.Errorf("delete of %s did not remove the external resource, which is still present; retrying", mg.GetName())
 	}
 
