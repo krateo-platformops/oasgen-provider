@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-31T12:55:00Z
+timestamp: 2026-10-31T16:05:00Z
 ---
 
 # Log
@@ -12,6 +12,61 @@ timestamp: 2026-10-31T12:55:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-31 — 0.45.0
+
+Three changes, all of which only matter when something else goes wrong. Cut because a consumer is blocked on
+the first of them.
+
+### unstructured-runtime moves to v1.7.1, for the create-recovery conflict retry
+
+0.44.0 still pinned v1.6.1 and had done since 0.41.0. v1.7.1 re-fetches inside `retry.RetryOnConflict`
+instead of issuing a bare `Update` against a stale object.
+
+**0.44.0's own fix already removed the cause** — RDC implements the runtime's read-only existence check, so
+recovery no longer falls through to a status-writing `Observe` and there is nothing to conflict with. v1.7.1
+covers conflicts RDC does **not** cause: another writer, a concurrent reconcile. The two are complementary,
+and treating the first as making the second optional is what left the pin behind for four releases.
+
+**The reason this is a release rather than a tidy-up** came from the consumer who asked whether 0.44.0 was a
+superset of their local patch builds. It was not, and their argument for waiting is better than the one for
+shipping without it:
+
+> On 0.44.0 without v1.7.1, a wedge has two candidate causes and I couldn't tell them apart; I'd be handing
+> you an ambiguous number. With v1.7.1 in, a wedge means the conflict has a second source.
+
+A measurement whose failure mode has two indistinguishable explanations is worth less than no measurement,
+because it invites a conclusion. The pin exists so their test can mean something.
+
+Verified by content rather than by version number: `RetryOnConflict` present, `ExistenceChecker` still
+exported so 0.44.0's implementation still binds, and the `"Cannot reconcile external-create annotations"`
+log string kept **verbatim** — it is what that consumer grepped to measure 51 consecutive failures, and is
+likely on a dashboard somewhere.
+
+### `go mod download` is retried in both Dockerfiles
+
+`proxy.golang.org` failed transiently three times in this repo on 2026-10-30 — `golang.org/x/text` on a docs
+PR, `krateo-platformops/plumbing` in **0.43.0's image build**, and `go.opentelemetry.io/otel` in a test job.
+Each needed a manual re-run, and the plumbing one left 0.43.0 with its images unpushed, its charts correctly
+withheld by the pipeline's own guard, and the installer's pin gate refusing the tag.
+
+The shared workflows now retry this, but only in GitHub Actions steps. A Dockerfile `RUN` is outside that,
+so the image build — the longest job in the release — was the one place still unprotected.
+
+**The retry here is deliberately blind, where the shared action's is deliberately selective.** That action
+retries only transient network errors so a missing module or checksum mismatch still fails first attempt and
+the pin gate keeps its meaning. A Dockerfile has no gate to weaken: the build either produces a binary from
+the modules `go.sum` names, or it fails three times in a few seconds with the real error surfacing.
+
+### A correction to 0.44.0's tag message
+
+That tag claims the check-runs at its commit were verified green. **They had not been looked at** — pushing
+a tag triggers a fresh run set, so 16 were still running at the time. The content verification in the same
+sentence was real; one clause was verified and the other aspirational, joined by "and".
+
+A tag message cannot be amended without force-pushing it, so the correction lives in this log — see the note
+at the head of the 0.44.0 section. The verification was performed afterwards and nothing had failed, but
+that was established after the claim rather than before it.
 
 ## 2026-10-31 — 0.44.0
 
