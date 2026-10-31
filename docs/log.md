@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-30T13:40:00Z
+timestamp: 2026-10-31T12:55:00Z
 ---
 
 # Log
@@ -12,6 +12,106 @@ timestamp: 2026-10-30T13:40:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-31 — 0.44.0
+
+Eight changes. Two silently dropped data that an author had explicitly supplied, and both were found by
+running the previous release against real infrastructure rather than by review.
+
+### Every `configurationFields` header and cookie was silently discarded
+
+oasgen keys the generated Configuration schema by the OpenAPI parameter **location**, which the
+specification defines as singular — `path`, `query`, `header`, `cookie`. RDC read `"headers"` and
+`"cookies"`. `path` and `query` worked only because OpenAPI's singular happens to match what the consumer
+asked for.
+
+So a `configurationFields` entry for a header or cookie was generated into the Configuration CRD, accepted
+by the apiserver, set by the author — and **never sent**.
+
+**Both repos' test suites were green while contradicting each other.** oasgen's asserted it *emits*
+`header`; RDC's fixtures asserted it *reads* `headers`. Neither suite was wrong about its own side; nothing
+had ever compared the producer's output to the consumer's expectation. Every other defect in this release
+had one side untested — this one had both sides tested, which is why it survived.
+
+Measured consequence, on physical hardware: an Ironic microversion declared this way was dropped, so Ironic
+negotiated its **minimum** (1.1), every port create answered 406, the node ended up with no port, and the
+deploy failed with *"does not have any port associated with it"* — **three layers from the cause, naming a
+missing port rather than a dropped header.**
+
+Nothing could have depended on the plural form: the generated CRD declares `header`, so a CR written with
+`headers:` is rejected as an unknown field. The feature was not unused, it was **unusable** — which is also
+why the fix cannot regress anything.
+
+### Create-recovery no longer wedges on a status write
+
+Incomplete-create recovery fell through to `Observe`, which calls `tools.Update` on its first statement and
+writes the status subresource further down. That bumped the object's `resourceVersion`, so recovery's own
+bare `Update` conflicted **on every pass** and `krateo.io/external-create-pending` was never reconciled.
+Measured at **51 consecutive failures and 0 recoveries** over 20 minutes on one baremetal node, with the
+damage surfacing two layers away as a deploy rejected for a field the spec never got to push.
+
+RDC now implements the runtime's read-only existence check, so recovery never reaches a status-writing
+method. Paired with unstructured-runtime v1.7.1, which survives a conflict it did not cause, the two cover
+each other.
+
+**`false` from that check means "I looked and it is definitely not there", never "I could not look."** Only
+a clean 404 returns it. A delegated observe, an async operation in flight, an unaddressable resource, and a
+`Pending` condition all return an **error** instead — because the runtime clears the pending marker and
+**re-runs create** on a `false` once its 120-second grace period lapses, and for a baremetal provider that
+is a duplicate physical server.
+
+The `Pending` case is worth stating separately. `Observe` treats *not-found plus Pending* as **exists**,
+which is right for drift detection and wrong here. And a measured annotation history shows the inverse case
+is equally real — a node whose external object existed throughout went `succeeded → pending → failed` in
+ninety seconds while being de-enrolled and re-created. **Both booleans are sometimes wrong, so refusing is
+not caution: it is the only answer that is never false.**
+
+### A request body is now labelled with the media type the document declares
+
+0.42.0 made the body **schema** come from the declared media type instead of assuming JSON, and left the
+`Content-Type` header hardcoded. For a document declaring `application/json-patch+json` the result was a
+body that correctly matched the patch schema, labelled `application/json`. A strict server answers 415; a
+lenient one accepts a patch document as a plain object.
+
+**Right body, wrong label — and correct-looking at every layer inside this repo**, which is why the tests
+assert what a server receives rather than what we set. An explicit `verbsDescription[].headers` entry
+naming `Content-Type` still overrides it, which is the author's escape hatch for a document that declares
+the wrong thing.
+
+### A failed call carries the vendor's own explanation
+
+A rejected status produced `invalid status code: 400` and nothing else, because the error was built **before
+the response body was read** — so the explanation was discarded at the source, on exactly the path where it
+carries the most information.
+
+One measured case: a CR said `create failed: unexpected status: 400: invalid status code: 400` while the
+vendor had said *"There is already a backup policy assigned to the resource"*. That sentence was the entire
+explanation for a 34-minute investigation.
+
+The body now reaches the **error** — logs and events — and not the condition. A condition is readable by
+anyone with `get` on the CR; an error is operator-only, and a vendor error body is attacker-influenced text
+that may echo submitted content. Read through a bounded reader, because an error body is untrusted input of
+unknown size; truncation is marked, so a clipped sentence is not mistaken for the whole answer.
+
+### The audit trail no longer asserts a method it never issued
+
+Delegated writes recorded `HTTPMethod` as POST, PUT or DELETE — guessed from the verb's semantics — while
+correctly omitting the status code they equally did not know. Same ignorance, two treatments. On a delegated
+path RDC issues no HTTP request at all; snowplow's stages do, with methods RDC never sees.
+
+An audit record is a compliance artifact, so a field that is confidently **wrong** is worse than an absent
+one: a reader reconciling it against snowplow's own record would try to match a PUT that never existed. The
+method is now omitted exactly as the status code already was.
+
+### Documentation and tests
+
+The Requirements section said *"A Kubernetes cluster."* with no version, while both charts declare
+`kubeVersion: ">=1.36.0-0"` and enforce it at **render** time. The trap worth documenting is that
+`helm/kind-action` defaults **below** the floor while `kind`'s own CLI default is above it — so a CI job
+fails where every local run passed, with an error that reads like a chart defect.
+
+Two test changes record what their assertions do **not** cover: one set is vacuous by construction and says
+so, because a vacuous assertion presented as a guard is worse than none.
 
 ## 2026-10-30 — 0.43.0
 
