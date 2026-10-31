@@ -298,6 +298,42 @@ func resolveRequestBodyMedia(body *v3.RequestBody) (*v3.MediaType, string, error
 	}
 }
 
+// bodyMediaType is the media type to label a request body with, derived from the OAS operation rather than
+// assumed.
+//
+// Both request paths previously hardcoded `Content-Type: application/json`. 0.42.0 fixed the other half of
+// that pair -- resolveRequestBodyMedia made the body SCHEMA come from the declared media type instead of
+// assuming JSON -- and left the header alone, which produced a state the original issue had warned about
+// from the opposite direction: for a document declaring application/json-patch+json, RDC built a body that
+// correctly matched the patch schema and then labelled it application/json. A strict server answers 415; a
+// lenient one accepts a patch document as a plain object. Right body, wrong label, and it looks correct at
+// every layer this repo can see (#288).
+//
+// Fixing one of a matched pair is what makes the asymmetry dangerous, regardless of which one you fix first.
+//
+// Returns "" when the operation declares no body, no resolvable media type, or the document cannot be read.
+// The caller then falls back to application/json, which is what it did unconditionally before: an
+// undiscoverable media type must not make a request unsendable, and this function is not where a malformed
+// document should be reported -- RequestedBody already errors on it with the same resolver.
+func (u *UnstructuredClient) bodyMediaType(httpMethod string, path string) string {
+	if u.DocScheme == nil || u.DocScheme.Model.Paths == nil {
+		return ""
+	}
+	pathItem, ok := u.DocScheme.Model.Paths.PathItems.Get(path)
+	if !ok {
+		return ""
+	}
+	op, ok := pathItem.GetOperations().Get(strings.ToLower(httpMethod))
+	if !ok || op.RequestBody == nil {
+		return ""
+	}
+	_, mediaType, err := resolveRequestBodyMedia(op.RequestBody)
+	if err != nil {
+		return ""
+	}
+	return mediaType
+}
+
 func (u *UnstructuredClient) RequestedBody(httpMethod string, path string) (bodyParams stringset.StringSet, err error) {
 	if u.DocScheme == nil || u.DocScheme.Model.Paths == nil {
 		return nil, fmt.Errorf("document scheme or model is nil")
