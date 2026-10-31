@@ -209,7 +209,17 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 			return Response{}, err
 		}
 		payload = jsonBody
-		headers.Set("Content-Type", "application/json")
+		// Derived from the OAS operation, not assumed. Falls back to application/json when the document
+		// declares no resolvable media type, which is what this line did unconditionally before.
+		//
+		// Set BEFORE opts.Headers is applied below, deliberately: a verbsDescription[].headers entry naming
+		// Content-Type must still win, because it is the author's explicit override for a document that
+		// declares the wrong thing.
+		mediaType := u.bodyMediaType(httpMethod, path)
+		if mediaType == "" {
+			mediaType = "application/json"
+		}
+		headers.Set("Content-Type", mediaType)
 	}
 
 	for k, v := range opts.Headers {
@@ -712,7 +722,17 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 			return Response{}, nil, err
 		}
 		payload = jsonBody
-		headers.Set("Content-Type", "application/json")
+		// Derived from the OAS operation, not assumed. Falls back to application/json when the document
+		// declares no resolvable media type, which is what this line did unconditionally before.
+		//
+		// Set BEFORE opts.Headers is applied below, deliberately: a verbsDescription[].headers entry naming
+		// Content-Type must still win, because it is the author's explicit override for a document that
+		// declares the wrong thing.
+		mediaType := u.bodyMediaType(httpMethod, path)
+		if mediaType == "" {
+			mediaType = "application/json"
+		}
+		headers.Set("Content-Type", mediaType)
 	}
 
 	for k, v := range opts.Headers {
