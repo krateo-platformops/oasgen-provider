@@ -1003,3 +1003,140 @@ paths:
         "200": {description: ok}
 `
 }
+
+// --- #334: a failed call must carry the vendor's own explanation ---
+
+// TestFailedCallCarriesTheVendorExplanation asserts the ERROR STRING a reconciler will surface, through the
+// real Call method against a live server.
+//
+// The measured failure this fixes: a CR said `create failed: unexpected status: 400: invalid status code:
+// 400` while the vendor had said "There is already a backup policy assigned to the resource" -- the entire
+// explanation for a 34-minute investigation, discarded because StatusError was built before the body was
+// read.
+func TestFailedCallCarriesTheVendorExplanation(t *testing.T) {
+	cases := []struct {
+		name         string
+		status       int
+		body         string
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name:         "the vendor's message reaches the error",
+			status:       http.StatusBadRequest,
+			body:         `{"errorMessage":"There is already a backup policy assigned to the resource"}`,
+			wantContains: []string{"400", "There is already a backup policy assigned to the resource"},
+		},
+		{
+			// No body is the common case for a 404 and must not produce a dangling colon or an empty tail.
+			name:         "an empty body leaves the old wording intact",
+			status:       http.StatusInternalServerError,
+			body:         "",
+			wantContains: []string{"invalid status code: 500"},
+			// Not `"500: "` -- that appears in StatusError's own outer format
+			// (`unexpected status: %d: %v`). The dangling fragment to exclude is a colon-space after the
+			// INNER code with nothing following it.
+			wantAbsent: []string{"invalid status code: 500: "},
+		},
+		{
+			// Whitespace-only is the same as empty: a reader gains nothing from "400: ".
+			name:         "a whitespace-only body is treated as empty",
+			status:       http.StatusBadRequest,
+			body:         "\n\n   \t\n",
+			wantContains: []string{"invalid status code: 400"},
+			wantAbsent:   []string{"invalid status code: 400: "},
+		},
+		{
+			// A multi-line body must collapse: an error spanning lines is unreadable in a log line and in
+			// kubectl output.
+			name:         "a multi-line body is collapsed to one line",
+			status:       http.StatusConflict,
+			body:         "line one\nline two\n\tline three",
+			wantContains: []string{"line one line two line three"},
+			wantAbsent:   []string{"\n"},
+		},
+		{
+			// An oversized body is capped and SAYS it was capped, so a clipped sentence is not mistaken for
+			// the vendor's whole answer. 2 KiB + slack of 'x' must come back marked.
+			name:         "an oversized body is truncated and marked",
+			status:       http.StatusBadGateway,
+			body:         strings.Repeat("x", maxErrorBodyBytes+500),
+			wantContains: []string{"[truncated]"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			client := clientFromSpec(t, patchSpec())
+			client.Server = srv.URL
+
+			_, err := client.Call(context.Background(), srv.Client(), "/things",
+				&RequestConfiguration{Method: http.MethodPatch, Body: map[string]any{"a": "b"}})
+			require.Error(t, err, "a rejected status must still be an error")
+
+			msg := err.Error()
+			for _, want := range tc.wantContains {
+				assert.Contains(t, msg, want, "the error a reconciler surfaces must carry this")
+			}
+			for _, absent := range tc.wantAbsent {
+				assert.NotContains(t, msg, absent, "this would be a dangling or unreadable fragment")
+			}
+		})
+	}
+}
+
+// countingReader records how many bytes were actually pulled from the body.
+type countingReader struct {
+	remaining int
+	read      int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	if c.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if n > c.remaining {
+		n = c.remaining
+	}
+	for i := 0; i < n; i++ {
+		p[i] = 'y'
+	}
+	c.remaining -= n
+	c.read += n
+	return n, nil
+}
+
+func (c *countingReader) Close() error { return nil }
+
+// TestErrorBodyReadIsBounded asserts BYTES READ, not message length.
+//
+// My first version of this asserted the length of the resulting error string, and I mutated to check it:
+// swapping io.LimitReader for io.ReadAll COMPILED AND WAS NOT CAUGHT. Of course it wasn't -- the snippet is
+// truncated to maxErrorBodyBytes afterwards either way, so a slurp-then-truncate produces a
+// byte-for-byte identical message. The test comment had even named that exact risk before the assertion
+// failed to address it.
+//
+// So this calls errorBodySnippet directly with a reader that counts. An unbounded read pulls all 5 MiB; a
+// bounded one pulls maxErrorBodyBytes plus the single probe byte that detects truncation. Nothing else
+// distinguishes them, which is why the earlier assertion could not.
+func TestErrorBodyReadIsBounded(t *testing.T) {
+	const bodySize = 5 * 1024 * 1024 // 5 MiB: a vendor having a bad day, or a hostile one
+	r := &countingReader{remaining: bodySize}
+
+	snippet := errorBodySnippet(r)
+
+	assert.LessOrEqual(t, r.read, maxErrorBodyBytes+1,
+		"the read must be bounded by maxErrorBodyBytes (+1 to detect truncation); reading %d bytes means an untrusted body sets the limit", r.read)
+	assert.Less(t, r.read, bodySize,
+		"an unbounded read would have pulled the whole body")
+	assert.Contains(t, snippet, "[truncated]",
+		"and the caller must be told the vendor's answer was cut")
+}

@@ -64,6 +64,71 @@ func (r *Response) IsPending() bool {
 	return r.statusCode == http.StatusProcessing || r.statusCode == http.StatusContinue || r.statusCode == http.StatusAccepted
 }
 
+// maxErrorBodyBytes caps how much of a failed response we read into an error.
+//
+// An error body is UNTRUSTED INPUT of unknown size -- a vendor having a bad day can answer a 502 with an
+// HTML page, or megabytes of it -- so this is read through an io.LimitReader rather than io.ReadAll. 2 KiB
+// is chosen to comfortably hold a JSON error object while never being worth streaming.
+const maxErrorBodyBytes = 2048
+
+// statusCodeError builds the inner error for a rejected status, with the vendor's explanation when there is
+// one. Both request paths use it so their messages cannot drift apart -- an asymmetry between those two
+// sites has already caused several defects in this package.
+func statusCodeError(code int, snippet string) error {
+	if snippet == "" {
+		return fmt.Errorf("invalid status code: %d", code)
+	}
+	return fmt.Errorf("invalid status code: %d: %s", code, snippet)
+}
+
+// errorBodySnippet reads up to maxErrorBodyBytes of a failed response so the VENDOR'S OWN EXPLANATION
+// reaches the error, and returns "" when there is nothing useful.
+//
+// Today the StatusError is built before the body is ever read, so the explanation is discarded at the source
+// on exactly the path where it carries the most information. One measured case: a CR said
+//
+//	create failed: unexpected status: 400: invalid status code: 400
+//
+// while the vendor had said "There is already a backup policy assigned to the resource". That sentence was
+// the entire explanation for a 34-minute investigation, and it existed in the response the controller was
+// holding when it threw it away (#334).
+//
+// IT GOES IN THE ERROR, NOT IN A CONDITION. A condition is readable by anyone with `get` on the CR, while an
+// error reaches logs and events, which are operator-only. A vendor error body is attacker-influenced text
+// that may echo submitted content, so moving it into an API object is a separate decision with a wider
+// blast radius; this repo already strips the request URL out of transport errors for the same reason. The
+// body is already in hand -- today it is thrown away rather than withheld, and reading it changes nothing
+// about who can see what.
+//
+// NO PATTERN-BASED REDACTION, deliberately. A redactor that misses is worse than none: it invites the
+// assumption that what got through is safe.
+//
+// The body is consumed either way so connection reuse is not broken.
+func errorBodySnippet(body io.ReadCloser) string {
+	if body == nil {
+		return ""
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, maxErrorBodyBytes+1))
+	if err != nil && len(raw) == 0 {
+		return ""
+	}
+	truncated := len(raw) > maxErrorBodyBytes
+	if truncated {
+		raw = raw[:maxErrorBodyBytes]
+	}
+	snippet := strings.TrimSpace(string(raw))
+	if snippet == "" {
+		return ""
+	}
+	// Collapse newlines: an error string spanning lines is unreadable in a log line and in kubectl output.
+	snippet = strings.Join(strings.Fields(snippet), " ")
+	if truncated {
+		// Say it was cut, so a reader does not mistake a clipped sentence for the vendor's whole answer.
+		snippet += " [truncated]"
+	}
+	return snippet
+}
+
 func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration) (Response, error) {
 	// Refuse a configuration that failed to assemble. See RequestConfiguration.BuildErr: a dropped path
 	// parameter still produces a syntactically valid URL, which answers 404, which the reconciler acts on
@@ -270,7 +335,7 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 	if !HasValidStatusCode(resp.StatusCode, validStatusCodes...) {
 		return Response{}, &StatusError{
 			StatusCode: resp.StatusCode,
-			Inner:      fmt.Errorf("invalid status code: %d", resp.StatusCode),
+			Inner:      statusCodeError(resp.StatusCode, errorBodySnippet(resp.Body)),
 		}
 	}
 
@@ -740,7 +805,7 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 	if !HasValidStatusCode(resp.StatusCode, validStatusCodes...) {
 		return Response{}, nil, &StatusError{
 			StatusCode: resp.StatusCode,
-			Inner:      fmt.Errorf("invalid status code: %d", resp.StatusCode),
+			Inner:      statusCodeError(resp.StatusCode, errorBodySnippet(resp.Body)),
 		}
 	}
 
