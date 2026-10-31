@@ -78,6 +78,56 @@ a Deployment + per-instance ConfigMap + RBAC from `helm/oasgen-provider/assets/r
 starts one RDC instance with `-group`/`-version`/`-resource` pinned to the generated GVR.
 Extra environment for every spawned instance goes through the chart's `rdc.env` map.
 
+### Two things about `rdc.*` that have each cost a session an investigation
+
+**`rdc.env` values must be set as strings.** The per-instance ConfigMap schema types them as
+strings, and Helm's `--set` infers `true` as a *boolean*, so the obvious spelling is rejected:
+
+```bash
+# rejected: "got boolean, want string"
+helm upgrade ... --set rdc.env.REST_CONTROLLER_DEBUG=true
+
+# correct
+helm upgrade ... --set-string rdc.env.REST_CONTROLLER_DEBUG=true
+```
+
+The error names the type rather than the fix, so it reads like the field does not work. It does;
+this is the only spelling of it. (`REST_CONTROLLER_DEBUG` is also the supported way to turn on the
+generated controllers' Debug logging — the `-debug` flag is the same switch but lives on the
+Deployment, which the provider re-renders on every reconcile, so a `kubectl set env` is reverted
+while a chart value is not. Note that changing `rdc.env` changes the ConfigMap hash, which
+**rolls every generated controller** — intended, but wait for the rollout before judging behaviour.)
+
+**An explicit `rdc.image` pin survives a provider upgrade, including the tag.** This is correct
+Helm behaviour and it surprises people, because upgrading the provider then does *not* move the
+controllers:
+
+```yaml
+# USER-SUPPLIED VALUES, set once for a local build
+rdc:
+  image:
+    registry: ""                  # empty -> the local image, not ghcr.io
+    repository: rest-dynamic-controller
+    tag: 0.41.0-p3b
+```
+
+With `--reuse-values`, that pin is preserved across `helm upgrade`, so a provider moved from
+0.42.0 to 0.44.0 kept running **RDC 0.41.0-p3b** on every generated controller. The provider and
+the controllers are released in lockstep at identical versions, so a pin left behind means the
+two halves are no longer the pair that was tested together.
+
+To return to the released image, set both fields — clearing the tag alone leaves the empty
+registry pointing at a local image that may not exist:
+
+```bash
+helm upgrade ... --reuse-values \
+  --set rdc.image.registry=ghcr.io/krateo-platformops \
+  --set rdc.image.tag=<version>
+```
+
+It propagates within one reconcile; there is no need to touch the generated Deployments, and
+patching them by hand would be reverted anyway.
+
 ## Consuming it: author a RestDefinition
 
 Once the provider runs, usage is entirely declarative:
