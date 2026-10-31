@@ -929,7 +929,10 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		// failure for an ordering race that resolves itself.
 		if isLookupReferentMissing(err) {
 			log.Debug("A dependent lookup's referent does not exist yet; waiting", "kind", mg.GetKind(), "reason", err.Error())
-			if cerr := unstructuredtools.SetConditions(mg, customcondition.Pending()); cerr != nil {
+			// The referent goes on the CR, not just in this Debug line (#323): Pending alone cannot be
+			// acted on, and this path has no operation to poll, so a referent that never appears waits
+			// forever indistinguishably from an async create in flight.
+			if cerr := unstructuredtools.SetConditions(mg, customcondition.PendingReferent(err.Error())); cerr != nil {
 				log.Error(cerr, "Setting condition")
 				return cerr
 			}
@@ -1123,7 +1126,10 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		// failure for an ordering race that resolves itself.
 		if isLookupReferentMissing(err) {
 			log.Debug("A dependent lookup's referent does not exist yet; waiting", "kind", mg.GetKind(), "reason", err.Error())
-			if cerr := unstructuredtools.SetConditions(mg, customcondition.Pending()); cerr != nil {
+			// The referent goes on the CR, not just in this Debug line (#323): Pending alone cannot be
+			// acted on, and this path has no operation to poll, so a referent that never appears waits
+			// forever indistinguishably from an async create in flight.
+			if cerr := unstructuredtools.SetConditions(mg, customcondition.PendingReferent(err.Error())); cerr != nil {
 				log.Error(cerr, "Setting condition")
 				return cerr
 			}
