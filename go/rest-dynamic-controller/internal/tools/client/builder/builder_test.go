@@ -28,6 +28,18 @@ type mockUnstructuredClient struct {
 	bodyError        error
 }
 
+// NOTE ON THE CONFIGURATION FIXTURE KEYS BELOW: they are SINGULAR -- "header", "cookie" -- because those are
+// the OpenAPI parameter locations oasgen generates the Configuration schema from, and therefore the property
+// names a generated Configuration CRD declares.
+//
+// They were plural here, and the tests passed, and oasgen's own tests ALSO passed while asserting the
+// singular form (configuration_builder_test.go: `if p.Name == "header"`). Two suites, both green,
+// contradicting each other -- so every configurationFields entry for a header or cookie parameter was
+// generated into the CRD and then never applied. Neither suite was wrong about its own side; nothing had
+// ever compared the producer's output to the consumer's expectation (#304).
+//
+// If a future change makes these plural again, check what oasgen EMITS before changing the consumer.
+
 func (m *mockUnstructuredClient) RequestedParams(method, path string) (text.StringSet, text.StringSet, text.StringSet, text.StringSet, error) {
 	if m.paramsError != nil {
 		return nil, nil, nil, nil, m.paramsError
@@ -553,7 +565,7 @@ func TestBuildCallConfig_WithMerge(t *testing.T) {
 						"filter":      "from-config",
 					},
 				},
-				"headers": map[string]interface{}{
+				"header": map[string]interface{}{
 					"get": map[string]interface{}{
 						"X-Custom-Header": "from-config",
 					},
@@ -750,7 +762,7 @@ func TestApplyConfigSpec(t *testing.T) {
 			name:   "Happy path - all fields populated for 'get' action",
 			action: "get",
 			configSpec: map[string]interface{}{
-				"headers": map[string]interface{}{
+				"header": map[string]interface{}{
 					"get": map[string]interface{}{
 						"X-Test-Header": "header-value",
 						"X-Another":     "another-header",
@@ -765,7 +777,7 @@ func TestApplyConfigSpec(t *testing.T) {
 						"param2": int64(123), // non-string value
 					},
 				},
-				"cookies": map[string]interface{}{
+				"cookie": map[string]interface{}{
 					"get": map[string]interface{}{
 						"session": "abc",
 					},
@@ -827,7 +839,7 @@ func TestApplyConfigSpec(t *testing.T) {
 			name:   "No matching action in configSpec",
 			action: "delete",
 			configSpec: map[string]interface{}{
-				"headers": map[string]interface{}{
+				"header": map[string]interface{}{
 					"get": map[string]interface{}{
 						"X-Test-Header": "header-value",
 					},
@@ -845,7 +857,7 @@ func TestApplyConfigSpec(t *testing.T) {
 			name:   "Partially matching configSpec",
 			action: "get",
 			configSpec: map[string]interface{}{
-				"headers": map[string]interface{}{
+				"header": map[string]interface{}{
 					"get": map[string]interface{}{
 						"X-Test-Header": "header-value",
 					},
@@ -1867,3 +1879,58 @@ func (m *mockUnstructuredClient) UpdatableBodyPaths(httpMethod, path string) ([]
 // ServerURL satisfies UnstructuredClientInterface. A real host so an audit event built from it
 // carries a parseable server.address rather than being silently omitted (#253).
 func (m *mockUnstructuredClient) ServerURL() string { return "https://api.example.com" }
+
+// TestConfigurationKeysMatchTheOpenAPILocations is the test that was missing on both sides.
+//
+// oasgen generates the Configuration schema keyed by the OpenAPI parameter LOCATION
+// (configuration_builder.go: `paramIn := fieldParam.In`), which the specification defines as singular:
+// path, query, header, cookie. This consumer must read the same four names.
+//
+// Before #304 it read "headers" and "cookies". Both repos' suites were green: oasgen's asserted it EMITS
+// `header`, this one's fixtures asserted it READS `headers`. Each suite was right about its own side and
+// nothing compared them, so configurationFields entries for headers and cookies were generated into the CRD
+// and silently never applied -- while path and query worked, because OpenAPI's singular happened to match
+// what this code asked for.
+//
+// Asserting the literal strings rather than round-tripping a fixture is deliberate: a fixture written by
+// whoever changes the code would agree with the change, which is exactly how this defect survived.
+func TestConfigurationKeysMatchTheOpenAPILocations(t *testing.T) {
+	// The OpenAPI 3.x `in` vocabulary. Not "the keys we chose" -- the keys the specification defines and
+	// oasgen therefore emits.
+	for _, location := range []string{"path", "query", "header", "cookie"} {
+		t.Run(location, func(t *testing.T) {
+			configSpec := map[string]interface{}{
+				location: map[string]interface{}{
+					"get": map[string]interface{}{"k": "v"},
+				},
+			}
+			req := &restclient.RequestConfiguration{
+				Parameters: map[string]string{},
+				Query:      map[string]string{},
+				Headers:    map[string]string{},
+				Cookies:    map[string]string{},
+			}
+
+			applyConfigSpec(req, configSpec, "get")
+
+			// Exactly one destination must have received the value, and it must be the one matching the
+			// location. A location that lands nowhere is the #304 defect; one that lands in two places is a
+			// different bug.
+			got := map[string]int{
+				"path":   len(req.Parameters),
+				"query":  len(req.Query),
+				"header": len(req.Headers),
+				"cookie": len(req.Cookies),
+			}
+			assert.Equal(t, 1, got[location],
+				"a configuration entry under %q must reach its destination; 0 means it is silently dropped, which is #304", location)
+
+			total := 0
+			for _, n := range got {
+				total += n
+			}
+			assert.Equal(t, 1, total,
+				"it must reach exactly ONE destination; %v", got)
+		})
+	}
+}

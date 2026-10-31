@@ -465,10 +465,28 @@ func applyConfigSpec(req *restclient.RequestConfiguration, configSpec map[string
 		}
 	}
 
+	// The keys are the OpenAPI parameter LOCATIONS, which the specification defines as singular: "path",
+	// "query", "header", "cookie". oasgen generates the configuration schema straight from them
+	// (configuration_builder.go: `paramIn := fieldParam.In`), so those are the property names a generated
+	// Configuration CRD actually declares.
+	//
+	// "headers" and "cookies" were plural here, so every configurationFields entry for a header or cookie
+	// parameter was generated into the Configuration CRD and then NEVER APPLIED. path and query worked only
+	// because OpenAPI's singular happens to match what this code asked for.
+	//
+	// Nothing could have depended on the plural form: the generated Configuration CRD declares `header`,
+	// so a CR written with `headers:` is rejected by the apiserver as an unknown field under strict
+	// decoding. The feature was not merely unused for headers and cookies -- it was unusable (#304).
+	//
+	// MEASURED BLAST RADIUS, which is why this is not a typo fix. The openstack-ironic-operator-kog session
+	// declared their Ironic microversion as a configurationFields header. It was silently dropped, so
+	// Ironic negotiated its MINIMUM (1.1), every port create answered 406, the node ended up with no port,
+	// and the deploy failed with "does not have any port associated with it" -- three layers from the cause,
+	// naming a missing port rather than a dropped header.
 	process("path", req.Parameters)
 	process("query", req.Query)
-	process("headers", req.Headers)
-	process("cookies", req.Cookies)
+	process("header", req.Headers)
+	process("cookie", req.Cookies)
 }
 
 // IsResourceKnown tries to build the `get` action API Call, with the given specFields and statusFields values.
