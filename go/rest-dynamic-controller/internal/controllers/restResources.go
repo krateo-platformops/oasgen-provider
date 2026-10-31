@@ -380,6 +380,33 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 				log.Debug("External resource is being created", "kind", mg.GetKind())
 				return controller.ExternalObservation{}, nil
 			}
+			// A FAILED create leaves Creating set, so reaching here with Creating is NOT evidence that
+			// anything exists. Measured against a real Zendesk (#347): a create rejected with 422
+			// ("Private groups are not enabled for this account") left Creating set, and ~2 minutes later
+			// this branch read that condition as grounds to assume the resource was fine, set Available,
+			// and LATCHED -- a CR permanently Ready=True with no identifier, for a resource that was never
+			// created. Nothing recovers from it, because the observation that would clear Available is the
+			// one this kind cannot make.
+			//
+			// The runtime distinguishes the two outcomes and this is the only place that has to care:
+			//
+			//	create succeeded  worker.go:823   Synced = ReconcileSuccess   (Creating still set)
+			//	create failed     worker.go:760   Synced = ReconcileError     (Creating still set)
+			//
+			// So Ready/Creating cannot separate them and Synced can. A condition is an output of the
+			// PREVIOUS reconcile, never evidence about the external world -- but "the previous reconcile
+			// errored" is a fact about us, which is exactly what is needed here.
+			//
+			// Reporting not-exists sends the runtime back to Create, which fails again and re-sets
+			// Creating/ReconcileError. That is the honest steady state for a vendor that is refusing the
+			// create: visibly stuck and retrying, rather than falsely Available. It is also why this does
+			// not error -- an error here would replace the vendor's own explanation with ours.
+			if lastReconcileErrored(mg) {
+				log.Debug("No get or findby action found for the resource.")
+				log.Info("The last reconcile errored, so this resource is not assumed to be up to date",
+					"kind", mg.GetKind(), "name", mg.GetName())
+				return controller.ExternalObservation{}, nil
+			}
 			log.Debug("API call not found", "action", apiaction.FindBy)
 			log.Debug("No get or findby action found for the resource.")
 			log.Debug("Resource is assumed to be up-to-date.")
@@ -706,6 +733,25 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		ResourceExists:   true,
 		ResourceUpToDate: true,
 	}, nil
+}
+
+// lastReconcileErrored reports whether the PREVIOUS reconcile of this object ended in an error, by reading
+// the runtime's Synced condition.
+//
+// Used by the one observe path that has no way to look at the external resource, to avoid treating its own
+// Ready/Creating condition as evidence that a create succeeded. The runtime sets Creating on BOTH outcomes
+// and distinguishes them only on Synced (#347).
+//
+// Compares Type and Reason only. condition.ReconcileError takes the error as an argument and puts it in the
+// Message, so constructing one to hand to IsConditionSet would require inventing an error whose text must
+// match -- and would silently stop matching the moment the runtime reworded it.
+func lastReconcileErrored(mg *unstructured.Unstructured) bool {
+	for _, c := range unstructuredtools.GetConditions(mg) {
+		if c.Type == condition.TypeSynced {
+			return c.Reason == condition.ReasonReconcileError
+		}
+	}
+	return false
 }
 
 // stopOnAuthorizationDenied reports whether err is a permanent authorisation refusal, and if so records it
