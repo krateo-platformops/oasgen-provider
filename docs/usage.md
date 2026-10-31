@@ -11,7 +11,27 @@ timestamp: 2026-10-20T00:00:00Z
 
 ## Requirements
 
-- A Kubernetes cluster.
+- **A Kubernetes cluster at 1.36 or newer.** Both the `oasgen-provider` and
+  `oasgen-provider-crds` charts declare `kubeVersion: ">=1.36.0-0"`, so this is enforced by Helm
+  at **render** time — `helm install` and `helm template` both refuse on an older cluster, before
+  anything is applied. The floor exists because the charts use `MutatingAdmissionPolicy`, which
+  is GA at 1.36. (`controller-render-service` declares no bound, deliberately: it ships no CRDs
+  and no controller.)
+
+  > **If you install these charts from CI, pin the node image explicitly.** This is the one
+  > place the requirement bites silently: `helm/kind-action` defaults to a node image **below**
+  > the floor, while `kind`'s own CLI default is above it. So a job that passes on a developer's
+  > machine fails in CI with
+  > `chart requires kubeVersion: >=1.36.0-0 which is incompatible with Kubernetes v1.35.0`,
+  > which reads like a chart defect rather than a runner default.
+  >
+  > ```yaml
+  > - uses: helm/kind-action@<pinned-sha>
+  >   with:
+  >     node_image: kindest/node:v1.36.1   # pin >= 1.36; the action's own default is lower
+  > ```
+  >
+  > Reported by a consumer whose every local run had passed (#330).
 - An OpenAPI Specification document for each API you want to manage — 3.1, 3.0 or
   Swagger 2.0 (2.0 since 0.32.0, read by its own adapter: it is **not** converted to 3.x,
   because `status.oasHash` must keep hashing the document the vendor actually published)
