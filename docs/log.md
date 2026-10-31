@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-31T16:05:00Z
+timestamp: 2026-10-31T20:20:00Z
 ---
 
 # Log
@@ -12,6 +12,127 @@ timestamp: 2026-10-31T16:05:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-10-31 — 0.46.0
+
+Two live defects, both reported by consumers running against real vendor APIs, and both of the same
+shape: the controller answered a question it could not answer, rather than saying so.
+
+### A create the vendor refused no longer latches to `Available`
+
+Measured against a real Zendesk and then reproduced deliberately, with Debug, against stable single-pod
+controllers. A Group CR whose create was rejected with `422` became **permanently `Ready=True`/`Available`
+with no identifier**, for a resource that never existed:
+
+```
+17:32:56  no conditions -> exists=false -> Create          (this part was already correct)
+17:32:58  Create 422 "Private groups are not enabled for this account", retried
+17:34:46  no get or findby -> "Resource is assumed to be up-to-date."    <- the latch
+17:34:58  Ready=True Available, status.id absent                         <- never created
+```
+
+**The runtime sets `Creating` on both create outcomes** and separates them only on `Synced`
+(`ReconcileSuccess` at `worker.go:823`, `ReconcileError` at `:760`). So the observe path for a kind with
+neither a `get` by identifier nor a `findby` could not tell a created resource from one the vendor
+**refused** to create — and read its own condition as evidence about the external world. Nothing recovered
+from it, because the observation that would clear `Available` is the one that kind cannot make.
+
+It now reports not-exists when the previous reconcile errored, which sends the runtime back to `Create`:
+it fails again and re-sets `Creating`/`ReconcileError`. Visibly stuck and retrying is the honest steady
+state for a vendor refusing a create. It deliberately does **not** error — that would replace the vendor's
+own explanation with ours, and "Private groups are not enabled for this account" is the most useful
+sentence in the whole trace.
+
+**Scope, measured rather than assumed:** the reporter's full four-kind live e2e passes 26/27 on 0.44.0, so
+this was confined to the failure path. **Two wrong diagnoses preceded the fix** and both are recorded in
+#347 rather than quietly replaced — the first impossible (`ValidateRequest` rejects an empty path
+parameter, so the request it assumed is never sent), the second with the trigger backwards. Only a
+Debug-level log line settled it.
+
+### A denied `403` stops, without breaking throttle recovery
+
+`401` and `403` had no special handling anywhere, so an authorisation failure was an ordinary error retried
+on every reconcile indefinitely. The split is not symmetric:
+
+| code | meaning | action |
+|---|---|---|
+| `401` | the credential may be **replaced** under us | **retry, indefinitely** |
+| `403` | the credential is not **permitted** to do this | **permanent, stop** |
+
+**A 401 must stay retryable.** Rotation is delegated to a secret manager here — the controller never mints
+a token, it reads one from a Secret on every reconcile with no cache — and retrying is precisely how a
+rotation mid-reconcile is survived. Treating a 401 as permanent would turn every rotation into a ticket.
+
+**But a 403 is not reliably permanent, so this is not the two-line fix it looks like.** GitHub answers both
+rate-limit kinds with "403 or 429", and warns that continuing to request while limited may get an
+integration banned. A naive "403 stops" rule breaks throttle recovery for a primary blueprint; a naive
+"403 retries" rule risks a ban. `StatusError` now carries the response headers, which are the only channel
+separating the two, and `x-ratelimit-remaining` is checked for the **value** `0` rather than presence —
+GitHub sends it on successful responses too.
+
+**`Delete` is deliberately not guarded**, and that asymmetry is pinned by a source-level test because it
+reads like an oversight. Stopping there removes the finalizer, so the CR disappears while the external
+resource still exists and still costs money. Retrying a denied delete forever is wasteful; orphaning is
+unrecoverable, and only one of the two is fixed by fixing the credential.
+
+### A refused delete now says why
+
+The same shape again, on the delete path, and found by following a consumer's passing remark rather than
+by looking for it. When a vendor refuses a delete **and** the get verb confirms the resource is still
+there — the most informative combination available — the vendor's reason was **discarded**:
+
+```go
+return fmt.Errorf("delete of %s did not remove the external resource, which is still present; retrying", mg.GetName())
+//                 deleteErr dropped entirely
+```
+
+Six CRs sat in `Terminating`, each retrying a `DELETE` their API refuses because the node is in an
+`active` state, and the CR said only "still present; retrying". True, and useless. The operator had to
+tail the controller and match a log string against the vendor's API reference to learn the cause.
+
+`deleteErr` is now wrapped with **`%w`**, not `%v`. The distinction is invisible in the output: the
+message reads identically, while `%v` would stop `HasStatusErr` seeing the status code through the
+wrapper and silently disable the 404 short-circuit that releases a finalizer for an already-absent
+resource. A test asserts on the unwrap rather than on the text, because that is the half a reviewer
+cannot see.
+
+**And #334's stated reasoning was wrong.** Its comment claimed the vendor's body goes "in the error, not
+in a condition", because errors reach only logs and events "which are operator-only". But the runtime's
+`ReconcileError(err)` sets `Message: err.Error()` — so **every error a handler returns becomes the
+`Synced` condition's message**, and that body has been CR-visible since the moment #334 shipped. Not
+exposure #334 introduced; returned errors became condition messages long before it. But the comment
+asserted an absence that was never real, and it was cited as a premise earlier the same day before anyone
+checked it. Corrected in place rather than deleted, with the real consideration restated: a vendor error
+body is attacker-influenced text that **does** land in an API object readable with `get`.
+
+### A RestDefinition cannot model a one-shot action, and the docs now say so
+
+A physical server was re-imaged **four times in thirty minutes** because a destructive one-shot was
+modelled as a reconciled resource. `Observe` must answer *does it exist* and *is it up to date*, and a
+fire-once action has no external object that answers either — so the shape it forces (a `findby` written
+so it never matches, a trigger setting `Pending`, an `Observe` returning up-to-date from that guard
+without clearing it) means **such a CR can never report `Ready`**. One held a fully provisioned
+composition at `Ready=False` through 51 reconciles with zero transitions.
+
+`RESTAction` is not the alternative and the docs now say that too, because it is the first thing authors
+reach for: it runs on every call, persists no attempted-or-completed record, and rendering one from a
+chart does not execute it. **There is no primitive with completion semantics**, so an author looking for
+one finds nothing and reaches for a resource.
+
+The rule, in the reporting author's words: **a destructive one-shot must not be driven by a signal the
+action itself cannot change.** Their trigger — `provision_state == active AND spec.extra empty` — is also
+the steady state of a node whose cloud-init failed, so the wipe never cleared its own condition. The
+documented alternative is to express the target state instead of the transition and let drift detection
+enforce it, which makes the trigger something the action *can* change.
+
+### Two `rdc.*` traps, each of which cost a session an investigation
+
+`rdc.env` values must be set with `--set-string`: the ConfigMap schema types them as strings and Helm's
+`--set` infers `true` as a boolean, so the obvious spelling is rejected with a message that names the type
+and not the fix. And an explicit `rdc.image` pin **survives a provider upgrade**, tag included — one
+session's provider moved 0.42.0 to 0.44.0 while all four of its generated controllers kept running RDC
+`0.41.0-p3b`. Since the two halves release in lockstep at identical versions, a pin left behind means they
+are no longer the pair that was tested together.
 
 ## 2026-10-31 — 0.45.0
 
