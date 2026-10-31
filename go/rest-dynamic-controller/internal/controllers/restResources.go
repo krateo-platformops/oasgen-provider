@@ -708,6 +708,47 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	}, nil
 }
 
+// stopOnAuthorizationDenied reports whether err is a permanent authorisation refusal, and if so records it
+// on the CR so the refusal is visible without reading logs.
+//
+// Returns true when the caller must STOP rather than return the error. Returning the error would retry the
+// same verb with the same credential on every reconcile, forever: a 403 with no rate-limit signal is a
+// decision, and nothing the controller does next can change it (#313).
+//
+// NOT USED BY Delete, deliberately, and that asymmetry is the point. A refused delete leaves the external
+// resource in place; stopping there would let the finalizer be removed and the CR disappear while the thing
+// it represents still exists and still costs money. #261 already settled that an unverifiable delete HOLDS
+// the finalizer, and a denied delete is unverifiable in exactly that sense. Retrying a denied delete
+// forever is wasteful; orphaning the resource is worse, and only one of the two is recoverable by fixing
+// the credential.
+//
+// A 401 is not in scope here either: see restclient.IsAuthorizationDenied. Credential rotation is delegated
+// to a secret manager, and retrying a 401 is the mechanism by which a rotation mid-reconcile is survived.
+func (h *handler) stopOnAuthorizationDenied(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) bool {
+	if !restclient.IsAuthorizationDenied(err) {
+		return false
+	}
+	if serr := unstructuredtools.SetConditions(mg, customcondition.AuthorizationDenied(verb)); serr != nil {
+		log.Error(serr, "Setting condition")
+		return false
+	}
+	h.eventRecorder.Event(mg, event.Warning(reasonUpdated, event.Action(verb), fmt.Errorf(
+		"the API refused the %s request for %s; the credential is not permitted to perform it, so it will not be retried",
+		verb, mg.GetName())))
+	// The vendor's explanation reaches the log and not the condition (#334): a 403 body often names the
+	// required scope, and a condition is readable by anyone with `get` on the CR.
+	log.Info("Authorization denied; no longer issuing this verb",
+		"kind", mg.GetKind(), "verb", verb, "error", err.Error())
+	if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+		Pluralizer:    h.pluralizer,
+		DynamicClient: h.dynamicClient,
+	}); uerr != nil {
+		log.Error(uerr, "Updating status")
+		return false
+	}
+	return true
+}
+
 func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) error {
 	log := h.logger.WithValues("op", "Create").
 		WithValues("apiVersion", mg.GetAPIVersion()).
@@ -874,6 +915,9 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	// the Response. Either way this is the real external status code, not a stand-in (#253).
 	h.emitAudit(ctx, mg, cli.ServerURL(), callInfo.Method, externalStatusCode(&response, err), err)
 	if err != nil {
+		if h.stopOnAuthorizationDenied(ctx, mg, "create", err, log) {
+			return nil
+		}
 		log.Error(err, "Performing REST call")
 		return err
 	}
@@ -1065,6 +1109,9 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	// the Response. Either way this is the real external status code, not a stand-in (#253).
 	h.emitAudit(ctx, mg, cli.ServerURL(), callInfo.Method, externalStatusCode(&response, err), err)
 	if err != nil {
+		if h.stopOnAuthorizationDenied(ctx, mg, "update", err, log) {
+			return nil
+		}
 		log.Error(err, "Performing REST call")
 		return err
 	}

@@ -17,6 +17,13 @@ const (
 	// issued, enough times in a row that the update is evidently not able to fix it. The controller stops
 	// issuing that update; the resource stays NOT ready, with the field named.
 	ReasonDriftNotConverging string = "DriftNotConverging"
+	// ReasonAuthorizationDenied is set when the API answered 403 to a verb and the response carried no
+	// rate-limit signal, so the refusal is a decision about this credential rather than a limit that
+	// clears. The controller stops issuing that verb; the resource stays NOT ready.
+	//
+	// Distinct from a 401, which is deliberately NOT in this family: a 401 is what a credential being
+	// rotated under us looks like, and retrying it is how rotation is tolerated (#313).
+	ReasonAuthorizationDenied string = "AuthorizationDenied"
 	// ReasonResponseObtained and ReasonNoResponseBody are the two states of TypeObserved below.
 	ReasonResponseObtained string = "ResponseObtained"
 	ReasonNoResponseBody   string = "NoResponseBody"
@@ -86,6 +93,33 @@ func DriftNotConverging(field, detail string) metav1.Condition {
 		Status:             metav1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonDriftNotConverging,
+		Message:            msg,
+	}
+}
+
+// AuthorizationDenied returns a condition indicating that the API refused a verb for this credential, so
+// the controller has stopped issuing it.
+//
+// Deliberately NOT Ready and deliberately not an error, matching DriftNotConverging: the resource does not
+// match its spec, so Ready would be false, and nothing is retryable because the only action available has
+// been refused by a decision the controller cannot influence. The remedy is a credential or policy change,
+// which is a human's, so this condition's job is to name the verb and stop.
+//
+// THE VENDOR'S EXPLANATION IS NOT IN THE MESSAGE, deliberately. A 403 body routinely names the required
+// scope or role, which is exactly what an operator wants -- but a condition is readable by anyone with
+// `get` on the CR while an error reaches logs and events, which are operator-only. #334 made that call for
+// error bodies generally and this follows it rather than carving out an exception for the one body most
+// likely to describe someone's permission model. The message says where to look instead.
+func AuthorizationDenied(verb string) metav1.Condition {
+	msg := "the API refused this request for the configured credential; see the controller log for the API's explanation"
+	if verb != "" {
+		msg = "the API refused the " + verb + " request for the configured credential; see the controller log for the API's explanation"
+	}
+	return metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonAuthorizationDenied,
 		Message:            msg,
 	}
 }
