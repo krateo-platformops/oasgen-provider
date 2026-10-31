@@ -150,6 +150,72 @@ Changing `oasPath` over time is possible, but **avoid changing the `create` requ
 or its parameters**: the generated CRD schema derives from them, and drifting them
 usually means deleting and recreating the RestDefinition.
 
+### A RestDefinition models a reconciled resource, not a one-shot action
+
+**This is the most expensive mistake an author can make here.** A physical server was re-imaged
+**four times in thirty minutes** because a destructive one-shot was modelled as a reconciled
+resource. Read this before declaring anything whose verb *does* something rather than *describes*
+something — a wipe, a reboot, a rebuild, a drain, a rotate.
+
+`Observe` must answer two questions: **does it exist**, and **is it up to date**. A fire-once action
+has no external object whose state answers either. So modelling one forces a shape that cannot work:
+
+- the `findby` has to be written so that it **never matches** — that is what makes every new CR
+  "not found", and therefore fire;
+- the trigger response sets `Pending`;
+- `Observe` then returns exists + up-to-date from the `Pending` guard **without clearing it**.
+
+The consequence is structural, not a bug to be fixed: **such a CR can never report `Ready`.**
+Tolerable while it is transient, fatal when it is long-lived — Krateo's composition controller
+aggregates child readiness, so one such CR held a fully provisioned composition at `Ready=False`
+through 51 reconciles with zero transitions.
+
+**`RESTAction` is not the alternative**, which is worth stating because it is the first thing authors
+reach for. It is not fire-once — it runs on every call; it persists no attempted-or-completed record;
+it answers `200` with failed stages named only in a response header; and rendering one from a chart
+does not execute it. There is no primitive with completion semantics today, so an author looking for
+one finds nothing and reaches for a resource. That is the trap.
+
+#### The rule
+
+> **A destructive one-shot must not be driven by a signal the action itself cannot change.**
+
+The measured case: *"wipe this node"* was inferred from `provision_state == active AND spec.extra
+empty` — which is also **the steady state of a node whose cloud-init failed**. The wipe never cleared
+its own trigger, so it re-fired on every reconcile. This is the same defect as a drain wedge and as
+RDC's `Pending` ambiguity: **a signal that cannot distinguish "needs doing" from "was done and did
+not take".**
+
+#### What to do instead: make the action declarative
+
+Express the *target state*, not the transition, and let drift detection do the work:
+
+```yaml
+# Not "reboot this node" -- "this node's power state should be off".
+verbsDescription:
+  - action: findby                 # lift the OBSERVED state onto the key the spec uses
+    method: GET
+    path: /v1/nodes/{node_id}
+  - action: update                 # the verb that performs the transition
+    method: PUT
+    path: /v1/nodes/{node_id}/states/power
+```
+
+```yaml
+# and keep it quiet mid-flight: prefer the target the API is already moving toward
+responseTransform:
+  power_state: 'target_power_state // power_state'
+```
+
+The drift comparison now answers *"is it in the target state?"* rather than *"has this fired?"*. That
+gives continuous enforcement and self-healing, and — the part that matters — **the trigger becomes a
+signal the action can change.** It also reports `Ready` honestly, because there is now an external
+state that confirms it.
+
+If an action genuinely has no observable result — nothing the API will tell you afterwards that
+differs from before — then it cannot be modelled here, and declaring it anyway produces the loop
+above. Say so in your blueprint rather than writing a `findby` that never matches.
+
 ## Local render (no cluster)
 
 The chart working tree carries CI placeholders (`version: CHART_VERSION`,
