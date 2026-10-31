@@ -1003,3 +1003,125 @@ paths:
         "200": {description: ok}
 `
 }
+
+// --- #288, second half: the Content-Type must come from the document ---
+
+func patchSpecWithMedia(media string) string {
+	return `openapi: 3.0.3
+info: {title: t, version: 1.0.0}
+servers: [{url: "https://api.example.com"}]
+paths:
+  /things:
+    patch:
+      requestBody:
+        content:
+          ` + media + `:
+            schema:
+              type: object
+      responses:
+        "200": {description: ok}
+`
+}
+
+// TestContentTypeComesFromTheDocument asserts the header a SERVER receives, through the real Call method.
+//
+// The defect this closes was created by fixing half of a matched pair: 0.42.0 made the body SCHEMA come from
+// the declared media type and left the header pinned to application/json, so RDC built a correct patch body
+// and labelled it as a plain JSON object. Right body, wrong label -- and correct-looking at every layer
+// inside this repo, which is why the assertion has to be on what leaves it.
+func TestContentTypeComesFromTheDocument(t *testing.T) {
+	cases := []struct {
+		name            string
+		media           string
+		overrideHeaders map[string]string
+		wantContentType string
+	}{
+		{
+			// The motivating case: a JSON Patch document.
+			name:            "a declared json-patch media type reaches the header",
+			media:           "application/json-patch+json",
+			wantContentType: "application/json-patch+json",
+		},
+		{
+			name:            "a declared application/json is unchanged",
+			media:           "application/json",
+			wantContentType: "application/json",
+		},
+		{
+			name:            "merge-patch is carried verbatim",
+			media:           "application/merge-patch+json",
+			wantContentType: "application/merge-patch+json",
+		},
+		{
+			// An explicit verbsDescription[].headers entry is the author's override for a document that
+			// declares the wrong thing, and must still win. It is applied after the derived value.
+			name:            "an explicit header override still wins",
+			media:           "application/json-patch+json",
+			overrideHeaders: map[string]string{"Content-Type": "application/vnd.api+json"},
+			wantContentType: "application/vnd.api+json",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := make(chan string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got <- r.Header.Get("Content-Type")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			client := clientFromSpec(t, patchSpecWithMedia(tc.media))
+			client.Server = srv.URL
+
+			_, err := client.Call(context.Background(), srv.Client(), "/things",
+				&RequestConfiguration{
+					Method:  http.MethodPatch,
+					Body:    map[string]any{"a": "b"},
+					Headers: tc.overrideHeaders,
+				})
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.wantContentType, <-got,
+				"the label a server receives must match what the document declares, not what we assume")
+		})
+	}
+}
+
+// TestContentTypeFallsBackWhenUndiscoverable pins that an unreadable or body-less operation still sends a
+// usable label rather than an empty one.
+//
+// An empty Content-Type on a bodied request is worse than a wrong guess: many servers reject it outright,
+// and it would turn a document this code cannot fully read into an unsendable request.
+func TestContentTypeFallsBackWhenUndiscoverable(t *testing.T) {
+	got := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	// A document whose PATCH declares no requestBody at all: bodyMediaType returns "" and the caller must
+	// fall back rather than send nothing.
+	spec := `openapi: 3.0.3
+info: {title: t, version: 1.0.0}
+servers: [{url: "https://api.example.com"}]
+paths:
+  /things:
+    patch:
+      responses:
+        "200": {description: ok}
+`
+	client := clientFromSpec(t, spec)
+	client.Server = srv.URL
+
+	_, err := client.Call(context.Background(), srv.Client(), "/things",
+		&RequestConfiguration{Method: http.MethodPatch, Body: map[string]any{"a": "b"}})
+	require.NoError(t, err)
+
+	assert.Equal(t, "application/json", <-got,
+		"an undiscoverable media type must fall back to the previous unconditional default, not to empty")
+}
