@@ -346,6 +346,7 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 		return Response{}, &StatusError{
 			StatusCode: resp.StatusCode,
 			Inner:      statusCodeError(resp.StatusCode, errorBodySnippet(resp.Body)),
+			Header:     resp.Header,
 		}
 	}
 
@@ -826,6 +827,7 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 		return Response{}, nil, &StatusError{
 			StatusCode: resp.StatusCode,
 			Inner:      statusCodeError(resp.StatusCode, errorBodySnippet(resp.Body)),
+			Header:     resp.Header,
 		}
 	}
 
