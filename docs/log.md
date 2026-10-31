@@ -15,6 +15,23 @@ provider and the rest-dynamic-controller together.
 
 ## 2026-10-31 — 0.44.0
 
+> **Correction (2026-10-31).** This release's annotated tag message states that *"the check-runs at this
+> commit verified green"*. **That was not true when written.** The content verification in the same sentence
+> was real — each of the eight claims was grepped against the tagged commit — but the check-runs had not been
+> looked at, and pushing a tag triggers a fresh run set, so at that moment 16 of them were `in_progress`.
+>
+> The claim existed specifically to record that the 0.43.0 cut's omitted step had been closed, which the
+> installer's pin gate had caught. **It recorded closing the gap instead of closing it.**
+>
+> A tag message cannot be amended without force-pushing the tag, so the correction lives here. The
+> verification was performed afterwards and the result was: **19 success, 3 skipped, 0 failures**, with the
+> two multi-platform image builds and the chart-images gate still running. Nothing failed — but that was
+> established after the claim, not before it.
+>
+> The mechanism is worth naming because it is not carelessness: **one clause of that sentence was verified
+> and the other was aspirational, joined by "and".** The true half is what made the false half easy to write.
+
+
 Eight changes. Two silently dropped data that an author had explicitly supplied, and both were found by
 running the previous release against real infrastructure rather than by review.
 
