@@ -72,6 +72,21 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 	//     notfound+Pending as EXISTS (restResources.go:324), which is right for drift detection and WRONG
 	//     here: during recovery the open question is whether the create landed, so answering `true` would
 	//     stamp external-create-succeeded on a resource that may not exist.
+	//
+	//     THE CONDITION CARRIES NO INFORMATION ABOUT EXISTENCE IN EITHER DIRECTION, which is a stronger
+	//     reason than the one above and comes from a measured trace rather than from reasoning. The
+	//     openstack-ironic-operator-kog session's annotation history on one physical node:
+	//
+	//       blade01  external-create-succeeded  08:58:57
+	//       blade01  external-create-pending    08:59:56   <- back to pending, a minute after succeeding
+	//       blade01  external-create-failed     09:00:26
+	//
+	//     That node's Ironic-side object existed throughout -- it was `active` on disk -- and a chart-driven
+	//     de-enrol/re-create walked it back through Pending. So a REAL resource transits Pending, and an
+	//     Exists that answered `true` from the condition would have been right there and wrong in the
+	//     phantom-create case above; one that answered `false` would be wrong in exactly the opposite pair.
+	//     Both booleans are sometimes wrong, so neither is available: refusing is not caution here, it is
+	//     the only answer that is never false.
 	if clientInfo.Resource.ObserveApiRef != nil {
 		return false, fmt.Errorf("existence check: observation is delegated to RESTAction %s/%s, which cannot be read without risking a partial status",
 			clientInfo.Resource.ObserveApiRef.Namespace, clientInfo.Resource.ObserveApiRef.Name)
