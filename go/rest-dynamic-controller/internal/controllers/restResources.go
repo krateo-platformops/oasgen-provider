@@ -124,6 +124,26 @@ func externalStatusCode(resp *restclient.Response, callErr error) int {
 // server.address -- omit rather than write something untrue.
 //
 // No nil guard: audit.Emitter is nil-safe, so this is a no-op when -otel-logs-enabled is off.
+// emitAudit records one external write in the C8 audit trail.
+//
+// PASS httpMethod == "" AND statusCode == 0 WHEN THIS COMPONENT DID NOT ISSUE THE REQUEST. Both are omitted
+// from the event (audit's own builder skips empty strings, and documents `0 => omitted` for the code), which
+// is the honest encoding for a DELEGATED write: the request is issued by snowplow's RESTAction stages, whose
+// methods and status codes RDC never sees.
+//
+// The six delegated call sites previously passed http.MethodPost / MethodPut / MethodDelete -- a guess from
+// the verb's semantics -- while correctly passing 0 for the status code they equally did not know. Same
+// ignorance, two treatments: the code honestly omitted, the method invented. An audit record is a compliance
+// artifact, so a field that is confidently WRONG is worse than an absent one: a reader reconciling it with
+// snowplow's own record would try to match a PUT that never existed, and conclude the trail is unreliable
+// about everything else too (#318).
+//
+// It also silently encoded "a resource update is a PUT". A peer spent three billable servers on that exact
+// assumption in their own drift machinery: across their vendored OAS set, 29 item paths declare PUT and
+// exactly one declares PATCH without it -- and that one was the resource they were driving. Their hardcoded
+// PUT reached a create-like handler, which answered 400 asking for fields an update would never send, and it
+// was filed as a vendor defect before the method was checked. We encoded the same assumption; we only
+// reported it rather than sending it.
 func (h *handler) emitAudit(ctx context.Context, mg *unstructured.Unstructured, serverURL, httpMethod string, statusCode int, callErr error) {
 	outcome := audit.OutcomeSuccess
 	msg := "external write succeeded"
@@ -762,10 +782,10 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 			log.Error(err, "Creating via RESTAction")
 			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", err))
 			// statusCode 0: delegated, so the vendor's status is snowplow's to report, not ours.
-			h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPost, 0, err)
+			h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, err)
 			return err
 		}
-		h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPost, 0, nil)
+		h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, nil)
 		if err := unstructuredtools.SetConditions(mg, condition.Creating()); err != nil {
 			return err
 		}
@@ -785,7 +805,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		// A dispatch IS an external write -- the dispatch is this resource's create -- so it is audited
 		// like one. Leaving it out would make the audit trail silently incomplete for exactly the
 		// resources that have no create verb.
-		h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPost, 0, derr)
+		h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, derr)
 		if derr != nil {
 			log.Error(derr, "Dispatching")
 			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Dispatch", derr))
@@ -977,10 +997,10 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		if err := h.mutateViaRestAction(ctx, mg, ref, clientInfo.Resource.Identifiers, "update", log); err != nil {
 			log.Error(err, "Updating via RESTAction")
 			h.eventRecorder.Event(mg, event.Warning(reasonUpdated, "Update", err))
-			h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPut, 0, err)
+			h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, err)
 			return err
 		}
-		h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodPut, 0, nil)
+		h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, nil)
 		if err := unstructuredtools.SetConditions(mg, condition.Available()); err != nil {
 			return err
 		}
@@ -1203,10 +1223,10 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		if err := h.mutateViaRestAction(ctx, mg, ref, clientInfo.Resource.Identifiers, "delete", log); err != nil {
 			log.Error(err, "Deleting via RESTAction")
 			h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", err))
-			h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodDelete, 0, err)
+			h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, err)
 			return err
 		}
-		h.emitAudit(ctx, mg, cli.ServerURL(), http.MethodDelete, 0, nil)
+		h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, nil)
 		// One arbiter for every delete path (see resolveDeleteOutcome). The RESTAction reported success,
 		// so deleteErr is nil: an unverifiable resource falls back to trusting that result, as before.
 		if outcome := h.resolveDeleteOutcome(ctx, cs, clientInfo, mg, nil, log); outcome != nil {
