@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-11-01T09:05:00Z
+timestamp: 2026-11-01T12:25:00Z
 ---
 
 # Log
@@ -12,6 +12,83 @@ timestamp: 2026-11-01T09:05:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-01 — 0.48.0
+
+Two defects that destroy or misreport state, a dependency bump, and a test for a credential path. Both
+defects were found by consumers running against real or mocked vendors, and in both cases **my first
+diagnosis was wrong and a peer corrected it**.
+
+### Helm can no longer delete the RestDefinition CRD
+
+Deleting it reaps every `RestDefinition` and every CRD they generated, and those CRs' finalizers then
+**delete real external resources at the vendor**. Measured on a live cluster upgrading from the pre-split
+chart: the crds chart created it at `22:21:23`, the provider chart's upgrade removed it at `22:21:24`.
+
+**The provider's own guard cannot prevent it.** `deploy.go` refuses to drop a generated CRD that still has
+instances, precisely to avoid this cascade — but Helm deletes the *parent* directly and asks the controller
+nothing. There is no code path from the delete to the check.
+
+**The annotation is on the Go type, not the chart**, and finding out why cost the most time here. Added to
+the chart template by hand it disappeared on the next `make generate`: `apis/generate.go` ends with
+`cp ../crds/*.yaml .../helm/oasgen-provider-crds/templates/`, so the chart's CRD is a copy of
+controller-gen's output. **The repo would have shown the protection while the published chart lost it.** As
+a `+kubebuilder:metadata:annotations` marker it is part of the generated artifact and reaches all three
+copies.
+
+The rationale sits above a **genuine blank line**, also found by checking rather than by care: written as
+part of the doc comment, controller-gen folded twenty lines into the CRD's `description` and shipped an
+essay about Helm internals into every cluster's schema.
+
+**Verified in Helm's source, not its docs.** I had claimed `keep` "would have saved this cluster", found
+the docs ambiguous and 2020-era reports of it being ignored on exactly this path, and corrected myself to
+"not established" before resolving it from `pkg/kube/client.go` at v3.19.0. The comparison is `==`, so the
+value is **case-sensitive**: `keep` works, `KEEP` does nothing.
+
+`docs/usage.md` documents the half this does not cover — an existing pre-split install needs the annotation
+applied **before** the upgrade, because the old release's manifest is immutable and is what Helm diffs
+against. Cost, stated in both places: `helm uninstall` now leaves the CRD behind.
+
+### An unresolved path placeholder no longer reaches the wire
+
+Observed on a live mock as twelve requests for `GET /v2.1/flavors/%7Bid%7D` — the **literal path template**,
+because `{id}` is mapped from a status field the create had never populated. Worse than a failure: a real
+API answers it plausibly. Nova returns `404 itemNotFound`, indistinguishable from "this resource does not
+exist", so the controller concludes something about existence from a URL it should never have built.
+
+**Two halves.** Request validation ignored **path-level parameters** entirely — `pathItem` was fetched and
+discarded, so a document factoring shared parameters up to the path item, which is the idiomatic form,
+presented *zero* parameters to validation. And substitution silently left unmatched placeholders in the
+path. Both are fixed; the second consults the document not at all, because a leftover `{...}` is wrong
+whatever the vendor declared.
+
+**My first diagnosis blamed the vendor's document and was wrong.** I asked the reporter to confirm
+`required: true` was missing; it was present in all six of theirs. They proposed three candidates, named
+which to check first, and path-level inheritance was it. Their reason for insisting is the part worth
+keeping: a wrong framing left in an issue sends the next reader to check their own document, find it
+correct, and conclude the issue does not apply to them.
+
+**The import cycle is how the defect existed.** `builder` imports the restclient package, so restclient
+could not import `builder` back — four callers that merely reason *about* a request each had the check, and
+the one place that actually substitutes placeholders could not reach it. The helper now lives in
+`pathparsing`, which imports only the standard library.
+
+**Mutation testing caught a vacuous suite.** Reverting the path-level merge left everything green, because
+every test for the new helper called it *directly* — which is precisely the original defect, a helper that
+exists and is never reached. A test that drives the real validator against a document in the failing shape
+now fails that mutation.
+
+Ordering was measured afterwards: the literal precedes the substituted form and there is no interleaving,
+so the guard is **stricter than the observed behaviour requires**. Left that way deliberately — a residual
+placeholder has no legitimate meaning at any point, and the guard should not depend on one vendor's timing.
+
+### Also
+
+`provider-runtime` to v1.7.2 in `go/oasgen-provider` (a conflict persisting late-initialized fields now
+requeues rather than surfacing as `ReconcileError`); govulncheck reports **0 called** vulnerabilities, and
+the two uncalled ones predate the bump. And the generated authentication field sets are now pinned by a
+test, because they are derived from Go structs by reflection — so a renamed json tag silently changes the
+Configuration CRD, on the one path where a credential leak has already happened.
 
 ## 2026-11-01 — 0.47.0
 
