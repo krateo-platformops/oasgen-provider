@@ -200,6 +200,35 @@ func (u *UnstructuredClient) isInResource(responseValue interface{}, fieldPath .
 // ServerURL implements UnstructuredClientInterface.
 func (u *UnstructuredClient) ServerURL() string { return u.Server }
 
+// mergeParameters returns the effective parameter set for an operation: the path item's parameters, with
+// the operation's own entries overriding any that match on both `name` and `in`.
+//
+// Both halves of the key matter. The OpenAPI specification keys parameter identity on the pair, so a path
+// item declaring `id` in `path` and an operation declaring `id` in `query` are two distinct parameters and
+// neither should displace the other.
+//
+// A nil or empty inherited set makes this the operation's own list, so the behaviour for documents that
+// declare everything at the operation level is unchanged.
+func mergeParameters(inherited, own []*v3.Parameter) []*v3.Parameter {
+	if len(inherited) == 0 {
+		return own
+	}
+	type key struct{ name, in string }
+	overridden := make(map[key]bool, len(own))
+	for _, p := range own {
+		if p != nil {
+			overridden[key{p.Name, p.In}] = true
+		}
+	}
+	merged := make([]*v3.Parameter, 0, len(inherited)+len(own))
+	for _, p := range inherited {
+		if p != nil && !overridden[key{p.Name, p.In}] {
+			merged = append(merged, p)
+		}
+	}
+	return append(merged, own...)
+}
+
 func (u *UnstructuredClient) ValidateRequest(httpMethod string, path string, parameters map[string]string, query map[string]string, headers map[string]string, cookies map[string]string) error {
 	pathItem, ok := u.DocScheme.Model.Paths.PathItems.Get(path)
 	if !ok {
@@ -209,7 +238,21 @@ func (u *UnstructuredClient) ValidateRequest(httpMethod string, path string, par
 	if !ok {
 		return fmt.Errorf("operation not found: %s", httpMethod)
 	}
-	for _, param := range getDoc.Parameters {
+	// PATH-LEVEL PARAMETERS APPLY TO EVERY OPERATION IN THE ITEM, and we were ignoring them: pathItem was
+	// fetched and then discarded, so only the operation's own block was ever examined. A document that
+	// factors shared parameters up to the path item -- the idiomatic form -- presented ZERO parameters to
+	// this validation, and its correct `required: true` was silently unused (#361).
+	//
+	// Six documents were observed in that shape, all declaring `required: true` on the path parameter, all
+	// unchecked. The first diagnosis blamed vendor hygiene; the declarations were in fact present and
+	// correct, and this was the reason.
+	//
+	// Per the specification an operation-level entry OVERRIDES an inherited one when `name` and `in` both
+	// match, so the inherited set is applied first and the operation's own entries replace it.
+	//
+	// This is not only about {placeholders}: a `required` QUERY or HEADER parameter declared at the path
+	// level was equally unvalidated.
+	for _, param := range mergeParameters(pathItem.Parameters, getDoc.Parameters) {
 		if param.Required != nil && *param.Required {
 			if param.In == "path" {
 				if _, ok := parameters[param.Name]; !ok {

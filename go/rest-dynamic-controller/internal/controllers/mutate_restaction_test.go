@@ -8,8 +8,8 @@ import (
 
 	stringset "github.com/krateo-platformops/rest-dynamic-controller/internal/text"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
-	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pathparsing"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,7 +68,7 @@ func (m *mockGetClient) Call(ctx context.Context, cli *http.Client, path string,
 // (clienttools.go:200). Approximated by scanning the path template rather than the OAS document, which
 // is equivalent for these fixtures and keeps the mock readable.
 func (m *mockGetClient) ValidateRequest(httpMethod, path string, parameters, query, headers, cookies map[string]string) error {
-	for _, name := range builder.UnresolvedPathParams(path, parameters) {
+	for _, name := range pathparsing.UnresolvedPathParams(path, parameters) {
 		return fmt.Errorf("missing path parameter: %s", name)
 	}
 	return nil

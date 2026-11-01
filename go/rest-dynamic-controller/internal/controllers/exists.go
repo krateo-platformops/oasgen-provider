@@ -9,6 +9,7 @@ import (
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/apiaction"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pathparsing"
 	ucontroller "github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -143,7 +144,7 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 	if reqConfiguration.BuildErr != nil {
 		return false, fmt.Errorf("existence check: assembling the %s request: %w", action, reqConfiguration.BuildErr)
 	}
-	if missing := builder.UnresolvedPathParams(callInfo.Path, reqConfiguration.Parameters); len(missing) > 0 {
+	if missing := pathparsing.UnresolvedPathParams(callInfo.Path, reqConfiguration.Parameters); len(missing) > 0 {
 		// The same rule as the delete guard: a resource that is not addressable is UNVERIFIABLE, not absent.
 		return false, fmt.Errorf("existence check: %s path %q has unresolved parameters (%v), so the resource is not addressable", action, callInfo.Path, missing)
 	}

@@ -9,8 +9,8 @@ import (
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	stringset "github.com/krateo-platformops/rest-dynamic-controller/internal/text"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
-	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pathparsing"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,7 +110,7 @@ func (r *recordingClient) Rejected() int {
 // ValidateRequest reproduces the one real validation these tests depend on: a required path parameter the
 // configuration does not supply is refused before any HTTP (clienttools.go:200).
 func (r *recordingClient) ValidateRequest(httpMethod, path string, parameters, query, headers, cookies map[string]string) error {
-	for _, name := range builder.UnresolvedPathParams(path, parameters) {
+	for _, name := range pathparsing.UnresolvedPathParams(path, parameters) {
 		return fmt.Errorf("missing path parameter: %s", name)
 	}
 	return nil
