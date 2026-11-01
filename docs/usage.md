@@ -128,6 +128,40 @@ helm upgrade ... --reuse-values \
 It propagates within one reconcile; there is no need to touch the generated Deployments, and
 patching them by hand would be reverted anyway.
 
+### Upgrading from a pre-split install: annotate the CRD FIRST
+
+**If you are upgrading from a `charts.krateo.io`-era install (chart 0.11.x / appVersion 0.10.0, where the
+CRD was bundled in the provider chart), do this before anything else:**
+
+```bash
+kubectl annotate crd restdefinitions.ogen.krateo.io helm.sh/resource-policy=keep
+```
+
+**Without it the upgrade deletes the CRD**, and that deletion cascades: every `RestDefinition` goes, every
+CRD they generated is reaped, and those CRs' finalizers fire — **deleting real resources at the vendor.**
+Measured on a live cluster: the `oasgen-provider-crds` chart created the CRD at `22:21:23` and the provider
+chart's upgrade removed it at `22:21:24`, one second apart, taking four RestDefinitions and four generated
+CRDs with it. Only the `*Configuration` siblings survived, because they are not reaped with their parent.
+
+Helm removes resources that are in the **old** release's manifest and absent from the **new** one. The CRD
+moved to its own chart, so it is exactly that — and **adopting it with an ownership annotation patch does
+not help**: that fixes the import check, and the removal is a separate decision Helm makes without
+consulting ownership.
+
+**The provider's own guard cannot save you here.** It refuses to drop a generated CRD that still has
+instances, precisely to avoid this cascade — but Helm deletes the *parent* CRD directly and asks the
+controller nothing, so there is no path from the delete to the check.
+
+Two details that cost people time:
+
+- **The value is case-sensitive.** `keep` works; `KEEP` does nothing. Helm compares with `==`, not a
+  case-insensitive match.
+- **Current charts carry this annotation already**, so a fresh install is protected and only the
+  pre-split upgrade path needs the manual step. The trade is that `helm uninstall` now leaves the CRD
+  behind — removing it is a deliberate `kubectl delete crd restdefinitions.ogen.krateo.io`. For a CRD
+  whose removal fires finalizers against live infrastructure, naming the thing you are deleting is the
+  intended cost.
+
 ## Consuming it: author a RestDefinition
 
 Once the provider runs, usage is entirely declarative:

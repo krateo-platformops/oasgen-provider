@@ -1182,8 +1182,36 @@ type RestDefinitionStatus struct {
 // meaningful rather than missing: no Configuration CRD is generated unless configurationFields or security
 // schemes are present. It stays at priority=10 so the default view remains short.
 
+// The helm.sh/resource-policy annotation on RestDefinition below is set here, on the TYPE, rather than
+// hand-added to the chart: the chart's copy is GENERATED -- apis/generate.go ends with
+// `cp ../crds/*.yaml ../../../helm/oasgen-provider-crds/templates/` -- so an annotation edited into that
+// file is erased by the next `make generate`, which is exactly what the CI drift guard runs. Set here it
+// is part of the generated artifact and reaches the chart and RDC's testdata copy alike.
+//
+// WHY HELM MUST NOT DELETE THAT CRD: deleting it reaps every RestDefinition and every CRD they generated,
+// and those CRs' finalizers then DELETE REAL EXTERNAL RESOURCES at the vendor. The provider's own guard
+// cannot prevent it -- deploy.go refuses to drop a generated CRD with live instances, but Helm deletes the
+// parent directly and asks the controller nothing. Measured on a live cluster upgrading from the pre-split
+// chart: created 22:21:23, removed by the provider chart's upgrade 22:21:24, taking four RestDefinitions
+// and four generated CRDs with it (#297).
+//
+// Verified in Helm v3.19.0's source rather than its docs -- pkg/kube/client.go's deletion loop for
+// "present in the original, absent from the target" short-circuits on
+// `annotations[ResourcePolicyAnno] == KeepPolicy`. That is `==`, so the value is CASE-SENSITIVE: `keep`
+// works and `KEEP` does nothing (helm#5394).
+//
+// Cost, deliberate: `helm uninstall` now leaves the CRD behind, and removing it is an explicit
+// `kubectl delete crd restdefinitions.ogen.krateo.io`. Upgrades are unaffected; the policy short-circuits
+// deletion only. For a CRD whose removal fires finalizers against live infrastructure, naming the thing
+// you are deleting is the right price.
+//
+// THIS BLOCK IS SEPARATED FROM THE DOC COMMENT BY A BLANK LINE ON PURPOSE. controller-gen folds
+// contiguous prose above a type into the CRD's `description`, so writing it as part of the doc comment
+// ships all of the above into every cluster's schema and into `kubectl explain` output.
+
 // RestDefinition is a RestDefinition type with a spec and a status.
 // +kubebuilder:object:root=true
+// +kubebuilder:metadata:annotations="helm.sh/resource-policy=keep"
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,categories={krateo,restdefinition,core}
 // +kubebuilder:printcolumn:name="READY",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
