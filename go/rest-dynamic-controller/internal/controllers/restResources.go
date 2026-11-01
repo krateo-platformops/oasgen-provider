@@ -15,6 +15,7 @@ import (
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/fieldmapping"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pathparsing"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/snowplow"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
@@ -1392,7 +1393,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// Warn rather than debug: the identifier can also go missing on a resource that DOES exist (e.g. status
 	// was lost), and that case orphans the external resource. Holding the finalizer would not save it —
 	// nothing can re-derive the identifier — so the operator needs to see it, not be blocked by it.
-	if missing := builder.UnresolvedPathParams(callInfo.Path, reqConfiguration.Parameters); len(missing) > 0 {
+	if missing := pathparsing.UnresolvedPathParams(callInfo.Path, reqConfiguration.Parameters); len(missing) > 0 {
 		log.Warn("External resource is not addressable, releasing finalizer without calling the API",
 			"kind", mg.GetKind(), "path", callInfo.Path, "unresolvedPathParams", strings.Join(missing, ","))
 		if serr := unstructuredtools.SetConditions(mg, condition.Deleting()); serr != nil {

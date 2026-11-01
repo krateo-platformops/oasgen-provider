@@ -10,6 +10,7 @@ import (
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/apiaction"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pathparsing"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/snowplow"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -177,11 +178,11 @@ func (h *handler) externalResourceStillExists(ctx context.Context, cs *clientSet
 	// deleted immediately -- because the NATIVE delete path has had this guard all along
 	// (restResources.go), and this path never consulted it.
 	//
-	// Uses builder.UnresolvedPathParams, the same helper the native guard uses, deliberately: the two paths
+	// Uses pathparsing.UnresolvedPathParams, the same helper the native guard uses, deliberately: the two paths
 	// must agree on what "not addressable" means, and a shared helper makes that true by construction
 	// rather than by two implementations staying in step. Matching on the error string instead would couple
 	// this to a message and silently restore the wedge the next time it is reworded.
-	if missing := builder.UnresolvedPathParams(getInfo.Path, getReq.Parameters); len(missing) > 0 {
+	if missing := pathparsing.UnresolvedPathParams(getInfo.Path, getReq.Parameters); len(missing) > 0 {
 		log.Warn("Cannot verify deletion: the external resource is not addressable, so the delete result governs",
 			"kind", mg.GetKind(), "path", getInfo.Path, "unresolvedPathParams", strings.Join(missing, ","))
 		return false, false, nil

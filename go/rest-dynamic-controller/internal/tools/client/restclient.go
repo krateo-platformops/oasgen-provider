@@ -150,6 +150,22 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 	if u.DocScheme == nil {
 		return Response{}, fmt.Errorf("OpenAPI document scheme not initialized")
 	}
+	// A PLACEHOLDER THAT SURVIVED SUBSTITUTION MUST NOT REACH THE WIRE. buildPath replaces the parameters
+	// it was given and silently leaves any it was not, so an absent value produces a request for the
+	// literal template -- measured on a live mock as `GET /v2.1/flavors/%7Bid%7D`, twelve times, where
+	// `%7Bid%7D` is `{id}` (#361).
+	//
+	// That is worse than a failure because a real API answers it plausibly: Nova returns 404 itemNotFound,
+	// which is indistinguishable from "this resource does not exist", so the controller draws a conclusion
+	// about existence from a URL it should never have built.
+	//
+	// Deliberately NOT keyed on the document. The declaration was correct in every observed case -- six
+	// documents, all with `required: true` -- and was ignored for an unrelated reason, so a check that
+	// consults the parameter block would have passed here. A leftover `{...}` is wrong whatever the vendor
+	// declared.
+	if missing := pathparsing.UnresolvedPathParams(path, opts.Parameters); len(missing) > 0 {
+		return Response{}, fmt.Errorf("refusing to request %s: unresolved path parameter(s) %v -- the value is absent, so this request would address the literal template rather than a resource", path, missing)
+	}
 	uri := buildPath(u.Server, path, opts.Parameters, opts.Query)
 	if uri == nil {
 		return Response{}, fmt.Errorf("failed to build URI using server %s and path %s", u.Server, path)
@@ -664,6 +680,22 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 	}
 	if u.DocScheme == nil {
 		return Response{}, nil, fmt.Errorf("OpenAPI document scheme not initialized")
+	}
+	// A PLACEHOLDER THAT SURVIVED SUBSTITUTION MUST NOT REACH THE WIRE. buildPath replaces the parameters
+	// it was given and silently leaves any it was not, so an absent value produces a request for the
+	// literal template -- measured on a live mock as `GET /v2.1/flavors/%7Bid%7D`, twelve times, where
+	// `%7Bid%7D` is `{id}` (#361).
+	//
+	// That is worse than a failure because a real API answers it plausibly: Nova returns 404 itemNotFound,
+	// which is indistinguishable from "this resource does not exist", so the controller draws a conclusion
+	// about existence from a URL it should never have built.
+	//
+	// Deliberately NOT keyed on the document. The declaration was correct in every observed case -- six
+	// documents, all with `required: true` -- and was ignored for an unrelated reason, so a check that
+	// consults the parameter block would have passed here. A leftover `{...}` is wrong whatever the vendor
+	// declared.
+	if missing := pathparsing.UnresolvedPathParams(path, opts.Parameters); len(missing) > 0 {
+		return Response{}, nil, fmt.Errorf("refusing to request %s: unresolved path parameter(s) %v -- the value is absent, so this request would address the literal template rather than a resource", path, missing)
 	}
 	uri := buildPath(u.Server, path, opts.Parameters, opts.Query)
 	if uri == nil {
