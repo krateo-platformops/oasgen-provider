@@ -167,6 +167,17 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 		return false
 	}
 
+	// propertyNamed returns the existing property's schema, so a colliding parameter's validation
+	// keywords can be reconciled with it rather than discarded (#257).
+	propertyNamed := func(name string) *Schema {
+		for i := range schema.Properties {
+			if schema.Properties[i].Name == name {
+				return schema.Properties[i].Schema
+			}
+		}
+		return nil
+	}
+
 	// Internal helper function to check if property is already required in schema
 	requiredParameters := map[string]bool{}
 	// Parameters a request-direction fieldMapping supplies. See mappingSuppliedParams: these are omitted
@@ -281,10 +292,144 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 				//log.Printf("Marking existing property '%s' as required based on parameter definition", param.Name)
 				schema.Required = append(schema.Required, param.Name)
 			}
+
+			// A colliding parameter's VALIDATION KEYWORDS used to be discarded entirely -- only
+			// `required` above survived -- so a `pattern` or `maxLength` declared on the parameter was
+			// read, dropped here, and enforced by nothing (#257). Measured on a live cluster: a field
+			// that is both a create-body property and a path parameter kept the body's `pattern`, while
+			// one declared ONLY as a path parameter lost it.
+			//
+			// Worse than not supporting the keyword, because the document reads as though the constraint
+			// applies. Same shape as #249, one layer up: that one dropped keywords at the conversion
+			// boundary, this one drops them at the merge.
+			if existing := propertyNamed(param.Name); existing != nil && param.Schema != nil {
+				warnings = append(warnings, reconcileParameterValidation(existing, param.Schema, param.Name, verb.Action)...)
+			}
 		}
 	}
 
 	return requiredParameters, warnings, nil
+}
+
+// reconcileParameterValidation merges a parameter's validation keywords into a body property of the same
+// name, and returns a warning for each keyword the two declare DIFFERENTLY.
+//
+// Three cases, and only one of them is a judgement call:
+//
+//	the property does not declare it  -> MERGE. The document declares the constraint for this field and
+//	                                     nothing is being guessed.
+//	both declare it, same value       -> nothing to do.
+//	both declare it, DIFFERENT values -> WARN and keep the property's. The same name means two things in
+//	                                     one request, which only the author can reconcile.
+//
+// Silently merging a conflict would be the same defect as silently dropping it, in the other direction:
+// it would tighten a constraint the author never asked for, on a field whose body declaration they may
+// have chosen deliberately. So the ambiguous case gets a diagnostic rather than a decision.
+//
+// Bools (ExclusiveMinimum, ExclusiveMaximum, UniqueItems) have no conflict case: false is both the zero
+// value and OAS's default, so only a true can be a declaration, and merging true over false loses nothing.
+func reconcileParameterValidation(existing, param *Schema, name, action string) []error {
+	var warnings []error
+
+	conflict := func(keyword string, have, want any) {
+		warnings = append(warnings, fmt.Errorf(
+			"parameter %q on the %s verb declares %s=%v while the request body declares %s=%v for the same "+
+				"field; keeping the body's value. Reconcile them in the document -- the generated CRD can "+
+				"enforce only one, and the parameter's is the one that addresses the URL",
+			name, action, keyword, want, keyword, have))
+	}
+
+	if param.Pattern != "" {
+		if existing.Pattern == "" {
+			existing.Pattern = param.Pattern
+		} else if existing.Pattern != param.Pattern {
+			conflict("pattern", existing.Pattern, param.Pattern)
+		}
+	}
+	if param.MinLength != nil {
+		if existing.MinLength == nil {
+			existing.MinLength = param.MinLength
+		} else if *existing.MinLength != *param.MinLength {
+			conflict("minLength", *existing.MinLength, *param.MinLength)
+		}
+	}
+	if param.MaxLength != nil {
+		if existing.MaxLength == nil {
+			existing.MaxLength = param.MaxLength
+		} else if *existing.MaxLength != *param.MaxLength {
+			conflict("maxLength", *existing.MaxLength, *param.MaxLength)
+		}
+	}
+	if param.Minimum != nil {
+		if existing.Minimum == nil {
+			existing.Minimum = param.Minimum
+		} else if *existing.Minimum != *param.Minimum {
+			conflict("minimum", *existing.Minimum, *param.Minimum)
+		}
+	}
+	if param.Maximum != nil {
+		if existing.Maximum == nil {
+			existing.Maximum = param.Maximum
+		} else if *existing.Maximum != *param.Maximum {
+			conflict("maximum", *existing.Maximum, *param.Maximum)
+		}
+	}
+	if param.MultipleOf != nil {
+		if existing.MultipleOf == nil {
+			existing.MultipleOf = param.MultipleOf
+		} else if *existing.MultipleOf != *param.MultipleOf {
+			conflict("multipleOf", *existing.MultipleOf, *param.MultipleOf)
+		}
+	}
+	if param.MinItems != nil {
+		if existing.MinItems == nil {
+			existing.MinItems = param.MinItems
+		} else if *existing.MinItems != *param.MinItems {
+			conflict("minItems", *existing.MinItems, *param.MinItems)
+		}
+	}
+	if param.MaxItems != nil {
+		if existing.MaxItems == nil {
+			existing.MaxItems = param.MaxItems
+		} else if *existing.MaxItems != *param.MaxItems {
+			conflict("maxItems", *existing.MaxItems, *param.MaxItems)
+		}
+	}
+	if param.ExclusiveMinimum && !existing.ExclusiveMinimum {
+		existing.ExclusiveMinimum = true
+	}
+	if param.ExclusiveMaximum && !existing.ExclusiveMaximum {
+		existing.ExclusiveMaximum = true
+	}
+	if param.UniqueItems && !existing.UniqueItems {
+		existing.UniqueItems = true
+	}
+
+	// Enum is deliberately NOT merged. Two enums are not a constraint to combine -- an intersection may be
+	// empty and a union weakens both -- so a difference here is reported and left to the author.
+	if len(param.Enum) > 0 && len(existing.Enum) > 0 && !sameEnum(existing.Enum, param.Enum) {
+		conflict("enum", existing.Enum, param.Enum)
+	} else if len(param.Enum) > 0 && len(existing.Enum) == 0 {
+		existing.Enum = param.Enum
+	}
+
+	return warnings
+}
+
+// sameEnum compares two enums as ordered lists, which is how a document writes them. Treating them as sets
+// would call [a,b] and [b,a] identical -- true for validation, and a difference worth nobody's warning --
+// but it would also need a deep compare of interface{} values, and a false "same" here silently discards a
+// real difference. Ordered comparison errs toward reporting.
+func sameEnum(a, b []interface{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if fmt.Sprintf("%v", a[i]) != fmt.Sprintf("%v", b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // addConfigurationRefToSpec adds the `configurationRef` property to the schema (at the root level of spec).
