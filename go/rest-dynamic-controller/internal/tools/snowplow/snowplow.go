@@ -33,6 +33,10 @@ type Client struct {
 	server     string
 	httpClient *http.Client
 	token      TokenFunc
+	// invalidate drops the token provider's cache. Called ONCE per Resolve on a 401, so an authn
+	// signing-key rotation is self-healing rather than an outage until the cached JWT nears expiry
+	// (#369). nil when the caller supplies no token or no invalidator.
+	invalidate func()
 }
 
 // New returns a snowplow client for the given base URL (e.g.
@@ -45,6 +49,12 @@ func New(server string, token TokenFunc) *Client {
 		token:      token,
 	}
 }
+
+// WithTokenInvalidator sets the callback used to drop a stale cached token when snowplow answers 401.
+//
+// Separate from New rather than a parameter, so an existing caller that passes only a TokenFunc keeps
+// working unchanged and a nil invalidator means "retry nothing" rather than a panic.
+func (c *Client) WithTokenInvalidator(f func()) *Client { c.invalidate = f; return c }
 
 func (c *Client) WithHTTPClient(h *http.Client) *Client { c.httpClient = h; return c }
 
@@ -87,29 +97,62 @@ func (c *Client) Resolve(ctx context.Context, ref ApiRef, extras map[string]any)
 		q.Set("extras", string(b))
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u+"?"+q.Encode(), nil)
-	if err != nil {
-		return nil, "", fmt.Errorf("creating request: %w", err)
-	}
-	if c.token != nil {
-		tok, err := c.token(ctx)
+	// issue builds and sends the request, acquiring a token each time so a retry picks up a fresh one.
+	issue := func() (int, []byte, http.Header, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u+"?"+q.Encode(), nil)
 		if err != nil {
-			return nil, "", fmt.Errorf("acquiring snowplow token: %w", err)
+			return 0, nil, nil, fmt.Errorf("creating request: %w", err)
 		}
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
-	req.Header.Set("Accept", "application/json")
+		if c.token != nil {
+			tok, terr := c.token(ctx)
+			if terr != nil {
+				return 0, nil, nil, fmt.Errorf("acquiring snowplow token: %w", terr)
+			}
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		req.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		// http.Client.Do wraps transport failures in a *url.Error whose string embeds the full request URL —
-		// including the extras query. Strip it so the request data never reaches error logs.
-		return nil, "", fmt.Errorf("calling snowplow: %w", stripURL(err))
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			// http.Client.Do wraps transport failures in a *url.Error whose string embeds the full request
+			// URL — including the extras query. Strip it so the request data never reaches error logs.
+			return 0, nil, nil, fmt.Errorf("calling snowplow: %w", stripURL(err))
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		// The headers travel with the body: X-Snowplow-Stage-Outcomes is read after the call, and on a
+		// retry it must be the RETRY's header rather than the discarded 401's.
+		return resp.StatusCode, b, resp.Header, nil
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("snowplow returned %d: %s", resp.StatusCode, string(body))
+
+	code, body, hdr, err := issue()
+	if err != nil {
+		return nil, "", err
+	}
+
+	// A 401 means the token this controller presented was rejected. The cache that produced it keys on
+	// TIME ALONE, so after an authn signing-key rotation it will keep returning the same dead JWT until
+	// refreshSkew — an outage lasting up to the token's remaining lifetime, cleared by a pod restart,
+	// which makes it look like a transient (#369). Dropping the cache and re-issuing makes a rotation
+	// self-healing.
+	//
+	// EXACTLY ONCE, deliberately. snowplow can answer 401 for reasons a fresh token cannot fix — a
+	// misconfigured audience, a mapping that no longer exists — and retrying those in a loop would turn a
+	// clear failure into a hot one. One attempt distinguishes "my token went stale" from "my identity is
+	// wrong" and then reports the latter.
+	//
+	// Safe to re-issue because /call is a GET: no body, no side effect from the request itself. A retry on
+	// a mutating verb would need idempotency the endpoint does not promise.
+	if code == http.StatusUnauthorized && c.invalidate != nil {
+		c.invalidate()
+		code, body, hdr, err = issue()
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	if code != http.StatusOK {
+		return nil, "", fmt.Errorf("snowplow returned %d: %s", code, string(body))
 	}
 
 	// snowplow returns the resolved RESTAction CR; .status is the keyed .api response map.
@@ -128,7 +171,7 @@ func (c *Client) Resolve(ctx context.Context, ref ApiRef, extras map[string]any)
 	// and iterated over ZERO items succeeds and appears nowhere here -- which is exactly the case that
 	// produced #292, where every layer reported success and only a verification GET knew otherwise. Treat a
 	// non-empty value as real evidence of failure; never treat an empty one as evidence of completion.
-	failedStages = StageOutcomes(resp.Header)
+	failedStages = StageOutcomes(hdr)
 	if cr.Status == nil {
 		return map[string]any{}, failedStages, nil
 	}

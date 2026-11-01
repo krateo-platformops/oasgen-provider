@@ -327,11 +327,18 @@ func main() {
 	// authn client provides the Bearer JWT when an authn URL is set.
 	if *snowplowURL != "" {
 		var tokenFunc snowplow.TokenFunc
+		// invalidateToken drops the authn client's cached JWT. Captured here because the snowplow client
+		// is the only thing that sees a 401, and the authn client is the only thing that can act on it --
+		// without this wiring an authn signing-key rotation leaves the controller presenting a dead token
+		// until refreshSkew (#369). nil when no authn URL is set, in which case there is no cache to drop.
+		var invalidateToken func()
 		if *authnURL != "" {
-			tokenFunc = authn.New(*authnURL, *saTokenPath).Token
+			authnClient := authn.New(*authnURL, *saTokenPath)
+			tokenFunc = authnClient.Token
+			invalidateToken = authnClient.Invalidate
 		}
 		if h, ok := handler.(interface{ SetSnowplowClient(*snowplow.Client) }); ok {
-			h.SetSnowplowClient(snowplow.New(*snowplowURL, tokenFunc))
+			h.SetSnowplowClient(snowplow.New(*snowplowURL, tokenFunc).WithTokenInvalidator(invalidateToken))
 			log.Info("observeApiRef resolution enabled", "snowplow", *snowplowURL, "authn", *authnURL)
 		}
 	}
