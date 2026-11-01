@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-10-31T20:20:00Z
+timestamp: 2026-11-01T09:05:00Z
 ---
 
 # Log
@@ -12,6 +12,76 @@ timestamp: 2026-10-31T20:20:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-01 — 0.47.0
+
+A crash, a diagnostic, and a document. Cut for the first of those: it is in every released version,
+including the one three sessions pinned yesterday.
+
+### An unresolvable `$ref` in a request body crashed the controller pod
+
+`populateFromAllOf` dereferences `schema.Type` on its first line and had no nil guard, which was
+reachable rather than theoretical:
+
+```
+populateFromAllOf(nil)  ->  runtime error: invalid memory address or nil pointer dereference
+```
+
+**Two independent halves**, both fixed, because either alone prevents the crash and leaving one is a trap
+for the next caller. The function is now nil-safe, matching how `validatePatterns` guards the same
+recursion in the generator's sibling package. And the `allOf` loop now checks `BuildSchema`'s error
+**before** recursing — on error it returns `(nil, err)`, so recursing first was the route to the nil.
+
+**The array branch of the same function, ten lines above, already checked first.** The identical failure
+handled correctly in one branch and incorrectly in the other is what made this a defect rather than a
+design choice.
+
+A panic here takes the pod down for **every** resource that controller manages, not just the one with the
+bad reference — and the author sees a `CrashLoopBackOff`, which points nowhere near a typo in a schema.
+
+**Mutation-testing the halves separately found a gap that would otherwise have shipped.** Restoring the
+original ordering left every behavioural test passing, because the new nil guard absorbs the nil; the
+ordering is still wrong and nothing observable fails, so a reader tidying the loop could reintroduce it
+freely. It now has its own source-level assertion, scoped to the `range schema.AllOf` loop so it cannot
+pass by matching the array branch.
+
+Scope stated rather than implied: the route to nil is **code-derived**. libopenapi rejects an unresolvable
+`$ref` earlier, inside its own build, so the end-to-end test asserts such a document is handled without a
+panic from our side and skips if the library refuses it first.
+
+### A resource waiting on a missing referent now says which one
+
+`Pending` was set by four code paths and could not be acted on. Two are async and polled — and that
+machinery already handles terminal failure. **The other two are not async at all:** a `dependentLookup`
+whose referent is missing sets `Pending` with no operation handle, so nothing will ever move it off. If
+that referent never appears — a typo, a CR nobody created — the resource waits forever, and the reason is
+`Pending` either way, indistinguishable from an async create thirty seconds in and about to succeed.
+
+The detail existed where it was produced (`dependent lookup %q found no item matching %q`) and reached
+only a Debug log, which is off by default. It now reaches the CR.
+
+**The message is the only difference, deliberately.** `IsConditionSet` compares Type, Status and Reason
+and ignores Message, so the `notfound && IsConditionSet(mg, Pending())` guard keeps matching and no
+control flow changes. A distinct Reason is what a reader would expect a new constructor to have, and it
+would stop that guard matching — silently reporting a waiting resource as not existing. The test pins the
+**sameness** rather than the difference.
+
+This also corrects the issue it came from: that issue claimed such a resource "reports healthy". It does
+not. `Pending` is `Ready=False`, and the runtime's up-to-date branch sets `ReconcileSuccess` without
+setting `Available`. Checking that before building anything is what kept this from being a behaviour
+change in search of a defect.
+
+### Enveloped APIs: declare the unwrapped body, wrap on the wire
+
+Declaring the envelope in the OpenAPI document **looks like it works and silently does the wrong thing**.
+The body's field list comes from top-level properties only, so an envelope yields a body of one field and
+everything beneath it passes through unfiltered. The create succeeds; what is invisible is that write-only
+fields travel too — a Zendesk `comment` re-posted on every drift-triggered PATCH, adding a comment each
+time, with nothing erroring.
+
+The documented shape puts the envelope in `requestTransform`/`responseTransform`, which is the designed
+seam. A live four-kind e2e against a real Zendesk confirmed the hazard does not bite when it is done that
+way — the first time the recommended alternative had been exercised end to end rather than reasoned about.
 
 ## 2026-10-31 — 0.46.0
 
