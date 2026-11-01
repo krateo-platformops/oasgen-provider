@@ -462,6 +462,16 @@ func collectLeafPaths(schema *base.Schema, prefix string, out *[]string, depth i
 // func PopulateFromAllOf() is a method that populates the schema with the properties from the allOf field.
 // the recursive function to populate the schema with the properties from the allOf field.
 func populateFromAllOf(schema *base.Schema) {
+	// A nil schema is reachable, not defensive padding: BuildSchema returns (nil, err) for a $ref it
+	// cannot resolve, and the allOf loop below used to recurse BEFORE checking that error. Dereferencing
+	// schema.Type on the next line then panics, and a panic in this package takes the controller pod down
+	// -- an unresolvable $ref in a request body is an author's typo, not a crash-worthy event (#302).
+	//
+	// validatePatterns in the generator's sibling package guards its entry exactly this way, for the same
+	// recursion over the same shape.
+	if schema == nil {
+		return
+	}
 	if len(schema.Type) > 0 && schema.Type[0] == "array" {
 		if schema.Items != nil {
 			if schema.Items.N == 0 {
@@ -480,10 +490,13 @@ func populateFromAllOf(schema *base.Schema) {
 	}
 	for _, proxy := range schema.AllOf {
 		propSchema, err := proxy.BuildSchema()
-		populateFromAllOf(propSchema)
+		// Checked BEFORE recursing. The array branch above already does this; this one did not, so the
+		// same failure was handled correctly ten lines up and incorrectly here. On error propSchema is
+		// nil, and recursing into it was the demonstrated route to the panic.
 		if err != nil {
 			return
 		}
+		populateFromAllOf(propSchema)
 		// Iterate over the properties of the schema with First() and Next()
 		for prop := propSchema.Properties.First(); prop != nil; prop = prop.Next() {
 			if schema.Properties == nil {
