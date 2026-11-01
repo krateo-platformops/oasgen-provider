@@ -49,7 +49,34 @@ type: application
 # selector is applied one layer above, on the controller's ListWatcher, as exact equality -- an
 # unlabelled instance is never delivered, so that resolution code never runs for it. It tolerates
 # version SKEW, not label ABSENCE. The note at that call site says the same thing from the other end.
+# The kubeVersion rationale is ALSO carried as the krateo.io/kubeversion-rationale annotation, not only
+# in comments, because `helm package` RE-SERIALISES Chart.yaml and discards every comment in it --
+# measured on the published 0.48.0 chart: `grep -c '^#'` returns 0 while kubeVersion itself survives
+# (#280). Without the annotation a consumer receives the constraint with no reason for it. Annotations are
+# structured data, so they survive; verified by packaging a copy before relying on it.
 kubeVersion: ">=1.36.0-0"
+
+annotations:
+  krateo.io/kubeversion-rationale: |-
+    >=1.36.0-0 is required because the generated CRDs depend on two 1.36 features, and BOTH are enforced
+    at RENDER time rather than at apply time -- so a cluster below the floor fails before anything is
+    installed, with a Helm error from a chart it may not have chosen directly.
+
+    (1) MutatingAdmissionPolicy, GA and on by default from 1.36. It stamps krateo.io/oas-version onto
+        instances so the controller can select the exact generation it owns. On an older cluster nothing
+        writes that label, the selector matches nothing, and resources are silently unmanaged -- which
+        looks like a controller that has stopped rather than a version problem.
+
+    (2) CRD schema ratcheting, which lets a generated CRD tighten validation on a field without
+        rejecting objects that already violate the new rule. Without it, regenerating a CRD against an
+        updated OpenAPI document can make existing CRs unupdatable.
+
+    Both are generation-time requirements, not runtime niceties: the floor cannot be relaxed by accepting
+    reduced functionality, because these mechanisms are what make a generated CRD safe to re-generate.
+
+    CI NOTE: kind and helm/kind-action both default BELOW this floor, so a job that passes locally can
+    fail in CI purely from the default node image. Pin an explicit 1.36+ node image.
+
 
 # This is the chart version. This version number should be incremented each time you make changes
 # to the chart and its templates, including the app version.
