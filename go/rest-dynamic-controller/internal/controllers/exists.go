@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	customcondition "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers/condition"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/apiaction"
@@ -14,6 +15,60 @@ import (
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
+
+// The reason and action carried by the event below. "Undetermined" rather than "Failed": the whole point
+// of this code path is that it declines to answer, and an operator who reads "failed" will look for a
+// broken API rather than for an unanswerable question.
+const (
+	reasonExistenceUndetermined event.Reason = "ExistenceUndetermined"
+	actionExistenceCheck        event.Action = "ExistenceCheck"
+)
+
+// Exists records WHY it could not answer, then answers.
+//
+// The reason has to be emitted here because the caller throws it away. unstructured-runtime's recovery
+// block assigns our error and then references it exactly once, in the `!= nil` test
+// (pkg/controller/worker.go:386-396 at v1.7.1): it reaches no log line, no event and no condition. What
+// an operator sees instead, in all three channels, is one fixed string --
+//
+//	cannot determine creation result - remove the krateo.io/external-create-pending annotation if it is
+//	safe to proceed
+//
+// -- for every one of the distinct reasons existenceFromExternalAPI is careful to separate. And that
+// string's own remediation is the only exit from the wedge, while the operator cannot judge "if it is
+// safe to proceed" because the reason that would decide it is the thing being discarded. Surfaced to the
+// session that owns unstructured-runtime; this covers RDC's kinds until a fix lands there, and should be
+// removed when it does rather than left to duplicate the upstream event.
+//
+// AN EVENT IS NOT A MUTATION. The ExistenceChecker contract says an implementation "must not attempt to
+// converge, repair or otherwise mutate anything", and this respects that: an Event is a separate API
+// object recording an observation. Nothing here writes the managed resource, its status, or anything
+// external -- which is also why the event is emitted on the ERROR paths only. A definite true or false
+// needs no explanation, and an event per reconcile on the healthy path would bury the one case worth
+// reading.
+//
+// THE NIL GUARD IS NOT COPIED IDIOM. Every other eventRecorder call in this package is unguarded, because
+// the constructor installs event.NewNopRecorder() (restResources.go:65) and production is therefore never
+// nil. This one is guarded anyway: the runtime reaches Exists through a type assertion during
+// incomplete-create RECOVERY, so a nil-recorder panic would crash the controller in the middle of exactly
+// the incident this file exists to survive -- and a panic in a diagnostic emission is strictly worse than
+// a missing diagnostic. Adding the guard also stopped it from panicking the existing #317 cases, which
+// build a handler by hand; fixing those tests instead would have left the panic reachable in production
+// for any future construction site.
+//
+// The guard cannot make the emission test vacuous: that test passes a recording recorder, so the guard is
+// true there, and the mutation check confirms the case fails when the emission is removed.
+//
+// Written as a wrapper rather than at each return deliberately: there are SIXTEEN error paths in
+// existenceFromExternalAPI and this cannot miss one, including one added later. I first wrote this
+// comment claiming thirteen, from reading rather than counting; the count assertion caught it.
+func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bool, error) {
+	exists, err := h.existenceFromExternalAPI(ctx, mg)
+	if err != nil && h.eventRecorder != nil {
+		h.eventRecorder.Event(mg, event.Warning(reasonExistenceUndetermined, actionExistenceCheck, err))
+	}
+	return exists, err
+}
 
 // Exists implements unstructured-runtime's ExistenceChecker, which incomplete-create recovery prefers over
 // Observe.
@@ -47,7 +102,7 @@ import (
 // liveInstanceCount (a LIST failure must never read as zero instances) and the delete guard (unverifiable
 // must not read as deleted). All three are recovery or teardown paths, where the plausible value is also the
 // destructive one.
-func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bool, error) {
+func (h *handler) existenceFromExternalAPI(ctx context.Context, mg *unstructured.Unstructured) (bool, error) {
 	log := h.logger.WithValues("kind", mg.GetKind(), "name", mg.GetName())
 
 	if h.swaggerInfoGetter == nil {
