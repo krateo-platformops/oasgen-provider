@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-11-01T12:25:00Z
+timestamp: 2026-11-02T21:15:00Z
 ---
 
 # Log
@@ -12,6 +12,87 @@ timestamp: 2026-11-01T12:25:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-02 — 0.49.0
+
+Two defects that produce a wrong answer rather than a failure, a credential cache that could not see its
+own invalidation, a documentation page that was wrong, and three tests over code that already worked. Most
+of it came from a parallel verification pass over issues nobody had re-read since filing.
+
+### A findby no-match is no longer proof of absence
+
+**The existence checker could duplicate a live vendor resource.** `Exists` reaches findby precisely when a
+resource is not addressable by identifier — "the normal state for a create whose response we never
+recorded", in its own words — and a findby that matches nothing **synthesises** a 404. That 404 was then
+read as "a definite negative ... the ONLY path that may return false".
+
+So: create succeeds at the vendor, the response is lost, findby cannot match, `Exists` reports absence, and
+the runtime creates a second one. The file's comment had the stake exactly right —
+*"Returning false here is what would recreate a live resource"* — and the synthesised 404 slipped past it
+because on the wire it is indistinguishable from the vendor's own.
+
+**The distinction is a field rather than a change to `IsNotFoundError`, because the two callers need
+different answers.** `Observe` is right to treat no-match as not-exists: creating is the intent and no
+duplicate is possible yet. `Exists` is the one caller for whom a wrong `false` is unrecoverable.
+
+Three synthesis sites, enumerated rather than assumed — and one of them revises an existing claim. The
+paginated `Exhausted` branch asserted "authoritative absence"; `Exhausted` is authoritative about **the
+scan**, not about **the predicate**. If the resource is present and our identifiers do not appear in the
+item shape, no item matches a complete scan either. The `notFoundCodes` remap is deliberately *not*
+marked: there the vendor signalled absence with a non-standard code, which is authoritative.
+
+**The mutation that mattered was the ordering one.** Swapping the two cases leaves the code compiling, the
+predicate present, and the fix **completely inert**, because `IsNotFoundError` is true for a synthesised
+404 as well.
+
+### A declared constraint that was enforced by nothing
+
+When a parameter's name collided with a request-body property, the parameter's **entire schema** was
+discarded — only `required` survived. Measured on a live cluster: a field declared in both kept the body's
+`pattern`, while one declared **only** as a path parameter lost it.
+
+Now the keywords merge, with the ambiguous case refused rather than decided: merge when the body is
+silent, say nothing when they agree, **warn and keep the body's** when they differ. Silently merging a
+conflict would be the same defect in the other direction — tightening a constraint the author never asked
+for. `enum` is never combined, because an intersection may be empty and a union weakens both.
+
+**This tightens generated CRDs.** A CR that previously passed admission with a malformed value can now be
+rejected, which is the point, and the consumer whose definition the defect was measured on has been told
+ahead of the release.
+
+### The authn JWT cache could not see its own invalidation
+
+The JWT used to call snowplow was returned on **time alone**. authn has no revocation, so ordinary expiry
+needed nothing — but an authn signing-key rotation invalidates every outstanding token early, and the
+cache could not observe that. The controller then presented a dead token until the refresh skew: an
+outage lasting up to the token's remaining lifetime, cleared by a pod restart, **which makes it look like
+a transient**.
+
+A 401 now drops the cache and retries **exactly once**. snowplow can answer 401 for reasons a fresh token
+cannot fix, and retrying those in a loop turns a clear failure into a hot one. Safe to re-issue only
+because `/call` is a GET, which is stated at the call site so nobody extends the pattern to a mutating
+verb.
+
+### The immutability contract was documented wrong
+
+`docs/api.md` listed `additionalStatusFields` as strictly immutable, then contradicted itself two lines
+later. The marker enforces **append-only**. So the page told readers they could not append a status
+field, when appending is exactly what the rule permits — and is what unblocked an installer roll. It is
+**five strict and two append-only**, verified against the markers, with a gate that fails if the shape
+changes. The gate deliberately does not parse the prose: a test comparing two hand-written things can
+drift in both at once.
+
+### And three tests over code that already worked
+
+A generated CRD carrying a CEL uniqueness rule is now checked against **the apiserver's own validator**,
+because that branch had none and an over-budget rule means the CRD does not register at all. A path-item
+parameter redirected by a `fieldMapping` is pinned, closing an issue that had been fixed for two days and
+never closed. And the generated authentication field sets are pinned, because they are derived from Go
+structs by reflection — so a renamed json tag silently changes a credential CRD, on the one path where a
+leak has already happened.
+
+The `kubeVersion` rationale also now ships as a chart **annotation**: `helm package` discards every
+comment in `Chart.yaml`, so the floor was reaching consumers with no reason attached.
 
 ## 2026-11-01 — 0.48.0
 
