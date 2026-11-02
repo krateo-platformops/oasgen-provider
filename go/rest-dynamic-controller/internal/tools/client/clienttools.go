@@ -565,7 +565,17 @@ func (u *UnstructuredClient) RequestedParams(httpMethod string, path string) (pa
 	query = stringset.NewStringSet()
 	headers = stringset.NewStringSet()
 	cookies = stringset.NewStringSet()
-	for _, param := range getDoc.Parameters {
+	// MERGE THE PATH ITEM'S PARAMETERS, as ValidateRequest does. This iterated getDoc.Parameters alone,
+	// so for a document declaring its parameters on the PATH ITEM every set came back empty -- and since
+	// these sets are what processFields consults to decide what to populate from the CR, the value was
+	// never copied out of the spec and the request was then refused by the post-substitution guard with
+	// "unresolved path parameter(s)". The value was in the CR and the document declared the parameter;
+	// the request failed anyway, so such a document could not work at all (#388).
+	//
+	// #361 added the merge to ValidateRequest, which is DETECTION. This is POPULATION, and it was missed:
+	// mergeParameters had exactly one non-test caller. Nothing failed loudly because the test documents
+	// all declare their parameters per-operation.
+	for _, param := range mergeParameters(pathItem.Parameters, getDoc.Parameters) {
 		switch param.In {
 		case "path":
 			parameters.Add(param.Name)
