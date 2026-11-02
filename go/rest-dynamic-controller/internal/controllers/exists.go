@@ -156,6 +156,22 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 	case callErr == nil:
 		// A definite affirmative.
 		return true, nil
+	case restclient.IsSynthesisedNotFound(callErr):
+		// A 404 WE INVENTED from a successful listing in which nothing matched -- checked BEFORE the
+		// vendor-404 case below, because IsNotFoundError is true for both.
+		//
+		// "Nothing matched" is not proof of absence. The MATCHING can fail for reasons unrelated to
+		// existence: identifiers absent from the list response, an envelope shape that resolves to the
+		// wrong thing, a findby query that cannot be evaluated against the items returned. And this
+		// caller reaches findby precisely when the resource is NOT addressable by identifier -- the
+		// normal state for a create whose response was never recorded, which is the case where the
+		// resource most likely DOES exist.
+		//
+		// Returning false here is what duplicates a live vendor resource (#371). The comment below was
+		// right that a wrong false recreates one; a synthesised 404 slipped past it because it is
+		// indistinguishable from the vendor's own on the wire.
+		return false, fmt.Errorf("existence check: %s listed successfully but no item matched the "+
+			"resource's identifiers, which is not proof of absence: %w", action, callErr)
 	case restclient.IsNotFoundError(callErr):
 		// A definite negative: the API answered, and answered that it is not there. This is the ONLY path
 		// that may return false.

@@ -21,6 +21,22 @@ type StatusError struct {
 	// It is not included in Error(): a response header set is not a vendor explanation, and the message is
 	// read in logs where a header dump is noise.
 	Header http.Header
+	// Synthesised marks a status this package INVENTED rather than received. Only the findby no-match
+	// paths set it, where a successful listing contained nothing matching the CR's identifiers.
+	//
+	// It exists because a 404 we made up and a 404 the vendor sent mean different things to different
+	// callers, and the difference is unrecoverable for one of them (#371):
+	//
+	//	Observe  "nothing matched" -> not-exists is CORRECT. Creating is the intent and no duplicate is
+	//	         possible yet, so it must keep seeing a plain NotFound.
+	//	Exists   "nothing matched" is NOT proof of absence. The MATCHING can fail for reasons unrelated to
+	//	         existence -- identifiers absent from the list response, an envelope shape that resolves to
+	//	         the wrong thing, a findby query that cannot be evaluated. Create-recovery is the one caller
+	//	         for whom a wrong `false` DUPLICATES A LIVE VENDOR RESOURCE.
+	//
+	// So IsNotFoundError deliberately still returns true for these: every existing caller keeps its
+	// behaviour, and only a caller that asks the narrower question gets the narrower answer.
+	Synthesised bool
 }
 
 func (e *StatusError) Error() string {
@@ -175,4 +191,18 @@ func IsAuthorizationDenied(err error) bool {
 	}
 	_, throttled := RetryAfter(err)
 	return !throttled
+}
+
+// IsSynthesisedNotFound reports whether err is a 404 THIS PACKAGE invented from a successful listing that
+// contained no matching item -- as opposed to one the vendor sent.
+//
+// A caller that can safely treat "nothing matched" as absence should use IsNotFoundError, which returns
+// true for both. A caller for whom a wrong negative is unrecoverable should check this FIRST and treat it
+// as "I could not determine" (#371).
+func IsSynthesisedNotFound(err error) bool {
+	se := new(StatusError)
+	if err == nil || !errors.As(err, &se) {
+		return false
+	}
+	return se.Synthesised && se.StatusCode == http.StatusNotFound
 }

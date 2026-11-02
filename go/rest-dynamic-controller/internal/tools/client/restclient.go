@@ -545,10 +545,22 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 		case pagination.MorePages:
 			continue
 		case pagination.Exhausted:
-			// The collection genuinely ended and nothing matched. This is authoritative absence.
+			// The collection genuinely ended and nothing matched.
+			//
+			// Marked Synthesised, which REVISES the claim this comment used to make ("authoritative
+			// absence"). Exhausted is authoritative about THE SCAN -- we saw every page, as opposed to
+			// Indeterminate below where we could not tell. It is not authoritative about THE PREDICATE:
+			// if the resource is present but our identifiers do not appear in the item shape, or the
+			// envelope resolves to the wrong thing, no item matches a complete scan either.
+			//
+			// Those are different questions and only the first is the one pagination answers. For Observe
+			// the distinction does not matter -- not-exists is the right conclusion and creating is the
+			// intent. For the existence checker a wrong negative duplicates a live vendor resource, so it
+			// must see that this 404 is ours (#371).
 			return Response{}, &StatusError{
-				StatusCode: http.StatusNotFound,
-				Inner:      fmt.Errorf("item not found after checking all %d page(s)", pagesScanned),
+				StatusCode:  http.StatusNotFound,
+				Inner:       fmt.Errorf("item not found after checking all %d page(s)", pagesScanned),
+				Synthesised: true,
 			}
 		case pagination.Indeterminate:
 			// The paginator could not tell whether more pages exist -- a declared signal was missing, or
@@ -643,7 +655,7 @@ func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Cli
 		return Response{}, err
 	}
 	if response.ResponseBody == nil {
-		return Response{}, &StatusError{StatusCode: http.StatusNotFound, Inner: fmt.Errorf("item not found")}
+		return Response{}, &StatusError{StatusCode: http.StatusNotFound, Inner: fmt.Errorf("item not found"), Synthesised: true}
 	}
 
 	// Extract the list of items from the response.
@@ -664,7 +676,7 @@ func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Cli
 	}
 
 	// If no match is found after checking all items, return a Not Found error.
-	return Response{}, &StatusError{StatusCode: http.StatusNotFound, Inner: fmt.Errorf("item not found")}
+	return Response{}, &StatusError{StatusCode: http.StatusNotFound, Inner: fmt.Errorf("item not found"), Synthesised: true}
 }
 
 // CallForPagination builds an `http.Request`, lets the paginator update it, executes it, and returns the response.
