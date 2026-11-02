@@ -80,6 +80,27 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 
 // exchange reads the projected SA token and POSTs it to authn's /serviceaccount/login,
 // returning the issued JWT and its expiry.
+// Invalidate drops the cached JWT so the next Token call re-exchanges.
+//
+// It exists for ONE event, and it is the only one that invalidates a JWT before its exp: authn rotating
+// its signing key. A new `kid` in the JWKS makes every outstanding token fail at the verifier (snowplow)
+// while this cache still considers it fresh, because the cache keys on TIME ALONE. Without this the
+// controller presents a dead token until refreshSkew -- an outage lasting up to the token's remaining
+// lifetime, cleared instantly by a pod restart, which makes it look like a transient (#369).
+//
+// authn has no JWT revocation, so ordinary expiry needs nothing from this: refreshSkew already handles it.
+// This is specifically for the early-invalidation case the cache cannot observe.
+//
+// NOT a credential-rotation mechanism. The projected ServiceAccount token is read from disk on every
+// exchange and nothing is minted or stored here that was not already; this only stops an existing cache
+// insisting on a value the verifier has rejected.
+func (c *Client) Invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cached = ""
+	c.expiry = time.Time{}
+}
+
 func (c *Client) exchange(ctx context.Context) (string, time.Time, error) {
 	saToken, err := os.ReadFile(c.tokenPath)
 	if err != nil {
