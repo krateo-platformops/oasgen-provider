@@ -185,7 +185,12 @@ available response to drift would be to POST again.
 | `correlation.observe.method` | `GET` or `POST` (some APIs expose search as a POST). |
 | `correlation.observe.path` | The collection endpoint, spelled exactly as the OAS document spells it (paths are matched by exact string, so a differing parameter name is a miss). |
 | `correlation.observe.itemsPath` | The property holding the array when the response is an **envelope** rather than a bare array (`workflow_runs` for `{"total_count": 3, "workflow_runs": [...]}`). Optional while the envelope has exactly one array property; **required** as soon as it has more, on both sides — guessing searches the wrong list, reports not-found, and here that means firing the dispatch a second time. |
-| `correlation.echoedAt` | The path, **per item** of that collection, at which the token comes back (`.display_title`). Same path dialect as `itemsPath` and `async.poll.statusPath`. |
+| `correlation.echoedAt` | The path, **per item** of that collection, at which the token comes back (`.display_title`). Same path dialect as `findby`'s `itemsPath` and `async.poll.statusPath`. |
+
+> [!NOTE]
+> `correlation.observe.itemsPath` above and the `findby` verb's own `itemsPath` are **separate fields of separate features**, with the same name and the same meaning. `correlation` is permitted only on a `dispatch`, so a reader who arrives here looking for envelope handling on a `findby` is in the wrong section — see `itemsPath` in [Per-verb tuning](#per-verb-tuning-verbsdescription-items).
+>
+> This note exists because that is exactly what happened: a consumer with 36 `findby`-using RestDefinitions searched these docs, found only the `correlation` field, reasonably concluded it did not apply to `findby`, and filed a request for a capability that had shipped two months earlier.
 
 ```yaml
 verbsDescription:
@@ -278,6 +283,7 @@ causes duplicate runs rather than an error:
 | `requestFieldMapping[]` | **Deprecated** — the request-direction-only predecessor of `fieldMapping` (`inPath`/`inQuery`/`inBody` + `inCustomResource`, no transforms). Still accepted; each entry is treated as an equivalent request-direction `fieldMapping` entry at load time. |
 | `requestTransform` / `responseTransform` | Whole-document gojq programs. `requestTransform` runs on the assembled request body after per-field mapping (create/update/delete; no-op on bodyless verbs; requires rest-dynamic-controller ≥ 0.17.0). `responseTransform` runs on the raw response body before per-field mapping, status population and drift comparison. jq programs are `inline` or `ref` (a `.jq` module at `configmap://`/`http(s)://`, optional `entrypoint`). |
 | `identifiersMatchPolicy`, `pagination` | `findby` only (CEL-enforced). |
+| `itemsPath` | `findby` only. The envelope property holding the collection, when the response is an **envelope** rather than a bare array (`values` for `{"total": 3, "values": [...]}`). Optional: with exactly **one** array property the collection is found unambiguously, and with **two or more** the request fails rather than guessing — the old behaviour ranged the map and took the first list, which Go randomises, so an envelope with two arrays searched a different one on different reconciles and a lost coin-toss reported not-found, which the reconciler answers by creating a duplicate (#110). A declared `itemsPath` is authoritative: if it is absent from the response or resolves to a non-array, that is an error rather than a reason to look elsewhere. The generator uses the same value to locate the item's schema, so the CRD and the matcher search the same property by construction. |
 | `correlation` | `dispatch` only, and **required** on it (CEL-enforced). How one invocation is identified afterwards — see [Dispatch and correlation](#dispatch-and-correlation). |
 | `successCodes[]` | Extra HTTP codes treated as success, merged with the OAS-declared 2xx codes. |
 | `tolerateCodes[]` | Codes treated as a successful **empty** response (e.g. 404 on an optional sub-collection) — beware masking real deletions. |
