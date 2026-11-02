@@ -306,6 +306,17 @@ type SecretRefResolver struct {
 	// KeyFromCustomResource is a JSONPath into the Custom Resource yielding the key within the Secret's data.
 	// +required
 	KeyFromCustomResource string `json:"keyFromCustomResource"`
+	// When guards the resolution, so the mapping is SKIPPED rather than failing when the custom resource
+	// does not carry the pointer.
+	//
+	// WITHOUT IT A DECLARED secretRef IS MANDATORY on every CR of the kind. An absent
+	// nameFromCustomResource/keyFromCustomResource path is a hard error at request-build time, so adding
+	// a secretRef to describe an OPTIONAL credential -- a webhook signing secret, an optional API key --
+	// would break every existing CR that does not set it. Same semantics and same implementation as the
+	// guard on a dependentLookup: an explicit null counts as absent, and a nil guard never skips (#383).
+	//
+	// +optional
+	When *LookupWhen `json:"when,omitempty"`
 }
 
 // DependentLookup is a named, pre-call read against any endpoint in the document, whose selected value is

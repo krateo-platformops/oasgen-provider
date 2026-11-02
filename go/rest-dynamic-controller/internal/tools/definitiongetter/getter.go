@@ -277,6 +277,12 @@ type SecretRefResolver struct {
 	NameFromCustomResource string `json:"nameFromCustomResource"`
 	// KeyFromCustomResource is a JSONPath into the Custom Resource yielding the key within the Secret's data.
 	KeyFromCustomResource string `json:"keyFromCustomResource"`
+	// When guards the resolution, so the mapping is SKIPPED rather than failing when the CR does not
+	// carry the pointer. Without it a declared secretRef is mandatory on every CR of the kind, because
+	// an absent nameFromCustomResource/keyFromCustomResource path is a hard error -- so an optional
+	// credential (a webhook signing secret, an optional API key) could not be sourced from a Secret at
+	// all without breaking every existing CR (#383).
+	When *LookupWhen `json:"when,omitempty"`
 }
 
 // ValueMapping is the runtime mirror of a value transform. BOTH tiers now apply in BOTH directions:

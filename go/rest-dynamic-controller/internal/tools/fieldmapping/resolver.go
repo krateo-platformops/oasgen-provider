@@ -60,6 +60,19 @@ func ResolveRequestResolvers(ctx context.Context, dyn dynamic.Interface, mapping
 			if r == nil {
 				return nil, fmt.Errorf("secretRef resolver is not configured (field %q)", m.InCustomResource)
 			}
+			// The guard is evaluated BEFORE the pointer is read, which is the whole point: an absent
+			// pointer is a hard error below, so without this a declared secretRef is mandatory on every
+			// CR of the kind and an OPTIONAL credential cannot be sourced from a Secret (#383).
+			//
+			// Skipping leaves NO resolved entry, so the CR's own field -- absent, or present and
+			// literal -- flows through unchanged. That is the same contract as a skipped
+			// dependentLookup. A nil guard never skips, so every existing RestDefinition keeps the
+			// strict behaviour and this is purely additive.
+			if skip, gerr := guardSkips(r.When, mg); gerr != nil {
+				return nil, gerr
+			} else if skip {
+				continue
+			}
 			name, err := readStringPath(mg, r.NameFromCustomResource)
 			if err != nil {
 				return nil, fmt.Errorf("reading secret name from %q: %w", r.NameFromCustomResource, err)
