@@ -366,8 +366,25 @@ func controlDenyIPWithLoopback(_, address string, _ syscall.RawConn, allowLoopba
 //
 // TLS still verifies against the HOSTNAME: http.Transport takes ServerName from the request URL, not from
 // the dial address. That is the standard IP-pinning arrangement and it is correct -- and it is exactly
-// the kind of correct that stops being correct silently, so there is a test with an HTTPS server whose
-// certificate names the host.
+// the kind of correct that stops being correct silently.
+//
+// VERIFIED, BUT NOT BY A TEST IN THIS PACKAGE. An earlier version of this comment claimed "there is a
+// test with an HTTPS server whose certificate names the host". There was not: `NewTLSServer` appears
+// nowhere in this package (control: `NewServer` appears 3 times in the test file). That claim was written
+// at the same time as a PR body stating the property was NOT verified -- the two contradicted each other,
+// and the comment is the one that survives and misleads.
+//
+// What was actually done, out of tree: an HTTPS server bound to a real RFC1918 address, reached through
+// this DialContext by IP, with the SNI read from the server's own GetCertificate callback -- SNI
+// "vendor.probe.example" while the socket went to 192.168.1.11. The leaf carries NO IP SAN, so there
+// would be nothing to match if verification used the dial address. Negative control: a certificate for a
+// different name was rejected with `x509: certificate is valid for not-the-vendor...`.
+//
+// WHY THE TEST IS NOT HERE YET. denyIP refuses loopback unconditionally, so httptest -- which binds
+// 127.0.0.1 -- cannot be used against a policy-enforced client at all, and CI has no guarantee of an
+// RFC1918 address to bind instead. That is the same constraint that blocks every other request-making
+// test from adopting this client, and it needs a deliberate test seam rather than a weakened denyIP. The
+// test lands with that seam.
 func (p *Policy) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	// The Control backstop has to agree with the decision DialContext just made, or a test that was
 	// permitted loopback above would be refused here instead. It still refuses link-local, multicast and
