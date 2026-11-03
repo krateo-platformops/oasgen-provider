@@ -207,3 +207,133 @@ paths:
 		t.Errorf("ValidateRequest rejected a request with `id` supplied: %v", err)
 	}
 }
+
+// THE POPULATION HALF, which #361 left behind.
+//
+// #361 merged the path item's parameters into ValidateRequest -- DETECTION. RequestedParams decides what
+// gets POPULATED from the CR, and it iterated the operation's parameters alone. So for a document
+// declaring its parameters on the path item, every returned set was empty, processFields never copied the
+// value out of the CR spec, and the post-substitution guard then refused the request with "unresolved
+// path parameter(s)". The value was in the CR and the document declared the parameter; the request failed
+// anyway, so such a document could not work at all (#388).
+//
+// The two previous cases in this file exercise mergeParameters DIRECTLY, so they pass whether or not
+// RequestedParams calls it -- which is exactly the defect this case exists for, a correct helper that
+// nothing reaches. mergeParameters had one non-test caller.
+func TestRequestedParamsMergesPathItemParameters(t *testing.T) {
+	const doc = `
+openapi: 3.0.0
+info: {title: t, version: "1"}
+paths:
+  /things/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+      - name: X-Tenant
+        in: header
+        required: true
+        schema: {type: string}
+      - name: locale
+        in: cookie
+        schema: {type: string}
+    get:
+      parameters:
+        - name: verbose
+          in: query
+          schema: {type: boolean}
+      responses:
+        "200": {description: ok}
+`
+	d, err := libopenapi.NewDocument([]byte(doc))
+	if err != nil {
+		t.Fatalf("fixture is not a document: %v", err)
+	}
+	v3Doc, errs := d.BuildV3Model()
+	if len(errs) > 0 {
+		t.Fatalf("fixture did not build: %v", errs)
+	}
+	cli := &UnstructuredClient{DocScheme: v3Doc}
+
+	// THE PREMISE. If the fixture declared these on the OPERATION, this case would pass without the fix
+	// and prove nothing. Assert the shape before asserting the behaviour.
+	pathItem, ok := v3Doc.Model.Paths.PathItems.Get("/things/{id}")
+	if !ok {
+		t.Fatal("fixture path not found")
+	}
+	if len(pathItem.Parameters) != 3 {
+		t.Fatalf("fixture must declare 3 parameters on the PATH ITEM, got %d -- otherwise this case does "+
+			"not exercise the merge", len(pathItem.Parameters))
+	}
+	op, ok := pathItem.GetOperations().Get("get")
+	if !ok {
+		t.Fatal("fixture operation not found")
+	}
+	if len(op.Parameters) != 1 {
+		t.Fatalf("fixture must declare exactly 1 parameter on the OPERATION, got %d", len(op.Parameters))
+	}
+
+	params, query, headers, cookies, err := cli.RequestedParams(http.MethodGet, "/things/{id}")
+	if err != nil {
+		t.Fatalf("RequestedParams: %v", err)
+	}
+
+	if !params.Contains("id") {
+		t.Error("the path parameter `id` is declared on the path item and was not returned. processFields " +
+			"consults this set to decide what to populate from the CR, so an empty set means the value is " +
+			"never copied and the request is refused for an unresolved parameter that the CR supplies")
+	}
+	if !headers.Contains("X-Tenant") {
+		t.Error("the header parameter `X-Tenant` is declared on the path item and was not returned")
+	}
+	if !cookies.Contains("locale") {
+		t.Error("the cookie parameter `locale` is declared on the path item and was not returned")
+	}
+	// The operation's own parameter must still come through -- the merge must not replace, only inherit.
+	if !query.Contains("verbose") {
+		t.Error("the operation's own query parameter was lost, so the merge replaced rather than inherited")
+	}
+}
+
+// An operation-level parameter of the same name and location must still win over the path item's, or the
+// merge would silently discard a deliberate per-operation override.
+func TestRequestedParamsOperationOverridesPathItem(t *testing.T) {
+	const doc = `
+openapi: 3.0.0
+info: {title: t, version: "1"}
+paths:
+  /things/{id}:
+    parameters:
+      - name: scope
+        in: query
+        schema: {type: string}
+    get:
+      parameters:
+        - name: scope
+          in: query
+          schema: {type: string}
+        - name: extra
+          in: query
+          schema: {type: string}
+      responses:
+        "200": {description: ok}
+`
+	d, err := libopenapi.NewDocument([]byte(doc))
+	if err != nil {
+		t.Fatalf("fixture is not a document: %v", err)
+	}
+	v3Doc, errs := d.BuildV3Model()
+	if len(errs) > 0 {
+		t.Fatalf("fixture did not build: %v", errs)
+	}
+	cli := &UnstructuredClient{DocScheme: v3Doc}
+
+	_, query, _, _, err := cli.RequestedParams(http.MethodGet, "/things/{id}")
+	if err != nil {
+		t.Fatalf("RequestedParams: %v", err)
+	}
+	if !query.Contains("scope") || !query.Contains("extra") {
+		t.Errorf("want both `scope` and `extra`, got %v", query)
+	}
+}
