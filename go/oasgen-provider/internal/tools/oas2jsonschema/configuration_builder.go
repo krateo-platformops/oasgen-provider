@@ -3,6 +3,7 @@ package oas2jsonschema
 import (
 	"fmt"
 	"reflect"
+	"sort"
 
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/text"
 )
@@ -87,8 +88,22 @@ func (g *OASSchemaGenerator) BuildConfigurationSchema() ([]byte, error) {
 			Type:       []string{"object"},
 			Properties: []Property{},
 		}
-		for paramType, schema := range paramTypeSchemas {
-			configurationSchema.Properties = append(configurationSchema.Properties, Property{Name: paramType, Schema: schema})
+		// SORTED, because ranging the map put the `configuration` block's properties in a random order --
+		// and Properties is a slice SPECIFICALLY to preserve order (types.go:189). Filling it from a map
+		// discarded the one property the type exists to keep, so a generated Configuration CRD was not
+		// byte-reproducible (#397).
+		//
+		// Sorted rather than first-seen, unlike the required/enum sites in helpers.go: this map is keyed
+		// by parameter type, so there is no document order to preserve and the emitted name is the only
+		// sensible key. It also fires for ANY document with more than one parameter type, not only ones
+		// that use allOf -- which makes it the broader of the four sites.
+		paramTypes := make([]string, 0, len(paramTypeSchemas))
+		for paramType := range paramTypeSchemas {
+			paramTypes = append(paramTypes, paramType)
+		}
+		sort.Strings(paramTypes)
+		for _, paramType := range paramTypes {
+			configurationSchema.Properties = append(configurationSchema.Properties, Property{Name: paramType, Schema: paramTypeSchemas[paramType]})
 		}
 		rootSchema.Properties = append(rootSchema.Properties, Property{
 			Name:   "configuration",
@@ -159,10 +174,19 @@ func (g *OASSchemaGenerator) buildAuthMethodsSchemaMap() (map[string]*Schema, []
 
 // addAuthMethods adds the `authentication` property to the configuration schema.
 func addAuthMethods(schema *Schema, authSchemas map[string]*Schema) {
-	authMethodsProps := []Property{}
+	// SORTED, for the same reason as the `configuration` block above: ranging authSchemas put the
+	// `authentication` block's properties in a random order, so the generated Configuration CRD differed
+	// between renders of the same document (#397). Keyed by scheme name, so there is no document order to
+	// preserve.
+	//
+	// Sorted on the EMITTED name rather than the map key, so the output order matches what a reader of
+	// the CRD sees. FirstToLower is not order-preserving in general -- "AToken" and "aToken" both become
+	// "aToken" -- and sorting the keys instead would put them in an order the emitted names contradict.
+	authMethodsProps := make([]Property, 0, len(authSchemas))
 	for key, authSchema := range authSchemas {
 		authMethodsProps = append(authMethodsProps, Property{Name: text.FirstToLower(key), Schema: authSchema})
 	}
+	sort.Slice(authMethodsProps, func(i, j int) bool { return authMethodsProps[i].Name < authMethodsProps[j].Name })
 
 	authMethodsSchema := &Schema{
 		Type:        []string{"object"},

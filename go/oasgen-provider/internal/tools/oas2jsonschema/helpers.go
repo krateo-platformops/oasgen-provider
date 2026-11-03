@@ -157,35 +157,28 @@ func prepareSchemaForCRDWithVisited(
 			}
 		}
 
-		// Handle 'required' fields with deduplication
-		// We need to avoid duplicates in the 'required' list like ["id", "name", "id"]
-		requiredSet := make(map[string]struct{})
-		for _, req := range schema.Required { // Add existing required fields from the main schema
-			requiredSet[req] = struct{}{}
-		}
-		for _, req := range mergedRequired { // Add merged required fields from allOf schemas
-			requiredSet[req] = struct{}{}
-		}
-		newRequired := make([]string, 0, len(requiredSet))
-		for req := range requiredSet {
-			newRequired = append(newRequired, req)
-		}
-		schema.Required = newRequired
-
-		// Handle 'enum' values with deduplication
-		// We need to avoid duplicates in the 'enum' list like ["Basic", "Advanced", "Basic"]
-		enumSet := make(map[interface{}]struct{})
-		for _, enumVal := range schema.Enum { // Existing enum values
-			enumSet[enumVal] = struct{}{}
-		}
-		for _, enumVal := range mergedEnum { // Merged enum values from allOf
-			enumSet[enumVal] = struct{}{}
-		}
-		newEnum := make([]interface{}, 0, len(enumSet))
-		for enumVal := range enumSet {
-			newEnum = append(newEnum, enumVal)
-		}
-		schema.Enum = newEnum
+		// 'required' and 'enum', deduplicated IN FIRST-SEEN ORDER.
+		//
+		// Both used to be rebuilt by ranging the dedup map, and Go RANDOMISES map iteration -- so a
+		// generated CRD was not byte-reproducible. Measured: six renders of one document gave
+		// ['Advanced','Basic'] once and ['Basic','Advanced'] five times (#397).
+		//
+		// That matters because consumers diff generated CRDs between versions to decide whether a pin is
+		// safe, and a reordering with identical membership is indistinguishable in a naive diff from a
+		// real change. It also makes the CRDs drift guard a coin flip and makes `helm upgrade` write a
+		// CRD that has not changed.
+		//
+		// FIRST-SEEN, NOT SORTED, and that is deliberate. sameEnum (spec_builder.go) compares enums as
+		// ORDERED lists because that is how a document writes them -- so sorting would change meaning,
+		// and it would also reorder documents that never use allOf, producing a diff carrying no
+		// information. The two sites in configuration_builder.go are the opposite case: their maps are
+		// keyed by parameter type and scheme name, with no document order to preserve, so those sort.
+		//
+		// This is #110's root cause in a second place -- "the first array-valued key while ranging
+		// bodyMap, and Go randomises map iteration order" -- and the reason it was still here is that
+		// the lesson was applied at the site that produced the bug and never swept for.
+		schema.Required = dedupeStringsFirstSeen(schema.Required, mergedRequired)
+		schema.Enum = dedupeValuesFirstSeen(schema.Enum, mergedEnum)
 
 		// Clear AllOf field after merging
 		schema.AllOf = nil
@@ -445,4 +438,43 @@ func GenerateJsonSchema(schema *Schema, config *GeneratorConfig) ([]byte, error)
 	}
 
 	return json.MarshalIndent(schemaMap, "", "  ")
+}
+
+// dedupeStringsFirstSeen concatenates the inputs and drops repeats, keeping the order of first
+// appearance. The seen-set is a map, but it is only CONSULTED -- never ranged -- so nothing about the
+// output order comes from it.
+func dedupeStringsFirstSeen(lists ...[]string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, list := range lists {
+		for _, v := range list {
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// dedupeValuesFirstSeen is dedupeStringsFirstSeen for enum values.
+//
+// The key is `interface{}`, so it carries the same constraint the previous code did: a value that is not
+// comparable (a slice or a map in an enum) would panic on map insert. That is pre-existing and unchanged
+// -- noted rather than fixed here, because changing it is a separate decision and this change is about
+// ordering only.
+func dedupeValuesFirstSeen(lists ...[]interface{}) []interface{} {
+	seen := make(map[interface{}]struct{})
+	var out []interface{}
+	for _, list := range lists {
+		for _, v := range list {
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
 }
