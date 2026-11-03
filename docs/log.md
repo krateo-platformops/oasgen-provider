@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-11-02T21:15:00Z
+timestamp: 2026-11-03T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,218 @@ timestamp: 2026-11-02T21:15:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-03 — 0.50.0
+
+A credentialed request's destination host was never validated. That is the release: three channels
+could send the vendor credential to a host the OpenAPI document never named, and the oldest is
+present at **every tag this repository has** — the earliest containing it is 0.20.0, which is the
+monorepo fold, so the code is older still and lived in the standalone rest-dynamic-controller repo
+before that. Alongside it, generation stopped depending on Go's map iteration order, and a
+credential-header exemption that covered one name out of nine was widened to the set its own
+reasoning already described.
+
+### A credentialed request could reach a host nobody declared
+
+**Three channels, each sufficient on its own.** The first: `buildPath` joins a path-parameter
+**value** into the URL, so a value containing `..` can replace the request **host** — a field on a
+CR choosing the destination server for a credential the CR's author is not supposed to hold. The
+second is an off-host redirect. The third is DNS moving the target between the check and the
+connect.
+
+**Channel 1 has a precondition, and it is now pinned as a test rather than left in prose, because
+getting it wrong in prose is exactly what happened.** The host moves only if there are at least as
+many settable `..` parameters strictly to the LEFT of the substitution point as there are path
+segments to its left, counting the host and every segment the base URL's own path contributes. So
+`/folders/{id}` is unreachable — one `..` eats `folders` and stops — while `/{a}/{b}` relocates to
+whatever `b` says. One parameter is **always exactly one segment**, because `url.PathEscape` leaves
+`.` alone but escapes `/`: a value of `../..` arrives as `..%2F..` and eats nothing, so a single
+parameter can never close a two-segment gap however it is spelled. **No consumer's documents have
+the reachable shape**; one measured all 123 of theirs and every path begins with a fixed segment.
+
+I had told that consumer the channel was live for them. It was not, and they falsified it with a
+measurement I should have made before making the claim. The correction is theirs, the test is the
+part I owe: a precondition that each consumer has to decide for themselves belongs in something
+executable, not in a release note where the next person re-derives it.
+
+**A corollary a consumer drew from the same table, which is a defence available today.** A base URL
+that contributes a path prefix **absorbs one `..` per segment**, so `https://host/v1` is strictly
+safer here than `https://host`. Moving a fixed prefix out of the paths and into the base URL
+therefore costs nothing semantically — `buildPath` joins them anyway — and buys one absorbing
+segment. For a document that genuinely needs a leading path parameter, that is a mitigation the
+document's author controls without waiting for anything from us.
+
+**The second channel is where the common understanding is wrong, and it is worth stating precisely
+because every consumer had to decide whether they were exposed.** `net/http` strips `Authorization`
+when a redirect crosses hostnames, and nothing else. So **the header name decides whether a
+credential survives a hop — not the security-scheme type.** An OAS `apiKey` scheme names its own
+header, and five consumers audited themselves on this: four name `Authorization` and were never
+exposed on that channel — three of them `type: apiKey`, which is the pairing that makes the
+scheme-type reading look right until it is not. The fifth names `X-Auth-Token` and **confirmed in a
+cluster** that the token reached a host its document does not declare. `X-Api-Key` and
+`PRIVATE-TOKEN` are in the same class.
+
+**The check sits at the request path, not in the call builder.** Four sites call `cli.Call` directly
+and bypass `APICallBuilder` entirely — the async handler, the async requeue, dispatch, and the
+lookup runner — so a builder-side check would have left all four open while looking complete. Every
+request now passes `PermitsURL` on `req.URL`, dials the **resolved IP literally** so DNS cannot move
+the target underneath it, and re-checks on each redirect hop. A same-host redirect is still
+followed, with its body replayed: a renamed vendor resource served as a 307 is a legitimate hop and
+breaking it would strand the CR.
+
+**What is deliberately still reachable.** RFC1918 ranges pass, because on-prem installs need them —
+one consumer's documented local walkthrough sets its endpoint from a ClusterIP, and refusing private
+ranges would have broken both the walkthrough and the probe harness that verifies this fix.
+Loopback, link-local, multicast and unspecified addresses are refused unconditionally; the test seam
+that permits loopback is reachable only from Go and cannot be switched on by configuration.
+
+**With no configuration, the permitted set is the document's own:** base `servers[0]` plus each
+operation's `servers[0]` override. All five consumers measured their fleets from `servers[]` and all
+five need **nothing** — 1 distinct server URL and 0 per-operation overrides each, across 59
+documents in total, and across 255 operations for the three of them that counted operations as well
+as documents. One of them templates its single host and fails its own render unless the placeholder
+is found exactly once, which is the shape that makes a measurement trustworthy rather than a count
+that happened to come out right. Where more is needed there is now `rdc.endpointAllowlist` and
+`rdc.allowAnyHost` in chart values (and `-endpoint-allowlist` / `-allow-any-host` on the binary), as
+the security half of the non-default base URL request. An entry with no scheme prefix means **https
+only**; `*.example.com` matches one-or-more leading labels and **not** the bare suffix; bare `*` is
+refused at parse; port and scheme both participate in matching.
+
+**An exact entry matches exactly, which is the axis the standard library's own strip gets wrong.**
+Measured against the shipped `Parse`/`PermitsURL` rather than described:
+
+| permitted entry | target | |
+|---|---|---|
+| `https://api.example.com` | `https://api.example.com` | permitted |
+| `https://api.example.com` | `https://evil.api.example.com` | **refused** |
+| `https://api.example.com` | `https://api.example.com.attacker.net` | **refused** |
+| `https://api.example.com` | `https://api.example.com:8443` | **refused** |
+| `https://api.example.com` | `http://api.example.com` | **refused** |
+| `*.example.com` | `https://evil.api.example.com` | permitted — one-or-more labels |
+| `*.example.com` | `https://example.com` | **refused** — not the bare suffix |
+| `*.example.com` | `https://api.example.com.attacker.net` | **refused** |
+
+The suffix-confusion row matters as much as the subdomain one: a rule written as a string suffix
+test would admit `api.example.com.attacker.net`, which is a name an attacker can register.
+
+**Two entry forms misparse, which is #402 and is not fixed here.** `example.com/*` parses with no
+error into an EXACT entry — path truncation runs before the wildcard checks, so the `*` sits in the
+discarded path and is never seen — and `HTTPS://Example.COM` is rejected as an unsupported scheme,
+because the prefix test is byte-exact lowercase while the host is lowercased later. So within one
+entry the case is handled for the host and not for the scheme. Neither widens anything: each yields
+a permitted set narrower than written, or no policy at all, and both fail loudly. `*.example.com/*`
+is unaffected — the leading `*.` is consumed before truncation. Both were found by writing the
+package's behaviour out as a conformance list for a peer, which is also why they were not found
+earlier: nothing in the test suite exercises an entry whose written form and parsed form differ.
+
+**`allowAnyHost` turns off the redirect check too, which its name does not say.** With the permitted
+set widened to everything, a credential will follow a redirect anywhere — the per-hop check still
+runs, it just has nothing left to refuse. An operator who sets it to get past a misconfiguration and
+leaves it on has no destination protection at all, not merely a wider first hop. It logs loudly at
+startup for that reason.
+
+A related precondition, stated because it is currently satisfied by luck rather than by
+construction. Each redirect hop is evaluated against the permitted set independently, not against
+the host the request originally asked for. With a single-host permitted set — which is what all five
+consumers have — those two rules coincide exactly. With a wildcard entry they diverge: a chain could
+walk from one allowlisted host to another. That is deliberate, because the allowlist IS the
+operator's declared trust set and refusing a hop to a host they explicitly listed would be this code
+overriding a stated decision. But the equivalence holds because of how consumers are configured, not
+because of anything the code enforces.
+
+> **Answer the "do I need an allowlist?" question from `servers[]` in your document — not from the
+> logs.** One consumer's first attempt grepped the controller's logs for dialled hosts and got eight,
+> including a Helm download and an apt repository. The controller dials none of them: they are strings
+> **inside the CR body**, a 49 KB cloud-config that the controller logs. Answering from that would have
+> asked for an allowlist covering hosts nothing ever contacts, which is worse than a refusal on upgrade
+> because it would look like it was working. It is also a sharper argument for the fix than the `..`
+> channel: a credential leaking to a host named in your own payload is a channel where the operator's own
+> audit method confirms the wrong thing.
+
+**The boundary, stated rather than left to inference.** This covers the rest-dynamic-controller's
+own request path. Requests delegated through `*ApiRef` leave via snowplow and are **not** covered;
+snowplow has measured the same three channels on its side and tracks them in snowplow#1106 and
+snowplow#1112. One consumer's fleet is where the two paths meet — its delegated kind's credential
+travels outside the path this release hardened, on the same host today, so there is no exposure but
+there is no protection either.
+
+**And two of this controller's OWN internal clients are outside it too, which is #401 and is not
+fixed here.** The authn client presents the pod's projected ServiceAccount token and the snowplow
+client presents the authn JWT, both on a plain `http.Client` with no redirect policy. Measured while
+answering a peer's question about their equivalent code: `net/http` drops `Authorization` on a
+redirect that leaves the original host, **but it permits a hop to a SUBDOMAIN of that host and
+ignores the port.** So relying on the standard library's strip protects one header name and only
+against a non-subdomain change. For a cluster-DNS endpoint a subdomain is hard to arrange; for one
+configured as an external hostname it is the ordinary case. Fixing it is the first PR of the next
+release rather than this one, because this release closes the worse channel and consumers are
+waiting on it.
+
+### Generation was not deterministic
+
+**Four sites built emitted output by ranging a Go map**, whose iteration order is randomised per
+run. Two renders of the same unchanged document could therefore produce different CRD field order,
+different `required` order and different `enum` order — which makes a diff between two renders
+unreadable, and made a consumer's "70 of 72 identical" verdict un-rerunnable rather than wrong.
+
+The dedups now preserve **first-seen** order and return `nil` for `nil`, and the two schema-assembly
+sites sort explicitly. One of them sorts on the **emitted** name rather than the source key, because
+the case transform applied on the way out is not order-preserving — sorting before it would have
+produced a stable order that is not the order that ships.
+
+### A credential-header exemption one name wide
+
+`SetAuth` attaches the credential to the `*http.Request`; validation runs 114 lines earlier against
+the options map, which the credential is never written into. The validator **structurally cannot
+see** it, so a document that declares its own credential header as a required parameter had every
+request refused with `missing header: <name>` before the credential was ever attached.
+
+The exemption was a substring test for `authorization`. This repo enumerates **nine** credential
+header names, and the carve-out covered one of them while its own reasoning covered all nine. It is
+now the **union** of both tests rather than a replacement: the substring test still exempts
+`X-Custom-Authorization`, which is not in the enumerated nine, so the change can only widen. All
+three places that need to know which headers carry a credential — log redaction, this exemption, and
+the spec-population refusal — now read one list.
+
+### And the smaller ones
+
+A header or cookie parameter declared in the document is now **populated from the CR**, refusing the
+nine credential names rather than letting a CR field supply a credential. `RequestedParams` now
+merges the **path item's** parameters, without which a document that declares its parameters at
+path-item level could not work at all. `findby`'s `itemsPath` is documented — it shipped
+undocumented and cost a consumer two months; the earlier conclusion that it *was* documented came
+from a bare-string grep whose three hits were all a different scope,
+`correlation.observe.itemsPath`. A causeless 401 is no longer retried, since it may be
+**post-dispatch** and the retry can duplicate an audited write. unstructured-runtime moves to
+v1.7.4, so the **reason** an existence check could not answer reaches the CR instead of being
+swallowed.
+
+And one retraction: a comment merged in the host-policy work claimed a test existed that did not.
+The count of `NewTLSServer` in the package was zero. A true clause carrying a false one is the
+failure mode that matters here, because the false one is what the next reader relies on.
+
+### What this release is, and is not, verified against
+
+**Published, not exercised.** At the tag: five GHCR artifacts, both images multi-arch, the published
+charts rendering the right refs, and the repository's check runs green at the tagged commit. None of
+that is a request reaching a responding endpoint. Two consumers have runtime verification queued —
+one has a probe harness that stands up two in-cluster hosts, points the controller at A and reads
+**B's** access log as ground truth, where B is a host the document never names; on 0.49.0 it printed
+that the credential followed the redirect to a different host, and under this release it must print
+a refusal instead. The other will move its live Zendesk tests. Both are load-gated on a shared
+machine and neither had run when this was written.
+
+The reason that distinction gets its own paragraph: a release here once reported five green
+artifacts after swapping the base image, and no pod had ever started from it. "Published" and
+"exercised" are two claims and only one of them was true.
+
+**And the control for that verification had to move when the expected answer moved**, which is the
+sharpest version of this anyone has put to me. On 0.49.0 the reassuring answer was that B's log
+showed the header ABSENT, so the harness first had to prove B could *detect* a header before its
+silence meant anything. On 0.50.0 the reassuring answer is the refusal, so the companion arm has to
+prove the controller **still works** against A — a policy that refuses the redirect *and* breaks the
+legitimate call looks like a pass from B's log alone. Same instrument, same test, different required
+control. "Does this check have a control" is the wrong question; "can this check fail in the
+direction I am hoping for" is the right one.
 
 ## 2026-11-02 — 0.49.0
 
