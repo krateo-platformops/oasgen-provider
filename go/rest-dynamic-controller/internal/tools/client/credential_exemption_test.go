@@ -6,8 +6,9 @@ import "testing"
 // for "authorization" and nothing else, so it covered 1 of the 9 names this package already enumerates in
 // credentialHeaders.
 //
-// The exemption exists because SetAuth attaches the credential at restclient.go:313/:850 while
-// ValidateRequest runs at :199 against opts.Headers -- a map the credential is never written into, since
+// The exemption exists because SetAuth attaches the credential to the *http.Request late in Call and in
+// CallForPagination, while ValidateRequest runs earlier in each of those same two functions against
+// opts.Headers -- a map the credential is never written into, since
 // SetAuth operates on the *http.Request. The validator structurally cannot see it. That reasoning is not
 // specific to `Authorization`; it applies to every header whose value arrives after validation.
 //

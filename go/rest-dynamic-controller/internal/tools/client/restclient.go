@@ -1232,7 +1232,7 @@ func (d *debuggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 //
 // WHY NOT AT THE 14 CLIENT CONSTRUCTION SITES. Fourteen edits, and site fifteen would be silently
 // unguarded -- an unguarded credentialed request SUCCEEDS, so nothing would surface it. Also unnecessary:
-// SetAuth fires at :314 and :851, inside these same two functions, so credential attachment and
+// SetAuth fires inside these same two functions, Call and CallForPagination, so credential attachment and
 // enforcement are already the same two lines apart and cannot drift.
 //
 // TWO CHECKS, NOT ONE. PermitsURL answers about the host the caller intends; the dialer answers about the

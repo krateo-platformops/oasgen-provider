@@ -680,7 +680,7 @@ func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath 
 	//}
 
 	// EVERY host the document can dial, not just servers[0]. Call and CallForPagination both honour a
-	// per-operation `servers[0]` override (restclient.go:190 and :732), so collecting only the base URL
+	// per-operation `servers[0]` override (the `op.Servers[0]` reads in Call and CallForPagination), so collecting only the base URL
 	// would turn this guard from a no-op into an outage for any document that uses one.
 	//
 	// Index 0 only, on both, because that is all the code ever dials -- admitting the rest would widen
@@ -712,7 +712,8 @@ func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath 
 // is a test suite that passes while production refuses every request.
 //
 // Index 0 only, on both, because that is all Call and CallForPagination ever dial
-// (restclient.go:190 and :732). Admitting the rest would widen the permitted set for nothing.
+// (the `op.Servers[0]` reads in Call and CallForPagination). Admitting the rest would widen the
+// permitted set for nothing.
 func DocumentHosts(doc *libopenapi.DocumentModel[v3.Document]) []string {
 	if doc == nil || len(doc.Model.Servers) == 0 {
 		return nil
@@ -739,7 +740,8 @@ func DocumentHosts(doc *libopenapi.DocumentModel[v3.Document]) []string {
 // after this validation runs, and which must therefore not be demanded here.
 //
 // WHY AN EXEMPTION IS NEEDED AT ALL. SetAuth attaches the credential to the *http.Request at
-// restclient.go:313 and :850. ValidateRequest runs at :199 -- 114 lines earlier -- against opts.Headers,
+// restclient.go, inside both Call and CallForPagination. ValidateRequest runs EARLIER in each of those
+// same two functions, well before the credential is attached, against opts.Headers,
 // a map the credential is never written into, because SetAuth operates on the request rather than on the
 // options. So the validator STRUCTURALLY CANNOT SEE the credential: the request is correctly formed and
 // was refused anyway.
