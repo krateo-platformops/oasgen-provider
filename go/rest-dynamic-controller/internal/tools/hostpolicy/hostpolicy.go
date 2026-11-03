@@ -51,6 +51,39 @@ type Policy struct {
 	// allowAny disables host matching entirely. Spelled as its own field rather than as a `*` entry so it
 	// shows up in a values diff instead of hiding as punctuation in a list.
 	allowAny bool
+	// allowLoopback relaxes the loopback refusal in denyIP, and NOTHING AN OPERATOR CAN WRITE SETS IT.
+	//
+	// It exists because httptest binds 127.0.0.1, so without a seam no request-making test in this
+	// repository can use a policy-enforced client -- which would mean the guard ships with its
+	// request path untested, which is how an unguarded request got here in the first place.
+	//
+	// IT IS DELIBERATELY NOT CHART VALUES. The obvious design is an `allowLoopback` values key, and it
+	// is the wrong one: the person who sets it is whoever needs a dev install or a test to work, and
+	// the moment it is set 169.254.169.254 is reachable by a CREDENTIALED request. That is exactly the
+	// hole #379 is about, re-opened by configuration. An untested code path is a smaller cost than a
+	// values key that re-enables an SSRF target -- so the seam is reachable only from Go, only through
+	// AllowLoopbackForTesting, and a test asserts that method has no non-test caller.
+	allowLoopback bool
+}
+
+// AllowLoopbackForTesting relaxes the loopback refusal. CALL IT ONLY FROM TESTS.
+//
+// Exported because tests in other packages need it -- httptest binds 127.0.0.1, so a test of any
+// request-making code path cannot otherwise use a policy-enforced client at all.
+//
+// The name is deliberately unpleasant and the enforcement is a test: hostpolicy_seam_test.go asserts
+// this method has zero callers outside _test.go files, with a control proving the search finds callers.
+// That is weaker than a compile-time barrier and stronger than a comment, and it is the same shape as
+// the ExistenceChecker assertion in exists.go -- a property of the codebase asserted by a test, because
+// drifting from it would otherwise be silent.
+//
+// It relaxes LOOPBACK ONLY. Link-local, multicast and the unspecified address stay refused, so a test
+// cannot accidentally make the cloud-metadata endpoint reachable either.
+func (p *Policy) AllowLoopbackForTesting() *Policy {
+	if p != nil {
+		p.allowLoopback = true
+	}
+	return p
 }
 
 // entry is one permitted destination. Scheme and port both participate in matching.
@@ -259,13 +292,20 @@ func (p *Policy) describe() string {
 // denyInternalAddr. An on-prem GHES is routinely RFC1918, and refusing private space would make this
 // feature useless for the thing it exists for. The control for private space is the allowlist: the
 // operator has to name the host.
-func denyIP(ip net.IP) error {
+func denyIP(ip net.IP) error { return denyIPWithLoopback(ip, false) }
+
+// denyIPWithLoopback is denyIP with the loopback refusal optionally relaxed. allowLoopback is true ONLY
+// via Policy.AllowLoopbackForTesting; nothing an operator can write reaches it.
+func denyIPWithLoopback(ip net.IP, allowLoopback bool) error {
 	// Unwrap IPv4-mapped IPv6 first, so ::ffff:127.0.0.1 cannot slip past the v4 checks below.
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}
 	switch {
 	case ip.IsLoopback():
+		if allowLoopback {
+			return nil
+		}
 		return fmt.Errorf("%s is a loopback address", ip)
 	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
 		// 169.254.0.0/16 and fe80::/10 -- the cloud-metadata targets.
@@ -284,7 +324,11 @@ func denyIP(ip net.IP) error {
 // code path that reuses this Dialer without going through DialContext. The cost is one parse per
 // connection; the thing it prevents is a new call site silently bypassing the guard, which is how the
 // unguarded request got here in the first place.
-func controlDenyIP(_, address string, _ syscall.RawConn) error {
+func controlDenyIP(network, address string, c syscall.RawConn) error {
+	return controlDenyIPWithLoopback(network, address, c, false)
+}
+
+func controlDenyIPWithLoopback(_, address string, _ syscall.RawConn, allowLoopback bool) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("parsing dial address %q: %w", address, err)
@@ -295,7 +339,7 @@ func controlDenyIP(_, address string, _ syscall.RawConn) error {
 		// this Dialer, which is the case this backstop exists for -- refuse rather than resolve.
 		return fmt.Errorf("refusing to dial unresolved host %q: the host policy requires a checked address", host)
 	}
-	return denyIP(ip)
+	return denyIPWithLoopback(ip, allowLoopback)
 }
 
 // DialContext resolves once, checks every resolved address, and dials the CHOSEN ADDRESS LITERALLY.
@@ -311,14 +355,20 @@ func controlDenyIP(_, address string, _ syscall.RawConn) error {
 // the kind of correct that stops being correct silently, so there is a test with an HTTPS server whose
 // certificate names the host.
 func (p *Policy) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: controlDenyIP}
+	// The Control backstop has to agree with the decision DialContext just made, or a test that was
+	// permitted loopback above would be refused here instead. It still refuses link-local, multicast and
+	// unspecified unconditionally -- the relaxation is loopback only.
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second,
+		Control: func(network, address string, c syscall.RawConn) error {
+			return controlDenyIPWithLoopback(network, address, c, p.allowLoopback)
+		}}
 
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, fmt.Errorf("refusing to dial %q: %w", addr, err)
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if derr := denyIP(ip); derr != nil {
+		if derr := denyIPWithLoopback(ip, p.allowLoopback); derr != nil {
 			return nil, fmt.Errorf("refusing to send a credentialed request: %w", derr)
 		}
 		return dialer.DialContext(ctx, network, addr)
@@ -336,7 +386,7 @@ func (p *Policy) DialContext(ctx context.Context, network, addr string) (net.Con
 	// Failing closed is the right trade because the allowlist is operator-controlled: the operator named a
 	// host they trust, so a mixed answer is anomalous and refusing it costs a retry.
 	for _, a := range addrs {
-		if derr := denyIP(a.IP); derr != nil {
+		if derr := denyIPWithLoopback(a.IP, p.allowLoopback); derr != nil {
 			return nil, fmt.Errorf("refusing to send a credentialed request to %q: %w", host, derr)
 		}
 	}
