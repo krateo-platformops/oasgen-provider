@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
 	"net/http"
 	"os"
 	"os/exec"
@@ -565,7 +566,7 @@ func TestController(t *testing.T) {
 				log.Debug("Creating chart url info getter.", "error", err)
 			}
 
-			handler = NewHandler(cfg.Client().RESTConfig(), teeLogger{inner: log}, swg, pluralizer, true)
+			handler = NewHandler(cfg.Client().RESTConfig(), teeLogger{inner: log}, swg, pluralizer, true, hostpolicy.Config{})
 
 			return ctx
 		}).
