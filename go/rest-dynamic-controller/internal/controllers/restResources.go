@@ -15,6 +15,7 @@ import (
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/fieldmapping"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pathparsing"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/snowplow"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
@@ -39,7 +40,7 @@ const (
 	reasonDeleted event.Reason = "ResourceDeleted"
 )
 
-func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool) controller.ExternalClient {
+func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool, hostPolicyCfg hostpolicy.Config) controller.ExternalClient {
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		log.Error(err, "Creating dynamic client.")
@@ -59,6 +60,7 @@ func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, plurali
 		discoveryClient:   dis,
 		swaggerInfoGetter: swg,
 		prettyJSONDebug:   prettyJSONDebug,
+		hostPolicyCfg:     hostPolicyCfg,
 		// Default to a no-op recorder so events are always safe to emit even
 		// when an API-backed recorder is not wired in (e.g. in tests). main.go
 		// injects the real recorder via SetEventRecorder.
@@ -73,7 +75,10 @@ type handler struct {
 	discoveryClient   *discovery.DiscoveryClient
 	swaggerInfoGetter getter.Getter
 	prettyJSONDebug   bool
-	eventRecorder     event.Recorder
+	// hostPolicyCfg is the operator half of the #379 endpoint policy, threaded from main.go the same
+	// way prettyJSONDebug is. Required on BuildClient, so a missing one is a compile error.
+	hostPolicyCfg hostpolicy.Config
+	eventRecorder event.Recorder
 	// snowplowClient resolves observeApiRef RESTActions via snowplow's /call endpoint. nil when snowplow is
 	// not configured; a resource that declares observeApiRef then fails Observe with a clear error.
 	snowplowClient *snowplow.Client
@@ -280,7 +285,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	// "the client" up front: IsResourceKnown below runs the GET verb, the observe branch runs get XOR
 	// findby, and the dispatch and async paths run their own verbs. A resource declaring get and findby in
 	// different documents is served correctly only because each use asks for its own action.
-	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug)
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg)
 
 	// A dispatch resource is observed by looking its correlation token up in the declared collection, which
 	// replaces the get/findby observe entirely (#199). BEFORE the async check, because the two are mutually
@@ -851,7 +856,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	// One set per reconcile, resolving each verb to the document IT declares (#220). Configuration lives
 	// in the set, so every client it hands out carries SetAuth -- a second client for a second document
 	// would otherwise go out unauthenticated.
-	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug)
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg)
 	cli, err := cs.For(ctx, string(apiaction.Create))
 	if err != nil {
 		log.Error(err, "Building REST client")
@@ -1077,7 +1082,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	// One set per reconcile, resolving each verb to the document IT declares (#220). Configuration lives
 	// in the set, so every client it hands out carries SetAuth -- a second client for a second document
 	// would otherwise go out unauthenticated.
-	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug)
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg)
 	cli, err := cs.For(ctx, string(apiaction.Update))
 	if err != nil {
 		log.Error(err, "Building REST client")
@@ -1296,7 +1301,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// for why a single client per entry point will not do: it verifies itself with the GET verb, so the
 	// verification read must address the get verb's document even when the delete verb declares another
 	// (#220).
-	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug)
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg)
 	cli, err := cs.For(ctx, string(apiaction.Delete))
 	if err != nil {
 		log.Error(err, "Building REST client")

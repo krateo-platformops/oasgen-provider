@@ -31,11 +31,16 @@ func createTestClient(t *testing.T) *UnstructuredClient {
 	model, errs := doc.BuildV3Model()
 	require.Empty(t, errs)
 
-	return &UnstructuredClient{
+	u := &UnstructuredClient{
 		//Doc:       doc, // TODO: to be re-enabled when libopenapi-validation is more stable
 		DocScheme: model,
 		Server:    "https://example.com",
 	}
+	// The URL check runs whatever the Transport is, so even a mock-transport test needs a policy that
+	// permits the Server it claims to be talking to. Tests that point Server at an httptest URL call
+	// allowServer afterwards to re-derive it.
+	allowServer(t, u)
+	return u
 }
 
 func TestPathValidation(t *testing.T) {
@@ -1311,6 +1316,7 @@ func TestCall_TolerateCodes(t *testing.T) {
 		defer srv.Close()
 		client := createTestClient(t)
 		client.Server = srv.URL
+		allowServer(t, client)
 
 		resp, err := client.Call(context.Background(), srv.Client(), "/api/test",
 			&RequestConfiguration{Method: "GET", TolerateCodes: []int{404}})
@@ -1323,6 +1329,7 @@ func TestCall_TolerateCodes(t *testing.T) {
 		defer srv.Close()
 		client := createTestClient(t)
 		client.Server = srv.URL
+		allowServer(t, client)
 
 		_, err := client.Call(context.Background(), srv.Client(), "/api/test",
 			&RequestConfiguration{Method: "GET"})
@@ -1342,6 +1349,7 @@ func TestCall_NotFoundCodes(t *testing.T) {
 		defer srv.Close()
 		client := createTestClient(t)
 		client.Server = srv.URL
+		allowServer(t, client)
 
 		_, err := client.Call(context.Background(), srv.Client(), "/api/test",
 			&RequestConfiguration{Method: "GET", NotFoundCodes: []int{410}})
@@ -1354,6 +1362,7 @@ func TestCall_NotFoundCodes(t *testing.T) {
 		defer srv.Close()
 		client := createTestClient(t)
 		client.Server = srv.URL
+		allowServer(t, client)
 
 		_, err := client.Call(context.Background(), srv.Client(), "/api/test",
 			&RequestConfiguration{Method: "GET"})
@@ -1443,6 +1452,7 @@ func TestCall_QueryValueReachesServerEscapedOnce(t *testing.T) {
 
 	client := createTestClient(t)
 	client.Server = srv.URL
+	allowServer(t, client)
 
 	_, err := client.Call(context.Background(), srv.Client(), "/api/search", &RequestConfiguration{
 		Method: "GET",

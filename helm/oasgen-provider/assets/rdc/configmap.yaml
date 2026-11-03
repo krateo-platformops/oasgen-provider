@@ -13,6 +13,15 @@ metadata:
 data:
   REST_CONTROLLER_SERVICEACCOUNT_NAME: {{ "{{" }} .composition_controller_sa_name {{ "}}" }}
   REST_CONTROLLER_SERVICEACCOUNT_NAMESPACE: {{ "{{" }} .composition_controller_sa_namespace {{ "}}" }}
+  # #379. Rendered unconditionally so the key is always present and its value is always explicit --
+  # an absent key and an empty one are the same to the controller, but only one of them is visible to
+  # someone reading the ConfigMap to find out what the policy is.
+  #
+  # Note the precedence the otel block documents: an `env:` entry WINS over an `envFrom` one of the same
+  # name, so an operator who also sets REST_CONTROLLER_ENDPOINT_ALLOWLIST through rdc.env overrides this.
+  # That is why the dedicated values key exists -- rdc.env is a free-form map where a typo is silent.
+  REST_CONTROLLER_ENDPOINT_ALLOWLIST: {{ join "," .Values.rdc.endpointAllowlist | quote }}
+  REST_CONTROLLER_ALLOW_ANY_HOST: {{ .Values.rdc.allowAnyHost | quote }}
   # home should be set to /tmp or any other writable directory to avoid permission issues with helm https://github.com/helm/helm/issues/8038
   HOME: /tmp
   {{- range $key, $value := .Values.rdc.env }}

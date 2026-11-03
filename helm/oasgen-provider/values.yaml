@@ -107,6 +107,40 @@ tolerations: []
 affinity: {}
 
 rdc:
+  # #379: the hosts a CREDENTIALED request may reach, beyond the ones the OAS document itself names.
+  #
+  # EMPTY IS THE NO-OP AND THE DEFAULT. An empty list means "no endpoint override is permitted; use the
+  # hosts the document names" -- which is where requests already go, so an existing install needs no
+  # change and is still fixed. Requiring a value would turn every single-host provider into a config
+  # error on upgrade for a capability it does not use.
+  #
+  # Entries are host[:port], optionally prefixed `http://` (no prefix permits https ONLY -- cleartext
+  # has to be asked for), and may use a single leading `*.` wildcard, which matches one or more leading
+  # labels and NOT the bare suffix. A bare `*` is rejected at startup; see allowAnyHost below.
+  #
+  #   endpointAllowlist:
+  #     - ghe.corp.example.com
+  #     - ghe.corp.example.com:8443
+  #     - "*.ghe.corp.example.com"
+  #     - http://legacy.internal.example.com
+  #
+  # Loopback, link-local, multicast and the unspecified address are refused regardless of this list, and
+  # that cannot be overridden from values -- those are the SSRF targets. RFC1918 is deliberately
+  # reachable, because an on-prem GHES is routinely private; the control for private space is naming the
+  # host here.
+  #
+  # A DEDICATED KEY rather than rdc.env, deliberately. These would also travel through
+  # REST_CONTROLLER_ENDPOINT_ALLOWLIST in rdc.env, and for a security control that is the wrong channel:
+  # a misspelled key in a free-form env map silently does nothing, so the operator believes the
+  # allowlist is set when it is not. The schema rejects a typo here.
+  endpointAllowlist: []
+
+  # Disable endpoint matching entirely. The unconditional refusals above still apply.
+  #
+  # Its own key rather than a `*` entry in the list, so "permit any host" appears in a values diff
+  # instead of hiding as punctuation. The controller also logs it loudly once at startup.
+  allowAnyHost: false
+
   # Node-local OTLP endpoint for the C8 audit trail (#253).
   #
   # OFF by default, deliberately. When enabled, the generated controllers get an explicit env block

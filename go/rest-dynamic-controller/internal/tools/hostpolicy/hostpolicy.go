@@ -96,6 +96,20 @@ type entry struct {
 	scheme   string // "https" or "http"
 }
 
+// Config is the OPERATOR half of a Policy: what chart values say. The document half -- the hosts the OAS
+// document itself names -- is collected by BuildClient, which is the thing that parses the document.
+//
+// Split this way deliberately. If BuildClient took a ready-made *Policy, a caller could build one without
+// the document's hosts and every request would be refused; taking the Config instead means NO CALLER CAN
+// FORGET the document hosts, because the only code that could omit them is the code that reads them.
+type Config struct {
+	// Allowlist holds operator-controlled entries. EMPTY IS THE NORMAL CASE and means "no override
+	// permitted; use the document's hosts" -- a no-op for every existing install.
+	Allowlist []string
+	// AllowAnyHost disables host matching entirely. The unconditional refusals still apply.
+	AllowAnyHost bool
+}
+
 // Parse builds a Policy.
 //
 // allowlist holds operator-controlled entries from chart values. documentHosts holds the hosts the OAS
@@ -420,11 +434,23 @@ func (p *Policy) CheckRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
+// Transport returns the guarded RoundTripper on its own, so a caller that needs to WRAP it -- a debug
+// round-tripper, a recorder -- can do so without losing the dialer underneath.
+//
+// This exists because the alternative bit: the debug round-tripper used to wrap the CALLER's transport and
+// assign it back onto the caller's client, which made that transport non-nil and caused the request to be
+// sent on it instead of on the policy's. So enabling verbose debugging silently bypassed the resolved-
+// address and per-hop redirect checks -- in the one configuration an operator turns on when something is
+// already wrong. Found by the production-Transport guard test, which is why that test exists.
+func (p *Policy) Transport() http.RoundTripper {
+	return &http.Transport{DialContext: p.DialContext, TLSHandshakeTimeout: 10 * time.Second}
+}
+
 // Client returns an http.Client that enforces this policy.
 func (p *Policy) Client(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:       timeout,
-		Transport:     &http.Transport{DialContext: p.DialContext, TLSHandshakeTimeout: 10 * time.Second},
+		Transport:     p.Transport(),
 		CheckRedirect: p.CheckRedirect,
 	}
 }

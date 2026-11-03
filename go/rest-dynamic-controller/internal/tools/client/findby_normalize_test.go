@@ -210,6 +210,7 @@ func TestFindByEndToEndNormalizesBeforeMatching(t *testing.T) {
 
 	client := &UnstructuredClient{
 		Server:                 server.URL,
+		HostPolicy:             allowedPolicy(t, server.URL),
 		DocScheme:              v3Doc,
 		IdentifierFields:       []string{"head", "base"},
 		IdentifiersMatchPolicy: "AND",
@@ -246,6 +247,7 @@ func TestFindByEndToEndStillMissesWithoutATransform(t *testing.T) {
 
 	client := &UnstructuredClient{
 		Server:                 server.URL,
+		HostPolicy:             allowedPolicy(t, server.URL),
 		DocScheme:              v3Doc,
 		IdentifierFields:       []string{"head"},
 		IdentifiersMatchPolicy: "AND",

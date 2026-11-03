@@ -99,7 +99,7 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 		return false, fmt.Errorf("existence check: the resource is Pending, so whether the create landed is not yet determined")
 	}
 
-	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug)
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg)
 
 	gcli, gerr := cs.For(ctx, string(apiaction.Get))
 	if gerr != nil {

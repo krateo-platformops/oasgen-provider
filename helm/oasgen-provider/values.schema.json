@@ -474,6 +474,19 @@
               "description": "OTLP/HTTP port on the node-local collector."
             }
           }
+        },
+        "endpointAllowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Hosts a credentialed request may reach, beyond those the OAS document names. Empty (the default) permits only the document's hosts. Entries are host[:port], optionally http:// prefixed, with an optional single leading *. wildcard."
+        },
+        "allowAnyHost": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable endpoint-allowlist matching entirely. The unconditional refusals (loopback, link-local, multicast, unspecified) still apply."
         }
       }
     },

@@ -8,6 +8,7 @@ import (
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/apiaction"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
@@ -37,16 +38,20 @@ type clientSet struct {
 	// the wrong factory.
 	mg         *unstructured.Unstructured
 	prettyJSON bool
-	byPath     map[string]restclient.UnstructuredClientInterface
+	// hostPolicyCfg is the OPERATOR half of the #379 endpoint policy. BuildClient collects the
+	// document half itself, so this carries only what chart values say.
+	hostPolicyCfg hostpolicy.Config
+	byPath        map[string]restclient.UnstructuredClientInterface
 }
 
-func newClientSet(kube dynamic.Interface, info *getter.Info, mg *unstructured.Unstructured, prettyJSON bool) *clientSet {
+func newClientSet(kube dynamic.Interface, info *getter.Info, mg *unstructured.Unstructured, prettyJSON bool, hostPolicyCfg hostpolicy.Config) *clientSet {
 	return &clientSet{
-		kube:       kube,
-		info:       info,
-		mg:         mg,
-		prettyJSON: prettyJSON,
-		byPath:     map[string]restclient.UnstructuredClientInterface{},
+		kube:          kube,
+		info:          info,
+		mg:            mg,
+		prettyJSON:    prettyJSON,
+		hostPolicyCfg: hostPolicyCfg,
+		byPath:        map[string]restclient.UnstructuredClientInterface{},
 	}
 }
 
@@ -132,7 +137,7 @@ func (c *clientSet) forDocument(ctx context.Context, path, forWhat string) (rest
 	if cli, ok := c.byPath[path]; ok {
 		return cli, nil
 	}
-	cli, err := restclient.BuildClient(ctx, c.kube, path)
+	cli, err := restclient.BuildClient(ctx, c.kube, path, c.hostPolicyCfg)
 	if err != nil {
 		return nil, fmt.Errorf("building the client for %s against %q: %w", forWhat, path, err)
 	}
