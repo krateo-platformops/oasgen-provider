@@ -130,20 +130,50 @@ func (c *Client) Resolve(ctx context.Context, ref ApiRef, extras map[string]any)
 		return nil, "", err
 	}
 
-	// A 401 means the token this controller presented was rejected. The cache that produced it keys on
-	// TIME ALONE, so after an authn signing-key rotation it will keep returning the same dead JWT until
-	// refreshSkew — an outage lasting up to the token's remaining lifetime, cleared by a pod restart,
-	// which makes it look like a transient (#369). Dropping the cache and re-issuing makes a rotation
-	// self-healing.
+	// A 401 can mean the token this controller presented was rejected -- the cache that produced it keys on
+	// TIME ALONE, so after an authn signing-key rotation it returns the same dead JWT until refreshSkew
+	// (#369). Dropping the cache and re-issuing makes that self-healing.
 	//
-	// EXACTLY ONCE, deliberately. snowplow can answer 401 for reasons a fresh token cannot fix — a
-	// misconfigured audience, a mapping that no longer exists — and retrying those in a loop would turn a
-	// clear failure into a hot one. One attempt distinguishes "my token went stale" from "my identity is
-	// wrong" and then reports the latter.
+	// IT CAN ALSO MEAN A WRITE ALREADY HAPPENED, which is why the status code alone must not drive this.
 	//
-	// Safe to re-issue because /call is a GET: no body, no side effect from the request itself. A retry on
-	// a mutating verb would need idempotency the endpoint does not promise.
-	if code == http.StatusUnauthorized && c.invalidate != nil {
+	// The previous version of this code retried on any 401, justified by "safe to re-issue because /call is
+	// a GET: no body, no side effect from the request itself". The snowplow session falsified that twice,
+	// by measurement against their real middleware and a real RESTAction pipeline:
+	//
+	//  1. /call accepts POST, PUT, PATCH and DELETE; the verb is passed through; and a RESTAction can
+	//     declare write stages that are dispatched and audited per stage whatever the outer method is. So
+	//     the method never licensed the retry.
+	//  2. A RESTAction whose stage 1 POSTs (201, audited) and whose stage 2 takes an upstream 401 answers
+	//     401 for the WHOLE /call -- after the POST was sent and audited. Re-issuing then performs the
+	//     write a second time.
+	//
+	// And those post-dispatch 401s are byte-shaped like a token rejection: reason "Unauthorized", no
+	// details. So the status code cannot distinguish "my token is stale" from "a write already landed",
+	// and a wrong guess duplicates an audited side effect.
+	//
+	// THE DISCRIMINATOR IS THE CAUSE, not the code. Only snowplow's own pre-dispatch credential rejection
+	// carries details.causes[0].reason, and an upstream 401 CANNOT forge one: details planted in an
+	// upstream body are dropped before the response is built. That guarantee is what makes a positive
+	// signal usable here. A 401 with no cause therefore means "nothing is known about whether dispatch
+	// happened", and the only safe reading of that is "it may have".
+	//
+	// So: retry ONLY on SessionCredentialMissing, and EXACTLY ONCE.
+	//
+	//   SessionCredentialMissing  no credential reached the auth layer -> nothing dispatched -> retry
+	//   StepUpRequired            a cause, but it means STEP UP, not retry -> do not
+	//   no cause at all           token rejection OR post-dispatch upstream 401, indistinguishable -> do not
+	//
+	// Exactly once because snowplow can answer 401 for reasons a fresh token cannot fix -- a misconfigured
+	// audience, a mapping that no longer exists -- and retrying those in a loop turns a clear failure into
+	// a hot one.
+	//
+	// NOT 503. An unknown `kid` (a rotated-out authn signing key) answers 503, so the rotation case #372
+	// was written for is not reachable through a 401 at all today -- see #376. 503 is ALSO snowplow's
+	// answer for "JWKS unreachable", and while authn is down the two are indistinguishable, so dropping the
+	// JWT on a 503 would discard valid tokens during an authn outage and stampede authn as it recovers.
+	// The fix belongs upstream, in plumbing's jwtutil, where an unknown kid after a successful key fetch
+	// can be told apart from no key set at all.
+	if code == http.StatusUnauthorized && c.invalidate != nil && retryableAuthCause(body) {
 		c.invalidate()
 		code, body, hdr, err = issue()
 		if err != nil {
@@ -203,4 +233,35 @@ func stripURL(err error) error {
 		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
 	}
 	return err
+}
+
+// causeSessionCredentialMissing is the only pre-dispatch cause that a retry can fix. snowplow guarantees an
+// upstream 401 cannot forge a cause, so its PRESENCE is evidence that snowplow rejected the request before
+// dispatching anything.
+const causeSessionCredentialMissing = "SessionCredentialMissing"
+
+// retryableAuthCause reports whether a 401 body carries snowplow's own pre-dispatch credential-missing
+// cause, which is the only case where re-issuing cannot repeat a side effect.
+//
+// It is deliberately a POSITIVE test. The alternative shape -- "retry unless the body says a stage ran" --
+// would retry every reason snowplow adds later, including post-dispatch ones that do not exist yet. An
+// unparseable body, an empty body, a body with no details, and a body with a different cause all answer
+// false, because "I could not tell" and "it may already have been dispatched" must be the same answer here.
+func retryableAuthCause(body []byte) bool {
+	var st struct {
+		Details struct {
+			Causes []struct {
+				Reason string `json:"reason"`
+			} `json:"causes"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(body, &st); err != nil {
+		return false
+	}
+	for _, c := range st.Details.Causes {
+		if c.Reason == causeSessionCredentialMissing {
+			return true
+		}
+	}
+	return false
 }
