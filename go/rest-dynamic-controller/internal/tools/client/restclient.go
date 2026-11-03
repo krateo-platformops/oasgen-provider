@@ -1249,6 +1249,31 @@ func (d *debuggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 //
 // A header whose job is to carry a credential does not need to be recognised by value to be known
 // dangerous. Redact it structurally, so a credential nobody registered is still covered.
+// IsCredentialHeader reports whether name is one of the headers whose JOB is to carry a credential,
+// case-insensitively.
+//
+// It reads the SAME list that drives log redaction, deliberately. The list and the refusal cannot drift
+// apart if there is only one list -- and if a tenth credential header is ever added for redaction, the
+// refusal gains it in the same commit.
+//
+// The caller that needs this is processFields, which populates a header from the CR spec (#305). Without
+// the check, a credential could be written into the main CR spec in cleartext: measured against a test
+// server with the refusal removed, `server saw X-Api-Key="s3cret" from the CR SPEC`. That is WIDER read
+// access than a Secret -- anyone with get on the CR -- and RedactValues does not cover it, since that is
+// populated solely from secretRef, so only this by-name list catches it in a verbose dump.
+//
+// `Authorization` itself is covered twice over already (the generator skips *authorization* header
+// params, and SetAuth overwrites after opts.Headers) -- but the generator's skip matches only
+// *authorization* and not the other eight names, and RDC must not trust the CRD it is handed.
+func IsCredentialHeader(name string) bool {
+	for _, h := range credentialHeaders {
+		if strings.EqualFold(name, h) {
+			return true
+		}
+	}
+	return false
+}
+
 var credentialHeaders = []string{
 	"Authorization",
 	"Proxy-Authorization",

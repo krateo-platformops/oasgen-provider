@@ -526,9 +526,51 @@ func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfigu
 			}
 		}
 
-		// Note: probably headers and cookies are better to be set ONLY in the Configuration CR spec
-		// (and currently it is only possible there)
-		// Therefore, we do not set them here since we are processing only the main resource fields (spec/status) with this function.
+		// HEADERS AND COOKIES, which this function used to skip with the note "probably better to be set
+		// ONLY in the Configuration CR spec (and currently it is only possible there)".
+		//
+		// That skip was the whole of #305. An OAS header parameter declaring `required: true` AND a
+		// `default` generates a correct CRD -- the generator DOES honour the default and the apiserver
+		// materialises it onto the CR -- and then nothing ever populated it, so ValidateRequest demanded
+		// a header the CR was carrying and the request failed with "missing header: <name>". The drop was
+		// only ever population: opts.Headers reaches the wire at restclient.go:252/:794 and opts.Cookies
+		// via AddCookie at :297/:839. Measured: ReqParams.Headers and .Cookies had ZERO reads anywhere in
+		// either module, against a control of 3 for the sibling fields.
+		//
+		// Cookies are included because the defect is real there too, not for symmetry: ValidateRequest
+		// demands a required cookie with no exemption of any kind, and oasgen's own skip tests
+		// In == "header" so it never applies to one.
+		//
+		// A CREDENTIAL HEADER IS REFUSED. Measured with the refusal removed, ground truth from the test
+		// server: `server saw X-Api-Key="s3cret" from the CR SPEC`. That puts a credential in the main CR
+		// spec in cleartext -- wider read access than a Secret, which is what secretRef exists to avoid --
+		// and RedactValues does not cover it, being populated solely from secretRef. `Authorization` is
+		// already stopped twice over (the generator skips *authorization* params; SetAuth overwrites after
+		// opts.Headers), but that skip matches only *authorization* and not the other eight names, and RDC
+		// must not trust the CRD it is handed.
+		//
+		// Hop-by-hop names are NOT refused, and that is a measured decision rather than an omission. Of
+		// {Host, Content-Length, Transfer-Encoding, Connection, Upgrade}, the first three never reach the
+		// wire at all -- net/http's reqWriteExcludeHeader drops them from the header map at write time and
+		// takes the Host line from req.URL.Host, which is also what gets dialled. So there is no
+		// virtual-host-confusion channel here and no smuggling route. Connection and Upgrade do arrive and
+		// change neither framing nor routing. Refusing them would be an availability argument, not a
+		// security one.
+		//
+		// The !ok guard, rather than the body branch's nil-compare: Headers is map[string]string, so a
+		// nil-compare would treat a legitimately empty header value as unset. It is also what makes
+		// spec-beats-status work with no extra code -- status is processed second and finds the key taken.
+		if callInfo.ReqParams.Headers.Contains(field) && !restclient.IsCredentialHeader(field) {
+			if _, ok := reqConfiguration.Headers[field]; !ok {
+				reqConfiguration.Headers[field] = fmt.Sprintf("%v", value)
+			}
+		}
+
+		if callInfo.ReqParams.Cookies.Contains(field) {
+			if _, ok := reqConfiguration.Cookies[field]; !ok {
+				reqConfiguration.Cookies[field] = fmt.Sprintf("%v", value)
+			}
+		}
 
 		if callInfo.ReqParams.Body.Contains(field) {
 			// Nil-guard so spec (processed first) beats status. FieldMapping precedence is NOT handled
