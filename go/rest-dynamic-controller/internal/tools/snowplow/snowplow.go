@@ -45,7 +45,7 @@ type Client struct {
 func New(server string, token TokenFunc) *Client {
 	return &Client{
 		server:     server,
-		httpClient: &http.Client{Timeout: 60 * time.Second},
+		httpClient: &http.Client{Timeout: 60 * time.Second, CheckRedirect: refuseRedirects},
 		token:      token,
 	}
 }
@@ -56,7 +56,15 @@ func New(server string, token TokenFunc) *Client {
 // working unchanged and a nil invalidator means "retry nothing" rather than a panic.
 func (c *Client) WithTokenInvalidator(f func()) *Client { c.invalidate = f; return c }
 
-func (c *Client) WithHTTPClient(h *http.Client) *Client { c.httpClient = h; return c }
+// WithHTTPClient swaps the transport, typically for an httptest server. The redirect policy is
+// RE-INSTALLED on whatever is handed in: it belongs to this package, not to the caller (#401).
+func (c *Client) WithHTTPClient(h *http.Client) *Client {
+	if h != nil {
+		h.CheckRedirect = refuseRedirects
+	}
+	c.httpClient = h
+	return c
+}
 
 const restActionAPIVersion = "templates.krateo.io/v1"
 
@@ -264,4 +272,43 @@ func retryableAuthCause(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// refuseRedirects is the CheckRedirect this package installs on every client it uses, and the package
+// owns it rather than the caller.
+//
+// WHY THE PACKAGE OWNS IT. `WithHTTPClient` exists so a test can swap the TRANSPORT for an httptest
+// server. It is not a hook for changing the redirect policy, and a caller that supplied a client without
+// one would silently lose the guarantee below. So it is installed in New AND re-installed on whatever
+// WithHTTPClient is handed (#401).
+//
+// WHY REFUSING OUTRIGHT IS THE RIGHT ANSWER RATHER THAN PINNING THE HOST. This client POSTs to one fixed,
+// operator-configured path on one known in-cluster service. The authn session checked their source: authn
+// has no http.Redirect and no Location header anywhere, routes with its own exact-path matcher rather than
+// ServeMux (so there is no trailing-slash or path-cleaning redirect), and /serviceaccount/login answers
+// 200, 401, 403 or 500 only. The single 3xx anywhere is LDAP's 300 AmbiguousUser, which this controller
+// never calls, which carries no Location, and which Go would not follow. They confirmed no legitimate
+// redirect exists or is planned. So a hop here is never legitimate, and refusing is simpler than pinning.
+//
+// WHY net/http's OWN STRIP IS NOT THE PROTECTION IT LOOKS LIKE -- the measurement this exists for. The
+// standard library drops Authorization when a redirect leaves the original host, but "leaves the original
+// host" PERMITS A SUBDOMAIN and ignores the port:
+//
+//	origin            -> redirect target     destination received
+//	krateo.test       -> evil.krateo.test    Bearer <token>   <- ARRIVED
+//	localhost         -> localhost:other     Bearer <token>   <- ARRIVED
+//	evil.krateo.test  -> krateo.test         stripped
+//	krateo.test       -> attacker.test       stripped            (control)
+//
+// That is deliberate, documented behaviour, not a bug: client.go's shouldCopyHeaderOnRedirect carries the
+// comment "Permit sending auth/cookie headers from \"foo.com\" to \"sub.foo.com\"", and the port drops out
+// because it compares url.Hostname(). No Go release will close it. So relying on the strip protects one
+// header name and only against a non-subdomain change -- and the credential here is the pod's projected
+// ServiceAccount token.
+//
+// The one case this refusal breaks is an operator who points the URL at an external ingress hostname that
+// 308s http->https on the same host. Failing loudly there is the right outcome: the fix is to configure
+// the https URL, not to follow the hop.
+func refuseRedirects(_ *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("redirects are not allowed when presenting a credential to %s", "the authn JWT to snowplow")
 }
