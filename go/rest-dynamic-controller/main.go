@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	restResources "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/authn"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/snowplow"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/pluralizer"
@@ -56,6 +58,23 @@ func main() {
 	prettyJSONDebug := flag.Bool("pretty-json-debug",
 		env.Bool("REST_CONTROLLER_PRETTY_JSON_DEBUG", false),
 		"globally enable pretty-print JSON formatting in HTTP debug output (response bodies)")
+	// #379: the operator half of the endpoint host policy. BOTH DEFAULT TO THE NO-OP: an empty allowlist
+	// means "no override permitted; use the hosts the OAS document itself names", which is where requests
+	// already go -- so an existing install needs no change and is still fixed. Requiring a value would
+	// turn every single-host provider into a config error on upgrade for a capability it does not use.
+	endpointAllowlist := flag.String("endpoint-allowlist",
+		env.String("REST_CONTROLLER_ENDPOINT_ALLOWLIST", ""),
+		"Comma-separated hosts a CREDENTIALED request may reach, in addition to the hosts the OAS document "+
+			"names. Entries are host[:port], optionally prefixed http:// (no prefix means https only), and "+
+			"may use a single leading *. wildcard. Empty (the default) permits only the document's hosts. "+
+			"A comma is safe as the separator because a host[:port] never contains one.")
+	// Separate from the allowlist rather than a `*` entry, so "permit anything" shows up in a values diff
+	// instead of hiding as punctuation in a list. The unconditional refusals -- loopback, link-local,
+	// multicast, unspecified -- still apply.
+	allowAnyHost := flag.Bool("allow-any-host",
+		env.Bool("REST_CONTROLLER_ALLOW_ANY_HOST", false),
+		"Disable endpoint-allowlist matching entirely. The unconditional refusals (loopback, link-local, "+
+			"multicast, unspecified) still apply.")
 	snowplowURL := flag.String("snowplow-url",
 		env.String("URL_SNOWPLOW", ""),
 		"snowplow base URL for resolving observeApiRef RESTActions; empty disables observeApiRef resolution")
@@ -293,7 +312,19 @@ func main() {
 	}
 	apiRecorder := event.NewAPIRecorder(rec)
 
-	handler = restResources.NewHandler(cfg, log, swg, *pluralizer, *prettyJSONDebug)
+	hostPolicyCfg := hostpolicy.Config{
+		Allowlist:    splitAllowlist(*endpointAllowlist),
+		AllowAnyHost: *allowAnyHost,
+	}
+	if *allowAnyHost {
+		// Loud, once, at startup. An operator who sets this has disabled host matching for every
+		// credentialed request, and the only place that is visible otherwise is a values diff nobody
+		// re-reads.
+		log.Info("endpoint host matching is DISABLED (-allow-any-host): a credentialed request may be " +
+			"sent to any host except loopback, link-local, multicast and unspecified")
+	}
+
+	handler = restResources.NewHandler(cfg, log, swg, *pluralizer, *prettyJSONDebug, hostPolicyCfg)
 	if handler == nil {
 		log.Error(fmt.Errorf("handler is nil"), "Creating handler for controller.")
 		os.Exit(1)
@@ -394,4 +425,23 @@ func main() {
 		log.Error(err, "Running controller.")
 		os.Exit(1)
 	}
+}
+
+// splitAllowlist turns the comma-separated flag into entries, dropping empties and trimming space.
+//
+// A comma is a safe separator here and that is a property of the values rather than a convention: an
+// allowlist entry is host[:port] with an optional scheme prefix and an optional leading "*." label, and
+// none of those can contain a comma. So there is no value a user could legitimately write that this
+// splitting would corrupt -- which is the question to ask of any delimiter.
+//
+// An empty or whitespace-only flag yields nil rather than []string{""}, because a single empty entry
+// would be rejected by hostpolicy.Parse and turn the DEFAULT configuration into a startup failure.
+func splitAllowlist(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

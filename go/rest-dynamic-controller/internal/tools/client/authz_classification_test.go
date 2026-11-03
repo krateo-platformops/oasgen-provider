@@ -205,6 +205,7 @@ func TestStatusErrorCarriesResponseHeaders(t *testing.T) {
 
 	client := createTestClient(t)
 	client.Server = srv.URL
+	allowServer(t, client)
 
 	_, err := client.Call(context.Background(), srv.Client(), "/api/test",
 		&RequestConfiguration{Method: "GET"})

@@ -108,6 +108,7 @@ func TestARequestWithAnUnresolvedPlaceholderIsRefused(t *testing.T) {
 
 	client := createTestClient(t)
 	client.Server = srv.URL
+	allowServer(t, client)
 
 	_, err := client.Call(context.Background(), srv.Client(), "/api/test/{id}",
 		&RequestConfiguration{Method: "GET", Parameters: map[string]string{}})
@@ -137,6 +138,7 @@ func TestARequestWithAResolvedPlaceholderIsSent(t *testing.T) {
 
 	client := createTestClient(t)
 	client.Server = srv.URL
+	allowServer(t, client)
 
 	_, err := client.Call(context.Background(), srv.Client(), "/api/test/{id}",
 		&RequestConfiguration{Method: "GET", Parameters: map[string]string{"id": "real-id-42"}})

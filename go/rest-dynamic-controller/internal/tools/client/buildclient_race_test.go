@@ -4,6 +4,7 @@ package restclient
 
 import (
 	"context"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -57,7 +58,7 @@ func TestBuildClientIsConcurrencySafe(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				if _, berr := BuildClient(context.Background(), kube, srv.URL+"/oas.yaml"); berr != nil {
+				if _, berr := BuildClient(context.Background(), kube, srv.URL+"/oas.yaml", hostpolicy.Config{}); berr != nil {
 					errs <- berr
 				}
 			}
@@ -109,7 +110,7 @@ func TestBuildClientCleansUpItsOwnDirectory(t *testing.T) {
 	start := countOurs(before)
 
 	for i := 0; i < 5; i++ {
-		_, _ = BuildClient(context.Background(), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), srv.URL+"/oas.yaml")
+		_, _ = BuildClient(context.Background(), dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), srv.URL+"/oas.yaml", hostpolicy.Config{})
 	}
 
 	after, _ := os.ReadDir(os.TempDir())

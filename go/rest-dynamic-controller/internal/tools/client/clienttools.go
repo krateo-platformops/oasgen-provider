@@ -17,6 +17,7 @@ import (
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/comparison"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	fgetter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/filegetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
 	"github.com/pb33f/libopenapi"
 	"github.com/pb33f/libopenapi/datamodel/high/base"
 	v3 "github.com/pb33f/libopenapi/datamodel/high/v3"
@@ -121,6 +122,10 @@ type UnstructuredClient struct {
 	Debug      bool
 	PrettyJSON bool
 	SetAuth    func(req *http.Request)
+	// HostPolicy decides whether a CREDENTIALED request may reach its destination (#379). Never nil
+	// after BuildClient, and a nil one REFUSES rather than permits -- an unguarded credentialed request
+	// succeeds, so failing open would be invisible.
+	HostPolicy *hostpolicy.Policy
 	//Validator             Validator 				    // Validator for request validation. TODO: to be re-enabled when libopenapi-validator is stable
 }
 
@@ -596,7 +601,17 @@ func (u *UnstructuredClient) RequestedParams(httpMethod string, path string) (pa
 }
 
 // BuildClient is a function that builds partial client from a swagger file.
-func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath string) (*UnstructuredClient, error) {
+//
+// policyCfg is REQUIRED rather than optional, and that is the point: a missing host policy has to be a
+// compile error, not an unguarded request. There is one production caller, so there is nothing a variadic
+// or an options struct would economise -- and either would make the parameter forgettable again, which is
+// precisely the failure mode (#379).
+//
+// It takes the OPERATOR half and collects the DOCUMENT half here, because this is the function that parses
+// the document. A caller handed a ready-made *Policy could build one without the document's hosts and
+// every request would then be refused; this way the only code that could omit them is the code that reads
+// them.
+func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath string, policyCfg hostpolicy.Config) (*UnstructuredClient, error) {
 	// A PRIVATE directory per call. This used to be the fixed, shared path
 	// "/tmp/rest-dynamic-controller", created here and removed by `defer os.RemoveAll(basePath)` -- which
 	// deletes the WHOLE directory, including files other in-flight calls are still using.
@@ -664,19 +679,69 @@ func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath 
 	//	return nil, fmt.Errorf("failed to create validator: %w", err)
 	//}
 
+	// EVERY host the document can dial, not just servers[0]. Call and CallForPagination both honour a
+	// per-operation `servers[0]` override (the `op.Servers[0]` reads in Call and CallForPagination), so collecting only the base URL
+	// would turn this guard from a no-op into an outage for any document that uses one.
+	//
+	// Index 0 only, on both, because that is all the code ever dials -- admitting the rest would widen
+	// the permitted set for nothing.
+	policy, perr := hostpolicy.Parse(policyCfg.Allowlist, DocumentHosts(doc), policyCfg.AllowAnyHost)
+	if perr != nil {
+		// A malformed allowlist entry is an operator mistake and must stop startup rather than degrade
+		// into "permit nothing" or "permit everything" -- both of which surface later, in opposite and
+		// equally confusing ways.
+		return nil, fmt.Errorf("building the endpoint host policy: %w", perr)
+	}
+
 	return &UnstructuredClient{
 		Server: doc.Model.Servers[0].URL,
 		//Doc:       d,
-		DocScheme: doc,
+		DocScheme:  doc,
+		HostPolicy: policy,
 		//Validator: validator,
 	}, nil
+}
+
+// DocumentHosts returns every host the document can dial: its base servers[0] plus each operation's
+// servers[0] override.
+//
+// EXPORTED AND EXTRACTED so BuildClient and the test helpers cannot disagree about it. They did: a test
+// helper that permitted only the client's `Server` field failed a case exercising a per-operation
+// override, because production collects both and the helper collected one. A duplicated rule drifts, and
+// the direction it drifted in -- tests stricter than production -- is the lucky one; the other direction
+// is a test suite that passes while production refuses every request.
+//
+// Index 0 only, on both, because that is all Call and CallForPagination ever dial
+// (the `op.Servers[0]` reads in Call and CallForPagination). Admitting the rest would widen the
+// permitted set for nothing.
+func DocumentHosts(doc *libopenapi.DocumentModel[v3.Document]) []string {
+	if doc == nil || len(doc.Model.Servers) == 0 {
+		return nil
+	}
+	hosts := []string{doc.Model.Servers[0].URL}
+	if doc.Model.Paths == nil {
+		return hosts
+	}
+	for pathItem := doc.Model.Paths.PathItems.First(); pathItem != nil; pathItem = pathItem.Next() {
+		item := pathItem.Value()
+		if item == nil {
+			continue
+		}
+		for op := item.GetOperations().First(); op != nil; op = op.Next() {
+			if o := op.Value(); o != nil && len(o.Servers) > 0 && o.Servers[0] != nil {
+				hosts = append(hosts, o.Servers[0].URL)
+			}
+		}
+	}
+	return hosts
 }
 
 // suppliedAfterValidation reports whether a required header or cookie is one the CALLER will supply
 // after this validation runs, and which must therefore not be demanded here.
 //
 // WHY AN EXEMPTION IS NEEDED AT ALL. SetAuth attaches the credential to the *http.Request at
-// restclient.go:313 and :850. ValidateRequest runs at :199 -- 114 lines earlier -- against opts.Headers,
+// restclient.go, inside both Call and CallForPagination. ValidateRequest runs EARLIER in each of those
+// same two functions, well before the credential is attached, against opts.Headers,
 // a map the credential is never written into, because SetAuth operates on the request rather than on the
 // options. So the validator STRUCTURALLY CANNOT SEE the credential: the request is correctly formed and
 // was refused anyway.

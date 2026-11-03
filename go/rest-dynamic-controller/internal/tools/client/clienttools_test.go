@@ -975,6 +975,7 @@ func TestArrayBodyIsSentAsReceived(t *testing.T) {
 
 			client := clientFromSpec(t, patchSpec())
 			client.Server = srv.URL
+			allowServer(t, client)
 
 			_, err := client.Call(context.Background(), srv.Client(), "/things",
 				&RequestConfiguration{Method: http.MethodPatch, Body: tc.body})
@@ -1076,6 +1077,7 @@ func TestFailedCallCarriesTheVendorExplanation(t *testing.T) {
 
 			client := clientFromSpec(t, patchSpec())
 			client.Server = srv.URL
+			allowServer(t, client)
 
 			_, err := client.Call(context.Background(), srv.Client(), "/things",
 				&RequestConfiguration{Method: http.MethodPatch, Body: map[string]any{"a": "b"}})
@@ -1212,6 +1214,7 @@ func TestContentTypeComesFromTheDocument(t *testing.T) {
 
 			client := clientFromSpec(t, patchSpecWithMedia(tc.media))
 			client.Server = srv.URL
+			allowServer(t, client)
 
 			_, err := client.Call(context.Background(), srv.Client(), "/things",
 				&RequestConfiguration{
@@ -1254,6 +1257,7 @@ paths:
 `
 	client := clientFromSpec(t, spec)
 	client.Server = srv.URL
+	allowServer(t, client)
 
 	_, err := client.Call(context.Background(), srv.Client(), "/things",
 		&RequestConfiguration{Method: http.MethodPatch, Body: map[string]any{"a": "b"}})

@@ -79,8 +79,9 @@ func TestFindBy_Pagination_HeaderToken(t *testing.T) {
 	assert.Empty(t, errs)
 
 	client := &UnstructuredClient{
-		Server:    server.URL,
-		DocScheme: v3Doc,
+		Server:     server.URL,
+		HostPolicy: allowedPolicy(t, server.URL),
+		DocScheme:  v3Doc,
 		Resource: &unstructured.Unstructured{
 			Object: map[string]interface{}{
 				"spec": map[string]interface{}{
@@ -199,8 +200,9 @@ func TestFindBy_NoPagination(t *testing.T) {
 	assert.Empty(t, errs)
 
 	client := &UnstructuredClient{
-		Server:    server.URL,
-		DocScheme: v3Doc,
+		Server:     server.URL,
+		HostPolicy: allowedPolicy(t, server.URL),
+		DocScheme:  v3Doc,
 		Resource: &unstructured.Unstructured{
 			Object: map[string]interface{}{
 				"spec": map[string]interface{}{
@@ -254,8 +256,9 @@ func TestFindBy_Pagination_NeverTerminating(t *testing.T) {
 	assert.Empty(t, errs)
 
 	client := &UnstructuredClient{
-		Server:    server.URL,
-		DocScheme: v3Doc,
+		Server:     server.URL,
+		HostPolicy: allowedPolicy(t, server.URL),
+		DocScheme:  v3Doc,
 		Resource: &unstructured.Unstructured{
 			Object: map[string]interface{}{
 				"spec": map[string]interface{}{"name": "never-present"},

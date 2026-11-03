@@ -298,14 +298,6 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 		req.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
 
-	if u.Debug {
-		cli.Transport = &debuggingRoundTripper{
-			Transport:    cli.Transport,
-			Out:          os.Stdout,
-			PrettyJSON:   u.PrettyJSON,
-			RedactValues: opts.SensitiveValues,
-		}
-	}
 	// Wrap the (possibly debug) transport with otelhttp so outbound calls to the
 	// managed external API are trace-instrumented. No-op when tracing is disabled.
 	cli.Transport = instrumentTransport(cli.Transport)
@@ -330,7 +322,7 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 	//}
 
 	start := time.Now()
-	resp, err := cli.Do(req)
+	resp, err := u.do(cli, req, opts.SensitiveValues)
 	if err != nil {
 		recordOutboundCall(ctx, httpMethod, path, 0, start)
 		return Response{}, fmt.Errorf("making request: %w", err)
@@ -449,16 +441,6 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 	}
 
 	// Set up debug transport once, before pagination starts
-	if u.Debug {
-		if _, ok := cli.Transport.(*debuggingRoundTripper); !ok {
-			cli.Transport = &debuggingRoundTripper{
-				Transport:    cli.Transport,
-				Out:          os.Stdout,
-				PrettyJSON:   u.PrettyJSON,
-				RedactValues: opts.SensitiveValues,
-			}
-		}
-	}
 
 	// Create the paginator based on the configuration (e.g., continuation token).
 	paginator, err := pagination.NewPaginator(findByAction.Pagination)
@@ -857,7 +839,7 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 	}
 
 	start := time.Now()
-	resp, err := cli.Do(req)
+	resp, err := u.do(cli, req, opts.SensitiveValues)
 	if err != nil {
 		recordOutboundCall(ctx, httpMethod, path, 0, start)
 		return Response{}, nil, fmt.Errorf("making request: %w", err)
@@ -1239,6 +1221,71 @@ func (d *debuggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 // redact replaces every occurrence of each non-empty value in values with a fixed-width placeholder, so a
 // redacted dump never leaks the original length. Used to keep secretRef-resolved values out of
 // verbose/debug request dumps even though they are legitimately sent to the external API.
+// do sends a request under the host policy, and is the ONLY place either twin reaches the network.
+//
+// WHY HERE AND NOT AT THE BUILDER. The obvious place looks like APICallBuilder, which every verb goes
+// through -- except that four sites call cli.Call DIRECTLY, bypassing it entirely
+// (async_handler.go:74, async_requeue.go:157, dispatch.go:200, lookup_runner.go:176). A guard at the
+// builder protects the paths that use the builder, which is a different set from "all paths", and
+// nothing tells you when the two diverge. Enforcing at Do makes the set of guarded paths identical to
+// the set of paths that send a request, by construction.
+//
+// WHY NOT AT THE 14 CLIENT CONSTRUCTION SITES. Fourteen edits, and site fifteen would be silently
+// unguarded -- an unguarded credentialed request SUCCEEDS, so nothing would surface it. Also unnecessary:
+// SetAuth fires inside these same two functions, Call and CallForPagination, so credential attachment and
+// enforcement are already the same two lines apart and cannot drift.
+//
+// TWO CHECKS, NOT ONE. PermitsURL answers about the host the caller intends; the dialer answers about the
+// address actually connected, after resolution, which is the only one a rebinding attempt cannot move. The
+// first gives a clear error naming the host; the second is the guarantee.
+//
+// The caller's *http.Client is COPIED rather than mutated: callers construct their own and would not
+// expect this to reach into it. Its Timeout is preserved; its Transport and CheckRedirect are replaced,
+// because a caller-supplied Transport would bypass the dialer and is never set at any of the 14 sites.
+func (u *UnstructuredClient) do(cli *http.Client, req *http.Request, sensitive []string) (*http.Response, error) {
+	if err := u.HostPolicy.PermitsURL(req.URL); err != nil {
+		return nil, err
+	}
+	timeout := 30 * time.Second
+	if cli != nil && cli.Timeout > 0 {
+		timeout = cli.Timeout
+	}
+
+	// THE WHOLE TRANSPORT STACK IS COMPOSED HERE, and it has to be, because the alternative was a hole.
+	//
+	// The debug round-tripper used to wrap the CALLER's transport in Call and FindBy and assign it back
+	// onto the caller's client. That made cli.Transport non-nil, so the request went out on it instead of
+	// on the policy's -- and enabling krateo.io/connector-verbose silently bypassed the resolved-address
+	// and per-hop redirect checks. In the one configuration an operator turns on when something is
+	// already wrong. Both wrapping sites are gone and the layering lives here instead.
+	//
+	// Base: the policy's guarded transport. A caller-supplied one replaces it ONLY because that means a
+	// test mock, which never dials -- guarding a request that never leaves the process is pointless, while
+	// replacing the mock would break a legitimate technique. The URL check above runs either way, and a
+	// test asserts no production site supplies one.
+	base := u.HostPolicy.Transport()
+	if cli != nil && cli.Transport != nil {
+		base = cli.Transport
+	}
+	if u.Debug {
+		// Wrapping the base, so the dialer stays underneath whatever is printing.
+		base = &debuggingRoundTripper{
+			Transport:    base,
+			Out:          os.Stdout,
+			PrettyJSON:   u.PrettyJSON,
+			RedactValues: sensitive,
+		}
+	}
+
+	// The caller's client is COPIED, never mutated: callers construct their own at all 14 sites and would
+	// not expect this to reach into one. Only the Timeout is taken from it.
+	return (&http.Client{
+		Timeout:       timeout,
+		Transport:     base,
+		CheckRedirect: u.HostPolicy.CheckRedirect,
+	}).Do(req)
+}
+
 // credentialHeaders are redacted from a verbose dump BY NAME, whatever their value.
 //
 // Value-based redaction can only hide values it was told about, and RedactValues is populated solely
