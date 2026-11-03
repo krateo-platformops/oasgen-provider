@@ -265,12 +265,14 @@ func (u *UnstructuredClient) ValidateRequest(httpMethod string, path string, par
 				}
 			}
 			if param.In == "header" {
-				if _, ok := headers[param.Name]; !ok && !isAuthorizationHeader(param.Name) {
+				if _, ok := headers[param.Name]; !ok && !suppliedAfterValidation(param.Name) {
 					return fmt.Errorf("missing header: %s", param.Name)
 				}
 			}
 			if param.In == "cookie" {
-				if _, ok := cookies[param.Name]; !ok {
+				// A credential can be declared `in: cookie`, and this branch had NO exemption at all,
+				// so such a document was refused with no escape whatsoever (#391).
+				if _, ok := cookies[param.Name]; !ok && !suppliedAfterValidation(param.Name) {
 					return fmt.Errorf("missing cookie: %s", param.Name)
 				}
 			}
@@ -668,6 +670,35 @@ func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath 
 		DocScheme: doc,
 		//Validator: validator,
 	}, nil
+}
+
+// suppliedAfterValidation reports whether a required header or cookie is one the CALLER will supply
+// after this validation runs, and which must therefore not be demanded here.
+//
+// WHY AN EXEMPTION IS NEEDED AT ALL. SetAuth attaches the credential to the *http.Request at
+// restclient.go:313 and :850. ValidateRequest runs at :199 -- 114 lines earlier -- against opts.Headers,
+// a map the credential is never written into, because SetAuth operates on the request rather than on the
+// options. So the validator STRUCTURALLY CANNOT SEE the credential: the request is correctly formed and
+// was refused anyway.
+//
+// WHY THE OLD ONE WAS TOO NARROW. It was `isAuthorizationHeader` alone, a substring test for
+// "authorization". But an OAS `apiKey` security scheme names its own header, and nothing makes that name
+// contain "authorization" -- getter.go says so directly: "An OAS `apiKey` scheme sends the credential
+// VERBATIM in a header the document names." This repo enumerates nine such names in credentialHeaders,
+// and the exemption covered ONE of them. A provider on X-Auth-Token, X-Api-Key or PRIVATE-TOKEN whose
+// document ALSO declares that header as a required parameter had every request refused with
+// "missing header: <name>" before the credential was ever attached. The carve-out was one name wide while
+// its own reasoning covered nine (#391).
+//
+// THE UNION, NOT A REPLACEMENT. isAuthorizationHeader is a SUBSTRING test and IsCredentialHeader is an
+// exact match over nine names, so swapping one for the other would NARROW coverage: a name like
+// `X-Custom-Authorization` is exempt today and is not in credentialHeaders. Both are kept, so the change
+// can only widen.
+//
+// Reading the same credentialHeaders list that drives log redaction and the #305 spec-population refusal
+// means the three places that need to know which headers carry a credential cannot drift apart.
+func suppliedAfterValidation(name string) bool {
+	return isAuthorizationHeader(name) || IsCredentialHeader(name)
 }
 
 // isAuthorizationHeader checks if the given header is an authorization header or contains "authorization" (case-insensitive).
