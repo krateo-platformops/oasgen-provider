@@ -112,9 +112,22 @@ discarded path and is never seen — and `HTTPS://Example.COM` is rejected as an
 because the prefix test is byte-exact lowercase while the host is lowercased later. So within one
 entry the case is handled for the host and not for the scheme. Neither widens anything: each yields
 a permitted set narrower than written, or no policy at all, and both fail loudly. `*.example.com/*`
-is unaffected — the leading `*.` is consumed before truncation. Both were found by writing the
-package's behaviour out as a conformance list for a peer, which is also why they were not found
-earlier: nothing in the test suite exercises an entry whose written form and parsed form differ.
+is unaffected — the leading `*.` is consumed before truncation.
+
+**And one narrowing that is NOT loud, which is #403 and is the counter-example to the sentence
+above.** An unparseable server URL from the *document* — as opposed to the operator's allowlist — is
+skipped with no log, no error and no condition, and the comment beside the skip says *"Not fatal,
+and not silent."* The first clause is true and deliberate: one malformed `servers:` entry must not
+make a whole kind unreconcilable. The second is false, and I wrote it. When the dropped URL is the
+one the controller actually dials, every request to it is refused with a message naming the host and
+listing the permitted set — which reads as a policy misconfiguration rather than as an unreadable
+document. It is the only silent narrowing in the package, and it is the same shape as #394's
+retracted claim: a true clause carrying a false one, where the false clause is what stops the next
+reader looking for a signal that does not exist.
+
+Both #402 forms were found by writing the package's behaviour out as a conformance list for a peer,
+which is also why they were not found earlier: nothing in the test suite exercises an entry whose
+written form and parsed form differ.
 
 **`allowAnyHost` turns off the redirect check too, which its name does not say.** With the permitted
 set widened to everything, a credential will follow a redirect anywhere — the per-hop check still
