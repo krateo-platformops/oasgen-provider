@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-11-03T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,124 @@ timestamp: 2026-11-03T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-04 — 0.51.0
+
+Follow-ups to 0.50.0's host validation, plus two generation fixes. 0.50.0 stopped a credentialed
+request from reaching a host the OpenAPI document never named; this release closes the channel it
+left open — an HTTP **redirect**, which moves a request to another host after the policy has already
+approved the first one — and makes two silent host-policy decisions audible. On the generator side,
+a guard that was written but never consulted is now wired, and a parameter the generated spec omits
+is reported rather than vanishing.
+
+**Nothing in this release requires an upgrade step.** It is a drop-in over 0.50.0.
+
+**What this release does NOT contain**, stated because the next one carries a prerequisite: the
+provider-runtime v1.8.x adoption, and with it the change to what `Ready` means on a RestDefinition
+during a CRD regeneration. That is 0.52.0, and it will require core-provider 2.13.56 to be live on a
+cluster before a 0.52.x build is pinned there. 0.51.0 has no such ordering.
+
+### A redirect could carry the credential to another host
+
+The host policy validates the host of the request it is given. It cannot validate the host of a
+request it never sees, and a `302` produces exactly that: Go's `http.Client` follows redirects by
+default, so a server that is permitted could hand the client a `Location` pointing somewhere that is
+not, and the credential would travel there with it.
+
+**Go's own rule is narrower than "same host", not wider, which is why this needed fixing rather than
+documenting.** `net/http`'s `shouldCopyHeaderOnRedirect` strips `Authorization` on a cross-host hop
+— but it deliberately **permits a hop to a subdomain** of the origin (its comment: *"Permit sending
+auth/cookie headers from foo.com to sub.foo.com"*) and it **ignores the port**, comparing
+`url.Hostname()`. So `api.example.com` → `evil.api.example.com` keeps the header, and so does a hop
+to a different port on the same name. Relying on the standard library here means relying on a rule
+that was written for cookies.
+
+Both clients that present a credential now refuse redirects outright, and refuse them in **two**
+places each: in the constructor, and again in `WithHTTPClient`, because a caller supplying its own
+client would otherwise silently opt out of the refusal.
+
+- `internal/tools/authn/authn.go` — this one matters most. It presents the controller's own
+  **projected, audience-bound ServiceAccount token** to authn's `/serviceaccount/login` endpoint. A
+  redirect here does not leak a tenant's vendor credential; it leaks the controller's own cluster
+  identity.
+- `internal/tools/snowplow/snowplow.go` — carries the authn-issued JWT.
+
+**Exercised in a cluster, not only in tests.** Two servers, A permitted and B not: eight POSTs to A
+were served `302` pointing at B, and **zero** subject requests reached B. The same arm on 0.49.0
+delivered the credential to B. B sat on an RFC1918 ClusterIP — a class the host policy deliberately
+leaves reachable — so the refusal is attributable to the redirect guard rather than to B being
+unreachable, which is the control that makes the result mean anything.
+
+### A document server URL the policy discarded is now reported
+
+`hostpolicy.Parse` derives the permitted set from the OpenAPI document's own `servers`. A URL it
+could not use was dropped silently, so an operator whose document declared a server in a shape the
+parser rejected got a smaller permitted set than their document described, with nothing said. The
+first symptom was a request refused for a host the document plainly names.
+
+`Parse` now returns `[]Discarded` alongside the policy — each with the URL and the reason — and
+`BuildClient` logs them. The signature change is deliberate: a dropped input that the caller cannot
+enumerate is a dropped input nobody will ever notice.
+
+### An operator allowlist entry carrying a path is now refused
+
+`endpointAllowlist` matches **hosts**. An entry like `api.example.com/v1` was accepted and then
+truncated to its host, so it matched `api.example.com` entirely — including every path under it. An
+operator writing the path believed they had narrowed the allowlist; they had written an entry that
+was broader than it looked, and the config read as if the narrowing were in force.
+
+Such an entry is now **refused**, with a message that names both replacements rather than leaving
+the author to guess:
+
+> a path plays no part in matching a host, so "/v1" is ignored: write "api.example.com" for
+> that host alone, or "*.api.example.com" for its subdomains
+
+A document-derived entry still truncates, because a document's `servers` legitimately carry paths
+and refusing those would reject valid documents. The distinction is the origin of the entry, not its
+shape — an operator writing a path has made a mistake, a document carrying one has not.
+
+Entry parsing also now lowercases the **whole** entry in one place at the top of the function,
+rather than per-component further down. Hostnames are case-insensitive; the previous arrangement
+left a component that was compared case-sensitively.
+
+### excludedSpecFields can no longer remove a required parameter
+
+`removeExcludedSpecFields` had a `requiredParameters` guard available and never consulted it. So
+excluding a **required** parameter succeeded: the field left the generated spec, the parameter
+stayed required by the vendor, and every request built from such a CR was missing a value the API
+demands. The failure arrived from the vendor as a 400, far from the stanza that caused it.
+
+The guard is wired. An exclusion naming a required parameter is refused at generation time, which is
+where the author can still act on it. Checked on top-level names only, which is the scope
+`excludedSpecFields` itself has.
+
+### A parameter the generated spec omits is now reported — and the first attempt was wrong
+
+A request-direction `fieldMapping` supplies a parameter's value, so the generator omits that
+parameter from the spec: correct, because the author is not asked for a field the controller never
+reads from them. But it happened **silently**, and the generated spec sets neither
+`additionalProperties: false` nor `x-kubernetes-preserve-unknown-fields` — so an existing CR that
+set the field had the value **pruned by the API server** rather than rejected. `kubectl apply`
+succeeded, `get -o yaml` stopped showing it, and nothing said why. Meanwhile an `excludedSpecFields`
+entry that matched nothing *did* warn. A stanza doing no work was loud while a property leaving the
+schema was quiet; the asymmetry was backwards.
+
+The generator now reports the removal, naming the property, the verb whose mapping removed it, and
+the CR path the value comes from — because a message saying a field was removed, but not by what,
+sends the author to read every verb's `fieldMapping`.
+
+**The first version of this warning had a false positive, and it is worth recording what it was.** A
+name can be both a path parameter *and* a create-body property. Suppressing the parameter does not
+remove the body's property, so the field stays in the spec — often in `required`. A consumer
+measured exactly that and the warning told them to remove a field their CR could not be admitted
+without. The warning now asserts the **outcome** (is the property actually gone) rather than the
+**mechanism** (does a mapping supply the parameter), and stays silent when the author declared the
+field in `excludedSpecFields` — which is their own acknowledgement that the field is not theirs to
+set, and which, because `ExcludedSpecFields` is strictly immutable, they could not withdraw in
+response to the warning anyway.
+
+Measured across one consumer's 32 assets: **48 warnings down to 29, with the error set identical** —
+so the reduction is false positives leaving, not real findings being swallowed.
 
 ## 2026-11-03 — 0.50.0
 
