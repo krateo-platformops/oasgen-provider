@@ -102,6 +102,22 @@ type entry struct {
 // Split this way deliberately. If BuildClient took a ready-made *Policy, a caller could build one without
 // the document's hosts and every request would be refused; taking the Config instead means NO CALLER CAN
 // FORGET the document hosts, because the only code that could omit them is the code that reads them.
+//
+// THE SCOPE OF THAT GUARANTEE, because #374 narrowed it and the sentence above still reads as covering
+// everything. What the type enforces is that the document hosts are COLLECTED -- it cannot be forgotten,
+// because the signature makes the unsafe call impossible to write. What it does NOT enforce is that the
+// hosts collected are the RIGHT ones.
+//
+// spec.serverURL replaces the document's servers[0], and the replacement has to happen BEFORE
+// DocumentHosts(doc) reads the model. One step later -- say at the point the Server field is assigned --
+// and the policy still permits the vendor's PUBLIC host while Server correctly names the private one:
+// right field, wrong policy, and a self-hosted install that reaches the public service with the
+// credential meant for the appliance. Nothing in this type can see that ordering.
+//
+// So the ordering is a separate property with a separate guard: it is pinned by
+// TestTheOverrideReachesThePolicyAndNotOnlyTheServerField in the client package, which asserts the public
+// host is REFUSED rather than merely that Server changed. If that test goes, this comment is claiming a
+// safety property nothing checks.
 type Config struct {
 	// Allowlist holds operator-controlled entries. EMPTY IS THE NORMAL CASE and means "no override
 	// permitted; use the document's hosts" -- a no-op for every existing install.

@@ -488,6 +488,14 @@ type Info struct {
 	// URL of the OAS 3.0 JSON file that is being requested.
 	URL string `json:"url"`
 
+	// ServerURL, when set, is spec.serverURL: the base URL that REPLACES the document's servers[0] for
+	// every request this resource makes (#374). Empty means the document's own servers[0] stands.
+	//
+	// It travels on Info rather than being read where the client is built because the RestDefinition is
+	// listed live on every Get here, before the client is constructed -- which is also why a value edit
+	// takes effect on the next reconcile with no restart.
+	ServerURL string `json:"serverURL,omitempty"`
+
 	// The resource to manage
 	Resource Resource `json:"resources,omitempty"`
 
@@ -606,6 +614,17 @@ func (g *dynamicGetter) Get(un *unstructured.Unstructured) (*Info, error) {
 			return nil, err
 		}
 
+		// spec.serverURL is OPTIONAL, so an absent field is not an error -- but a field that is PRESENT
+		// and not a string is, and the two must not collapse into each other. Treating a malformed value
+		// as absent would send every request to the vendor's public endpoint while the RestDefinition
+		// visibly names a private one, which is the exact failure spec.serverURL exists to prevent and
+		// the hardest kind to notice: the CR says one thing and the traffic does another.
+		serverURL, _, err := unstructured.NestedString(item.Object, "spec", "serverURL")
+		if err != nil {
+			return nil, fmt.Errorf("reading spec.serverURL in definition for '%v' in namespace %s: %w",
+				gvr, un.GetNamespace(), err)
+		}
+
 		if group == gvr.Group {
 			// Convert the map to JSON
 			jsonData, err := json.Marshal(res)
@@ -620,8 +639,9 @@ func (g *dynamicGetter) Get(un *unstructured.Unstructured) (*Info, error) {
 			}
 
 			info := &Info{
-				URL:      oasPath,
-				Resource: resource,
+				URL:       oasPath,
+				ServerURL: serverURL,
+				Resource:  resource,
 			}
 
 			//log.Printf("Found definition for '%v' in namespace: %s", gvr, un.GetNamespace())

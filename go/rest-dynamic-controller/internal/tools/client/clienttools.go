@@ -616,7 +616,7 @@ func (u *UnstructuredClient) RequestedParams(httpMethod string, path string) (pa
 // the document. A caller handed a ready-made *Policy could build one without the document's hosts and
 // every request would then be refused; this way the only code that could omit them is the code that reads
 // them.
-func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath string, policyCfg hostpolicy.Config) (*UnstructuredClient, error) {
+func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath, serverURL string, policyCfg hostpolicy.Config) (*UnstructuredClient, error) {
 	// A PRIVATE directory per call. This used to be the fixed, shared path
 	// "/tmp/rest-dynamic-controller", created here and removed by `defer os.RemoveAll(basePath)` -- which
 	// deletes the WHOLE directory, including files other in-flight calls are still using.
@@ -678,6 +678,40 @@ func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath 
 		return nil, fmt.Errorf("no servers found in the document")
 	}
 
+	// THE spec.serverURL OVERRIDE (#374). One write, here, before anything has read the servers.
+	//
+	// Mutating the parsed model rather than carrying the override alongside it is the whole design.
+	// Three separate things read doc.Model.Servers: the Server field in the literal returned below,
+	// DocumentHosts (which supplies the host policy's document half), and Call/CallForPagination's
+	// per-operation branch. A value kept beside the model would give each of them a chance to read the
+	// stale one, with no compiler help; after this line there is no original servers[0] left to read by
+	// mistake.
+	//
+	// It is also what makes the security property hold rather than being documented. The policy is built
+	// from DocumentHosts(doc) BELOW, so replacing servers[0] here means the vendor's published host is
+	// not in the permitted set at all -- a self-hosted install pointed at the wrong place fails closed
+	// instead of reaching the public service with the credential meant for the private one. Had the
+	// override been applied further down, at the Server field, the policy would still have admitted
+	// api.github.com and the guard would have been strictly weaker than it looks.
+	if serverURL != "" {
+		if where := firstOperationWithOwnServers(doc); where != "" {
+			// REFUSED rather than guessed, and the refusal is the clearest option rather than the
+			// cautious one. A per-operation servers[0] is a second base URL, so with an override there
+			// are two defensible answers -- replace it wholesale, or replace its host and keep its own
+			// path -- and nothing to choose between them: consumers measured ZERO per-operation
+			// overrides across 59 documents, so either rule would ship unexercised. Picking one
+			// silently means a document that looks like it works sends requests to a host the operator
+			// did not name, which is precisely what spec.serverURL exists to prevent.
+			//
+			// When a real document needs this, the error names the operation and the decision can be
+			// made against a case that exists.
+			return nil, fmt.Errorf("spec.serverURL cannot be applied to %q: the document declares its own "+
+				"`servers` for that operation, so there are two base URLs and no rule for which wins. "+
+				"Remove the per-operation `servers` from the document, or unset spec.serverURL", where)
+		}
+		doc.Model.Servers[0].URL = serverURL
+	}
+
 	// TODO: to be re-enabled when libopenapi-validator is stable
 	//validator, err := NewOpenAPIValidator(d)
 	//if err != nil {
@@ -708,6 +742,35 @@ func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath 
 		HostPolicy: policy,
 		//Validator: validator,
 	}, nil
+}
+
+// firstOperationWithOwnServers returns "METHOD /path" for the first operation declaring its own
+// `servers`, or "" if none does.
+//
+// It walks the same structure as DocumentHosts and is deliberately next to it: DocumentHosts exists
+// because a per-operation server IS dialled, and this exists because that is exactly what a whole-document
+// override cannot reconcile. If one ever learns about a construct the other does not, they are wrong
+// together rather than silently divergent.
+//
+// Returns on the FIRST hit rather than collecting all of them: the caller refuses, so a second example
+// changes nothing, and naming one operation the operator can go and look at beats a list they have to
+// read.
+func firstOperationWithOwnServers(doc *libopenapi.DocumentModel[v3.Document]) string {
+	if doc == nil || doc.Model.Paths == nil {
+		return ""
+	}
+	for pathItem := doc.Model.Paths.PathItems.First(); pathItem != nil; pathItem = pathItem.Next() {
+		item := pathItem.Value()
+		if item == nil {
+			continue
+		}
+		for op := item.GetOperations().First(); op != nil; op = op.Next() {
+			if o := op.Value(); o != nil && len(o.Servers) > 0 && o.Servers[0] != nil {
+				return strings.ToUpper(op.Key()) + " " + pathItem.Key()
+			}
+		}
+	}
+	return ""
 }
 
 // DocumentHosts returns every host the document can dial: its base servers[0] plus each operation's

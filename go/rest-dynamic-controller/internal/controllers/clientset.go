@@ -144,7 +144,7 @@ func (c *clientSet) forDocument(ctx context.Context, path, forWhat string) (rest
 	if cli, ok := c.byPath[path]; ok {
 		return cli, nil
 	}
-	cli, err := restclient.BuildClient(ctx, c.kube, path, c.hostPolicyCfg)
+	cli, err := restclient.BuildClient(ctx, c.kube, path, c.info.ServerURL, c.hostPolicyCfg)
 	if err != nil {
 		return nil, fmt.Errorf("building the client for %s against %q: %w", forWhat, path, err)
 	}
