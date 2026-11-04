@@ -1072,7 +1072,11 @@ func TestFindItemInList(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotItem, gotFound := tt.client.findItemInList(tt.items)
+			gotItem, gotFound, err := tt.client.findItemInList(tt.items)
+			// No case in this table drives a structural comparison failure, so the error must stay nil.
+			// Asserted rather than discarded: a case that started erroring would otherwise read as a
+			// changed match result (#439).
+			require.NoError(t, err)
 			assert.Equal(t, tt.wantFound, gotFound)
 			assert.Equal(t, tt.wantItem, gotItem)
 		})

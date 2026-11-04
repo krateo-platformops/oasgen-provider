@@ -78,14 +78,16 @@ func TestFindByMatchesOnNormalizedShape(t *testing.T) {
 	}
 
 	// Before normalization the CR cannot match anything: spec.head is a string, the item's head is an object.
-	_, found := u.findItemInList(items)
+	_, found, ferr := u.findItemInList(items)
+	require.NoError(t, ferr)
 	require.False(t, found,
 		"precondition: the raw shape cannot match, which is exactly why normalization has to come first")
 
 	normalized, err := normalizeItems(context.Background(), flattenHeadBase(), items)
 	require.NoError(t, err)
 
-	matched, found := u.findItemInList(normalized)
+	matched, found, merr := u.findItemInList(normalized)
+	require.NoError(t, merr)
 	require.True(t, found, "once the item is in the CR's shape the match is possible at all")
 	assert.EqualValues(t, 42, matched["number"], "and it must be the right item, not merely some item")
 }

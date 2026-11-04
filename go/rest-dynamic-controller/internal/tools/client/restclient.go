@@ -497,7 +497,11 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 		}
 
 		// Search for a matching item in the current page's results.
-		if matchedItem, found := u.findItemInList(normalized); found {
+		matchedItem, found, merr := u.findItemInList(normalized)
+		if merr != nil {
+			return Response{}, merr
+		}
+		if found {
 			// Found a match, return it immediately.
 			// We do not continue pagination once a match is found.
 			return Response{
@@ -653,7 +657,11 @@ func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Cli
 	}
 
 	// Delegate the search logic to a dedicated helper function.
-	if matchedItem, found := u.findItemInList(normalized); found {
+	matchedItem, found, merr := u.findItemInList(normalized)
+	if merr != nil {
+		return Response{}, merr
+	}
+	if found {
 		return Response{ResponseBody: matchedItem, Normalized: findByAction != nil, statusCode: response.statusCode}, nil
 	}
 
@@ -1021,9 +1029,30 @@ func valueAtPath(body map[string]interface{}, path string) (interface{}, bool, e
 
 // findItemInList iterates through a slice of items and checks if any of them
 // match the identifiers of the local resource.
-func (u *UnstructuredClient) findItemInList(items []interface{}) (map[string]interface{}, bool) {
+//
+// IT NO LONGER SWALLOWS A COMPARISON ERROR (#439). The previous body was:
+//
+//	isMatch, err := u.isItemMatch(itemMap)
+//	if err != nil {
+//	    // For now, we log the error and continue searching.
+//	    // log.Printf("error matching item: %v", err) // Optional: for debugging
+//	    continue
+//	}
+//
+// The log the comment describes was commented out, so the error reached nothing at all -- not a log, not a
+// condition, not the caller -- and the item silently counted as "not a match". isInResource does return
+// errors, three of them (clienttools.go: a nil Resource, and a failed path lookup in spec or in status),
+// all structural rather than data-dependent.
+//
+// WHY PROPAGATING IS SAFE FOR THE KINDS THAT RELY ON NEVER MATCHING, which is the reason the larger
+// reclassification in #439 was withdrawn: an identifier merely ABSENT from a response item is not an
+// error. It takes the `!found` path and `continue`s, exactly as before. A findby-only kind whose declared
+// identifier is not a field on the listed items still never matches, still reports not-exists, and still
+// gets its create -- because no error is produced on that path. Only a structurally broken lookup changes
+// behaviour, and for that one "nothing matched" was never the truthful answer.
+func (u *UnstructuredClient) findItemInList(items []interface{}) (map[string]interface{}, bool, error) {
 	if len(items) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
 
 	for _, item := range items {
@@ -1036,20 +1065,20 @@ func (u *UnstructuredClient) findItemInList(items []interface{}) (map[string]int
 		// Delegate the matching logic for a single item to a dedicated helper.
 		isMatch, err := u.isItemMatch(itemMap)
 		if err != nil {
-			// If an error occurs during comparison, we cannot consider it a match.
-			// For now, we log the error and continue searching.
-			// log.Printf("error matching item: %v", err) // Optional: for debugging
-			continue
+			// Propagated, not discarded. A comparison that failed structurally did not establish that
+			// this item is a different resource, and "nothing matched" is the one answer a caller may act
+			// on by CREATING (#371).
+			return nil, false, fmt.Errorf("matching a list item against the resource's identifiers: %w", err)
 		}
 
 		// If a match is found, return the item immediately.
 		if isMatch {
-			return itemMap, true
+			return itemMap, true, nil
 		}
 	}
 
 	// Return false if no match was found in the entire list.
-	return nil, false
+	return nil, false, nil
 }
 
 // isItemMatch checks if a single item (from an API response) matches the local resource
