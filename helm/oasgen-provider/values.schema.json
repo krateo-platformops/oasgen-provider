@@ -481,7 +481,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Hosts a credentialed request may reach, beyond those the OAS document names. Empty (the default) permits only the document's hosts. Entries are host[:port], optionally http:// prefixed, with an optional single leading *. wildcard."
+          "description": "Hosts a credentialed request may reach, beyond those the OAS document names. Empty (the default) permits only the document's hosts. Entries are host[:port], optionally http:// prefixed, with an optional single leading *. wildcard. A path is refused at startup: write the host alone, not a document's full servers[0] URL."
         },
         "allowAnyHost": {
           "type": "boolean",
