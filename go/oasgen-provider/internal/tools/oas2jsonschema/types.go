@@ -89,9 +89,13 @@ type Verb struct {
 	// is also the only verb rest-dynamic-controller copies it from.
 	IdentifiersMatchPolicy string
 	// FieldMapping carries the unified request/response field mappings declared for this verb.
+	//
 	// The generation layer consumes the response-direction entries (InResponse set) to resolve the type
-	// of relocated status fields against the response schema; request-direction entries are carried for
-	// completeness but are not used during generation.
+	// of relocated status fields against the response schema. It ALSO consumes the request-direction
+	// entries: mappingSuppliedParams reads InPath and InQuery to omit a parameter the mapping supplies,
+	// so the author is not asked for a field the controller never reads from them (#325, #409, #419).
+	// This comment previously said request-direction entries were "carried for completeness but are not
+	// used during generation", which stopped being true when that suppression landed.
 	FieldMapping []FieldMappingEntry
 	// Correlation is set only on a dispatch verb, and is what makes one observable (#199). Generation
 	// needs it for two things a dispatch resource has no other source for: the STATUS base schema, which

@@ -834,6 +834,21 @@ func (g *OASSchemaGenerator) removeFieldAtPathRec(ctx context.Context, schema *S
 // milder case: the value IS author-supplied, just at another path, and the flat duplicate is redundant
 // rather than unsatisfiable. Both are suppressed; only one was fatal.
 //
+// EXCEPT when "another path" is the SAME path. `inCustomResource: spec.node_id` for path parameter
+// {node_id} names the very property suppressing the parameter would delete, so the rule removes its own
+// source and the kind cannot execute that verb at all: the mapping then reads a property that is not in
+// the CRD, finds nothing, and skips silently, leaving the literal {node_id} to be refused downstream with
+// "unresolved path parameter(s)". Measured on a consumer's NodeProvision and NodePower (#419).
+//
+// So a self-referential source is NOT suppressed. That is narrower than it looks and deliberately so:
+// `spec.keypair.name` for {name} is still suppressed, because the author does supply a different property.
+// Only the exact top-level `spec.<parameter name>` is exempt.
+//
+// Narrowing here rather than adding a containment check elsewhere is the point. A check written over ALL
+// mappings would also reach a dependentLookup's `parameters`, where reading `spec.owner` for {owner} is
+// the designed behaviour -- a consumer has exactly that, with `owner` and `repo` required, working today.
+// Broadening the matching would delete those and reproduce this bug in a kind that is currently correct.
+//
 // InPath and InQuery are the request-direction destinations that address a parameter. InBody is #246's
 // territory and is left to dropResolverSuppliedRequired, which runs before this and prunes the request
 // body's own `required` -- the two must not overlap, because that function's doc comment is explicit that
@@ -852,12 +867,12 @@ func mappingSuppliedParams(verbs []Verb) map[string]mappingSource {
 			// FIRST declaration wins the attribution, matching uniqueParams' own first-seen rule, so the
 			// warning names a stable verb across renders rather than whichever one verbsDescription
 			// happens to list last.
-			if m.InPath != "" {
+			if m.InPath != "" && !selfReferentialSpecSource(m.InCustomResource, m.InPath) {
 				if _, seen := supplied[m.InPath]; !seen {
 					supplied[m.InPath] = mappingSource{action: verb.Action, in: "path", from: m.InCustomResource}
 				}
 			}
-			if m.InQuery != "" {
+			if m.InQuery != "" && !selfReferentialSpecSource(m.InCustomResource, m.InQuery) {
 				if _, seen := supplied[m.InQuery]; !seen {
 					supplied[m.InQuery] = mappingSource{action: verb.Action, in: "query", from: m.InCustomResource}
 				}
@@ -865,6 +880,24 @@ func mappingSuppliedParams(verbs []Verb) map[string]mappingSource {
 		}
 	}
 	return supplied
+}
+
+// selfReferentialSpecSource reports whether a request-direction mapping reads from the exact top-level
+// spec property that suppressing its parameter would delete.
+//
+// Exact match only, and the two near misses are the reason. `spec.keypair.name` for parameter {name} is a
+// DIFFERENT property the author really does supply, so suppressing {name} is correct and this must return
+// false. `status.node_id` for {node_id} is the case the suppression exists for -- the vendor assigns the
+// value and the author cannot supply it -- so this must return false there too, and does, because the
+// prefix is not "spec.".
+//
+// Returning false for an empty parameter name is not a guard against a caller mistake but a statement
+// that "" names no property: `spec.` alone cannot be self-referential.
+func selfReferentialSpecSource(inCustomResource, param string) bool {
+	if param == "" {
+		return false
+	}
+	return inCustomResource == "spec."+param
 }
 
 // mappingRemovalMessage is the text for a parameter omitted from the spec because a request-direction
