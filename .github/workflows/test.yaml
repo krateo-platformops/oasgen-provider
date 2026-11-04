@@ -39,6 +39,13 @@ jobs:
     with:
       module: go/oasgen-provider
       crd_drift: true
+      # Both default to FALSE on the shared reusable, so until now neither has ever run against
+      # either module of this monorepo -- and the job is still named "static analysis" and still
+      # green, which reads as though they had. An absent check emits nothing to be wrong about.
+      # Turned on only after measuring both modules clean, because enabling them dirty converts a
+      # latent backlog into a red gate on unrelated PRs, which is what the default-off is for.
+      fmt_check: true
+      tidy_check: true
       test_args: -race -tags=unit,integration -p 1 -coverprofile=coverage.txt -timeout 20m -covermode=atomic ./...
     secrets: inherit
 
@@ -46,5 +53,7 @@ jobs:
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
       module: go/rest-dynamic-controller
+      fmt_check: true
+      tidy_check: true
       test_args: -race -tags=unit,integration -p 1 -coverprofile=coverage.txt -timeout 20m -covermode=atomic ./...
     secrets: inherit
