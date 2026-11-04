@@ -108,43 +108,11 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 		return nil, verr
 	}
 
-	// Shim VerbsDescription -> oas2jsonschema.Verb (decoupled from the RestDefinition CRD types).
-	verbs := make([]oas2jsonschema.Verb, len(cr.Spec.Resource.VerbsDescription))
-	for i, v := range cr.Spec.Resource.VerbsDescription {
-		verbs[i] = oas2jsonschema.Verb{
-			Action:       v.Action,
-			Method:       v.Method,
-			Path:         v.Path,
-			ItemsPath:    v.ItemsPath,
-			FieldMapping: toDomainFieldMapping(v),
-			Correlation:  toDomainCorrelation(v.Correlation),
-			Async:        toDomainAsync(v.Async),
-		}
-	}
+	verbs := toDomainVerbs(cr.Spec.Resource.VerbsDescription)
 
-	configurationFields := make([]oas2jsonschema.ConfigurationField, 0, len(cr.Spec.Resource.ConfigurationFields))
-	for i, v := range cr.Spec.Resource.ConfigurationFields {
-		actions, aerr := expandWildcardActions(v.FromRestDefinition.Actions, cr.Spec.Resource.VerbsDescription)
-		if aerr != nil {
-			return nil, &FieldError{
-				Field: fmt.Sprintf("spec.resource.configurationFields[%d].fromRestDefinition.actions", i),
-				Err:   fmt.Errorf("expanding wildcard for actions in configurationFields: %w", aerr),
-			}
-		}
-		configurationFields = append(configurationFields, oas2jsonschema.ConfigurationField{
-			FromOpenAPI:        oas2jsonschema.FromOpenAPI{Name: v.FromOpenAPI.Name, In: v.FromOpenAPI.In},
-			FromRestDefinition: oas2jsonschema.FromRestDefinition{Actions: actions},
-		})
-	}
-
-	resourceConfig := &oas2jsonschema.ResourceConfig{
-		Verbs:                  verbs,
-		Identifiers:            cr.Spec.Resource.Identifiers,
-		AdditionalStatusFields: cr.Spec.Resource.AdditionalStatusFields,
-		ConfigurationFields:    configurationFields,
-		ExcludedSpecFields:     cr.Spec.Resource.ExcludedSpecFields,
-		IncludedSpecFields:     cr.Spec.Resource.IncludedSpecFields,
-		DependentLookups:       toDomainDependentLookups(cr.Spec.Resource.DependentLookups),
+	resourceConfig, rerr := toDomainResourceConfig(cr, verbs)
+	if rerr != nil {
+		return nil, rerr
 	}
 	generator := oas2jsonschema.NewOASSchemaGeneratorFromSet(docs, oas2jsonschema.DefaultGeneratorConfig(), resourceConfig)
 
@@ -226,7 +194,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 		return nil, fmt.Errorf("unmarshalling CRD: %w", err)
 	}
 
-	if len(configurationFields) > 0 || hasSecuritySchemes {
+	if len(resourceConfig.ConfigurationFields) > 0 || hasSecuritySchemes {
 		cfgGVK := schema.GroupVersionKind{
 			Group:   cr.Spec.ResourceGroup,
 			Version: DefaultVersion,

@@ -79,6 +79,30 @@ func unwrapFindByItems(schema *Schema, itemsPath string) (*Schema, error) {
 	}
 }
 
+// findByCanReturnMoreThanOneItem answers whether a findby response can carry MORE THAN ONE candidate.
+//
+// It is the counting half of unwrapFindByItems' rule: that function asks which schema ONE item has, this
+// one asks how many items there can be, and both have to read the same document the same way.
+// TestTheCollectionCountAgreesWithTheUnwrapRule pins the correspondence branch by branch, because the two
+// drifting apart would make #444's warning fire on exactly the definitions it must stay quiet about.
+//
+// The answer is ASYMMETRIC on purpose: false is a proof, true may be an inability to prove.
+//
+//	bare array            -> true
+//	itemsPath declared    -> true  (the author named a collection property)
+//	exactly one array     -> true
+//	two or more arrays    -> true  (ambiguous WHICH collection, but certainly a collection)
+//	nil schema            -> true  (undocumented response; not evidence of a single object)
+//	no array at all       -> FALSE: the body IS the item, and the controller wraps such a body as a list
+//	                         of exactly one (ExtractItemsFromResponse case 3), so there is only ever one
+//	                         candidate and OR cannot adopt anything else.
+func findByCanReturnMoreThanOneItem(schema *Schema, itemsPath string) bool {
+	if schema == nil || itemsPath != "" || schema.Items != nil {
+		return true
+	}
+	return len(arrayPropertyNames(schema)) > 0
+}
+
 // arrayPropertyNames returns the names of every top-level array-typed property, sorted so the error
 // message is stable rather than dependent on document order.
 func arrayPropertyNames(schema *Schema) []string {
