@@ -4,7 +4,7 @@ title: Upgrading from 0.41.0 to 0.50.0
 description: Evidence for a pin decision across the 0.41.0-0.50.0 span - the security floor stated separately from the feature floor, what is not a barrier, and the operator actions the span requires.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, upgrade, security]
-timestamp: 2026-11-04T16:00:00Z
+timestamp: 2026-11-04T17:10:00Z
 ---
 
 # Upgrading from 0.41.0 to 0.50.0
@@ -101,7 +101,34 @@ the upgrade out. It is not **sufficient**, and a page like this one cannot make 
 ### The boundary of what 0.50.0 hardened
 
 **It covers the rest-dynamic-controller's own request path.** Requests delegated through `*ApiRef` leave via
-**snowplow** and are **not** covered; snowplow tracks the same channels as snowplow#1106 and snowplow#1112.
+**snowplow**, whose protections are different and versioned — stated here in snowplow's own words, because
+it is their component and the wording below is theirs:
+
+> Delegated `*ApiRef` requests leave via snowplow. From **snowplow 1.12.65** they refuse any cross-origin
+> redirect hop; **there is no host allowlist and no DNS pinning.** On **snowplow ≤ 1.12.56** they are
+> unprotected.
+
+**So this is a moving boundary and the version is the whole of it.** snowplow#1106 and snowplow#1112 are
+fixed on main by snowplow#1120 and ship in 1.12.65 — but at the time of writing **every live cluster runs
+1.12.56**, and 1.12.65 rolls only after a paired run passes. So "delegated requests are not covered" is
+true today and becomes false on that roll, with no change to anything in this repo.
+
+What 1.12.65 does at snowplow's egress, for every endpoint-credentialed dial: refuses a cross-origin
+redirect hop outright — scheme, host and port must match exactly, **with no subdomain allowance** — via
+`CheckRedirect` plus a transport-level backstop, answering a 502. The hop is never sent, so the credential
+never reaches it. Their reviewer exercised `api.example.com.attacker.net`, port changes, scheme downgrades
+and userinfo tricks across every method and every 3xx code, with zero requests reaching the other origin.
+
+**Two properties this document claims for rest-dynamic-controller that snowplow deliberately does NOT
+have**, so do not carry them across:
+
+- **No host allowlist.** snowplow's policy is exact-origin, not a permitted set.
+- **No DNS-rebinding pinning.** The `DialContext`-pins-the-resolved-address property described above has no
+  equivalent. By owner ruling (snowplow#1131) the endpoint Secret's address is the administrator's choice,
+  so there is no loopback, link-local or metadata-address filtering either.
+
+That is a deliberate scoping decision on their side rather than a gap awaiting a fix, which is why it is
+recorded as a difference and not as a risk.
 
 If your fleet has both kinds, a delegated kind's credential travels outside the path this release hardened.
 
