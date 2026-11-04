@@ -1239,7 +1239,27 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 	// its auth-secret access any earlier could break an in-flight reconcile of a resource that isn't
 	// actually going away yet.
 	if terr := e.teardownAuthSecretRBAC(ctx, cr, gvr); terr != nil {
-		e.log.Debug("Tearing down auth secret RBAC failed (non-fatal)", "error", terr)
+		// WARN, NOT DEBUG, AND THE COMPARISON IS THE ARGUMENT. Its counterpart syncAuthSecretRBAC is FATAL
+		// (returns an error, so the runtime conditions it and emits an event). This one cannot be: it runs
+		// in Delete, so by the time it executes there is no object left to carry a condition and an event
+		// would be orphaned. That makes the log line the ONLY durable channel, and it was the quietest one.
+		//
+		// rest-dynamic-controller does the analogous teardown of its own self-granted secretRef RBAC at
+		// Warn at all five of its call sites (restResources.go:1295, 1345, 1367, 1408, 1496) -- and RDC's
+		// grant binds the SHARED, long-lived service account, so the genuinely dangerous one was already
+		// instrumented correctly while the latent one was not.
+		//
+		// Deliberately no event: it would be attached to an object that is about to disappear. Warn is the
+		// honest ceiling for a failure whose subject is leaving.
+		//
+		// The residue is a Role and RoleBinding left in a namespace, and NOTHING watches them --
+		// status.AuthSecretRBACNamespaces, the only record of what needed cleaning, vanishes with the
+		// object, so the list cannot be reconstructed afterwards. Impact is LATENT rather than live:
+		// Undeploy deletes the bound ServiceAccount first (deploy.go:557), so the leftover binding has no
+		// subject until a ServiceAccount of the same deterministic name reappears in that namespace.
+		e.log.Warn("Tearing down auth secret RBAC failed; a Role and RoleBinding may be left behind, and "+
+			"nothing records which namespaces needed cleaning once this object is gone",
+			"kind", cr.Spec.Resource.Kind, "group", cr.Spec.ResourceGroup, "error", terr)
 	}
 
 	e.log.Debug("Deleting RestDefinition", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)

@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -176,11 +177,23 @@ func DeleteAuthSecretRBAC(ctx context.Context, kube client.Client, roleName, ns 
 
 // DeleteAllAuthSecretRBAC tears down the Role+RoleBinding pair named roleName in every namespace in
 // namespaces (the full set on the RestDefinition's status), used on RestDefinition delete.
+// DeleteAllAuthSecretRBAC removes the per-namespace auth-secret grants, and COLLECTS failures rather than
+// returning on the first.
+//
+// It used to return on the first error, so one namespace failing left every LATER namespace entirely
+// untouched -- and because the caller is in Delete, nothing retries and nothing records what was skipped.
+// Fail-fast is right when the caller can try again; here there is no second attempt, so the only useful
+// behaviour is to clean everything cleanable and report the whole set that was not.
+//
+// errors.Join keeps every namespace's error in the message, which matters because the caller's Warn is the
+// only durable channel: a message naming one namespace out of five would understate the residue in exactly
+// the way the old Debug level did.
 func DeleteAllAuthSecretRBAC(ctx context.Context, kube client.Client, roleName string, namespaces []string) error {
+	var errs []error
 	for _, ns := range namespaces {
 		if err := DeleteAuthSecretRBAC(ctx, kube, roleName, ns); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("namespace %q: %w", ns, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
