@@ -364,7 +364,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}
 		if err != nil {
 			log.Error(err, "Performing REST call")
-			return controller.ExternalObservation{}, err
+			return controller.ExternalObservation{}, h.observeAuthorizationDenied(ctx, mg, "get", err, log)
 		}
 	} else {
 		observeAction = "findby"
@@ -462,7 +462,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}
 		if err != nil {
 			log.Error(err, "Performing REST call")
-			return controller.ExternalObservation{}, err
+			return controller.ExternalObservation{}, h.observeAuthorizationDenied(ctx, mg, "findby", err, log)
 		}
 	}
 
@@ -760,12 +760,47 @@ func lastReconcileErrored(mg *unstructured.Unstructured) bool {
 	return false
 }
 
+// observeAuthorizationDenied classifies a failed OBSERVE call, so a permanent refusal does not reach the
+// runtime as a generic "could not observe" (#436).
+//
+// IT STILL RETURNS AN ERROR, and that is the difference from create and update. There the caller returns
+// nil to stop retrying; here nil would be a disaster: Observe returning ExternalObservation{} with no error
+// means "the external resource does not exist and is not up to date", which dispatches a CREATE. A 403 on a
+// read would then provoke a write. So Observe must surface the error, and the only thing worth changing is
+// WHICH Ready condition survives it.
+//
+// Without this, unstructured-runtime's handleObserve writes Ready=Unknown/ObserveFailed (worker.go:649),
+// which per core-provider's rollup buckets as CONVERGING -- so a credential that cannot read presents as an
+// install still in progress, indefinitely, and the installer's gate (strict on False/<anything>) never
+// emits a dependent. With it, the CR keeps AuthorizationDenied, which the rollup reads as failed.
+//
+// Reuses stopOnAuthorizationDenied for the whole recording path -- condition, event, log and the status
+// write -- so the two cannot describe the same refusal differently. Its FALSE return is the safe fallback
+// in both of its meanings: either the error was not a permanent refusal, or recording it failed. Either way
+// the bare error goes back and the runtime's generic reason is correct, because we did not establish a
+// specific one.
+func (h *handler) observeAuthorizationDenied(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) error {
+	if !h.stopOnAuthorizationDenied(ctx, mg, verb, err, log) {
+		return err
+	}
+	// The wrap is only meaningful because stopOnAuthorizationDenied PERSISTED the condition above: the
+	// object handleObserve writes Synced onto is a fresh re-fetch from the apiserver, so a condition set in
+	// memory and never written would simply be absent, with Ready showing whatever was in etcd and nothing
+	// erroring or logging. Persist-then-wrap; neither half works alone.
+	return controller.ReadyAssessed(err)
+}
+
 // stopOnAuthorizationDenied reports whether err is a permanent authorisation refusal, and if so records it
 // on the CR so the refusal is visible without reading logs.
 //
-// Returns true when the caller must STOP rather than return the error. Returning the error would retry the
-// same verb with the same credential on every reconcile, forever: a 403 with no rate-limit signal is a
-// decision, and nothing the controller does next can change it (#313).
+// Returns true when the caller must STOP rather than return the error -- which is what CREATE and UPDATE do.
+// Returning the error would retry the same verb with the same credential on every reconcile, forever: a 403
+// with no rate-limit signal is a decision, and nothing the controller does next can change it (#313).
+//
+// OBSERVE USES IT DIFFERENTLY: see observeAuthorizationDenied directly above. It takes the recording and
+// still returns an error, because a nil from Observe means "does not exist" and would dispatch a create.
+// So "the caller must stop" is true of two of the three callers, and this comment named only those two
+// until #436 added the third.
 //
 // NOT USED BY Delete, deliberately, and that asymmetry is the point. A refused delete leaves the external
 // resource in place; stopping there would let the finalizer be removed and the CR disappear while the thing

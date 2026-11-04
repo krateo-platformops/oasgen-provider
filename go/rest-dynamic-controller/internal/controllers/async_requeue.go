@@ -258,11 +258,30 @@ func (h *handler) driveAsyncRequeue(ctx context.Context, cs *clientSet, clientIn
 			return controller.ExternalObservation{}, true, uerr
 		}
 		*mg = *updated
+		// BOTH RETURNS BELOW ARE WRAPPED WITH ReadyAssessed, and the wrap is what preserves the condition
+		// written four lines up.
+		//
+		// unstructured-runtime's handleObserve overwrites Ready with ObserveFailed on any error the handler
+		// returns (worker.go:649) -- so returning a bare error here would replace the Unavailable this
+		// branch just set and persisted with a generic "could not observe", which is both less accurate
+		// and, per core-provider's rollup, bucketed as CONVERGING rather than failed. A terminal async
+		// failure would present as an install still in progress, indefinitely.
+		//
+		// ReadyAssessed (unstructured-runtime v1.7.6, pkg/controller/ready.go:34) tells the runtime the
+		// handler owns Ready for this call: it then writes only Synced, from the error, and leaves Ready
+		// alone. It is unstructured-runtime's OWN function, not provider-runtime's -- the two are
+		// structurally identical, share no code, and this module depends only on the former.
+		//
+		// The persist above is load-bearing for the same reason: `e` inside handleObserve is a FRESH
+		// re-fetch from the apiserver, not this object, so a condition set in memory and not written is
+		// simply absent when the runtime writes Synced -- and Ready would show whatever was in etcd, with
+		// nothing erroring and nothing logging. tools.UpdateStatus above is what makes the wrap meaningful;
+		// neither half works alone.
 		if cerr := h.clearAsyncOperation(ctx, mg); cerr != nil {
-			return controller.ExternalObservation{}, true, cerr
+			return controller.ExternalObservation{}, true, controller.ReadyAssessed(cerr)
 		}
 		h.eventRecorder.Event(mg, event.Warning(reasonAsyncFailed, event.Action(action), fmt.Errorf("async %s operation %q reached terminal failure status %q", action, operationID, status)))
-		return controller.ExternalObservation{}, true, fmt.Errorf("async %s operation %q reached terminal failure status %q", action, operationID, status)
+		return controller.ExternalObservation{}, true, controller.ReadyAssessed(fmt.Errorf("async %s operation %q reached terminal failure status %q", action, operationID, status))
 
 	default: // pending — stay put and let the next reconcile poll again.
 		log.Debug("Async(requeue) operation still pending", "operationId", operationID, "status", status)
