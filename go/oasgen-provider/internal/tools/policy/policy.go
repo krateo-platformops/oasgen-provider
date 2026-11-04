@@ -168,6 +168,28 @@ func objects(group string) (*unstructured.Unstructured, *unstructured.Unstructur
 	p.SetKind("MutatingAdmissionPolicy")
 	p.SetName(name)
 	p.Object["spec"] = map[string]any{
+		// NO namespaceSelector AND NO objectSelector, AND THAT IS A GUARANTEE RATHER THAN A DEFAULT.
+		//
+		// Every CREATE and UPDATE in the group must be stamped WHATEVER THE CLIENT. Another component now
+		// depends on it, having measured that a `kubectl apply --dry-run=server` of an unlabelled object
+		// comes back carrying the label (the control being --dry-run=client, which does not). Before that
+		// was asked, the absence of selectors here was an unexamined default that happened to give the
+		// right behaviour; this comment is what turns it into a property, because a property nothing
+		// records is not protection.
+		//
+		// WHY A SELECTOR WOULD BE A SILENT DEFECT rather than a narrowing. An instance admitted without
+		// this label is invisible to its version-scoped controller, and the filter is SERVER-SIDE on both
+		// ListFunc and WatchFunc (unstructured-runtime pkg/listwatcher/listwatcher.go:25-27, :36-38). The
+		// object therefore never enters the informer cache, is never enqueued, and NOTHING CAN ATTACH A
+		// CONDITION OR EVENT TO IT -- the CR is created, looks healthy, and belongs to nobody. A selector
+		// added here would make a whole class of CRs unreconcilable with no signal anywhere, which is the
+		// failure mode backfillVersionLabel exists to repair after the fact.
+		//
+		// So: do not add a selector without defeating that argument, and tell the components that depend
+		// on it before it ships rather than after.
+		//
+		// The GROUP scoping above is the separate, deliberate narrowing: see the package comment --
+		// apiGroups: ["*"] would stamp this label onto every object in the cluster.
 		"matchConstraints": map[string]any{
 			"matchPolicy": "Exact",
 			"resourceRules": []any{map[string]any{

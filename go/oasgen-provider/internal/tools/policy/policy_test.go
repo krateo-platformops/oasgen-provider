@@ -75,6 +75,41 @@ func TestPolicyMatchesOnlyItsOwnGroup(t *testing.T) {
 	assert.Equal(t, []any{"*"}, r["apiVersions"], "every served version writes the label naming itself")
 }
 
+// THE UNSELECTORED SHAPE IS A GUARANTEE, AND THIS IS WHAT MAKES IT ONE.
+//
+// Every CREATE and UPDATE in the group must be stamped WHATEVER THE CLIENT. Another component depends on
+// it, having measured that `kubectl apply --dry-run=server` of an unlabelled object comes back carrying
+// the label, with `--dry-run=client` as the control. Until that was asked, the absence of selectors was an
+// unexamined default that happened to give the right behaviour — a property nothing records is not
+// protection, so a comment alone would not have held.
+//
+// A selector added here would be a SILENT defect rather than a narrowing: an unlabelled instance is
+// invisible to its version-scoped controller, the filter is server-side on both ListFunc and WatchFunc, so
+// the object never enters the informer cache and NOTHING CAN ATTACH A CONDITION OR EVENT TO IT. The CR is
+// created, looks healthy, and belongs to nobody.
+//
+// Asserted as ABSENCE rather than as an empty map, because the two are different objects to the apiserver
+// in principle and because an explicitly-empty selector would read as deliberate scoping-to-everything,
+// which is a claim this code does not make.
+func TestNoSelectorsSoEveryClientsWriteIsStamped(t *testing.T) {
+	p, _ := objects("github.krateo.io")
+	spec := p.Object["spec"].(map[string]any)
+
+	for _, key := range []string{"namespaceSelector", "objectSelector"} {
+		_, present := spec[key]
+		assert.False(t, present,
+			"%s must not be set: a selector here makes a class of CRs silently unreconcilable, with no "+
+				"condition and no event possible on them, because the informer filter is server-side", key)
+	}
+
+	// The CONTROL: the match constraints this code DOES set are present, so the assertions above are
+	// reading a populated spec rather than passing because the object is empty or shaped differently.
+	mc, ok := spec["matchConstraints"].(map[string]any)
+	require.True(t, ok, "precondition: matchConstraints must exist, or the absence checks above prove nothing")
+	require.Contains(t, mc, "resourceRules")
+	assert.Equal(t, "Exact", mc["matchPolicy"])
+}
+
 // failurePolicy: an instance admitted WITHOUT the label is invisible to its version's controller — a
 // silent non-reconcile. Refusing the write is the better failure.
 func TestFailurePolicyIsFail(t *testing.T) {
@@ -88,8 +123,18 @@ func TestBindingReferencesThePolicy(t *testing.T) {
 	assert.Equal(t, "MutatingAdmissionPolicyBinding", b.GetKind())
 }
 
-// A cluster below 1.36 has no MutatingAdmissionPolicy API. That must not fail an install the chart
-// permits (floor 1.33) — RDC stamps the label itself there.
+// A cluster below 1.36 has no MutatingAdmissionPolicy API, so IsUnsupported must recognise that cleanly.
+//
+// The reason this comment used to give is now wrong twice over and is corrected rather than deleted,
+// because both halves were true when written. The chart floor moved 1.33 -> 1.36 in 0.28.0 precisely
+// because this API is GA only at 1.36 (docs/usage.md:17; CRD ratcheting, the old 1.33 reason, is GA at
+// 1.33 and explicitly "no longer the binding one"), so an install the chart permits can no longer be
+// below 1.36 at all. And RDC no longer stamps the label itself: that sub-1.36 fallback existed in 0.27.0
+// and was REPLACED by backfillVersionLabel, which stamps the same value by selecting on label absence.
+//
+// The recognition still matters for a cluster where the API is absent for another reason — a disabled
+// feature gate, or a managed distribution withholding it — where the right behaviour is a clean refusal
+// rather than an obscure error.
 func TestIsUnsupportedRecognisesAMissingAPI(t *testing.T) {
 	for _, msg := range []string{
 		`no matches for kind "MutatingAdmissionPolicy" in version "admissionregistration.k8s.io/v1"`,
