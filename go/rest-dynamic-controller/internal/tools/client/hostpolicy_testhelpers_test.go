@@ -20,7 +20,7 @@ import (
 // unconditionally and must keep refusing. See Policy.AllowLoopbackForTesting.
 func allowedPolicy(t *testing.T, rawURL string) *hostpolicy.Policy {
 	t.Helper()
-	p, err := hostpolicy.Parse(nil, []string{rawURL}, false)
+	p, _, err := hostpolicy.Parse(nil, []string{rawURL}, false)
 	if err != nil {
 		t.Fatalf("building a test host policy for %q: %v", rawURL, err)
 	}
@@ -48,7 +48,7 @@ func allowServer(t *testing.T, u *UnstructuredClient) {
 		t.Fatal("no host to permit: the client has neither a document nor a Server, so this helper would " +
 			"build a policy that refuses everything and the test would fail for the wrong reason")
 	}
-	p, err := hostpolicy.Parse(nil, hosts, false)
+	p, _, err := hostpolicy.Parse(nil, hosts, false)
 	if err != nil {
 		t.Fatalf("building a test host policy for %v: %v", hosts, err)
 	}

@@ -121,29 +121,55 @@ type Config struct {
 // is NOT "permit anything" and NOT "configuration error": requiring the value would turn every
 // single-host provider into a config error on upgrade for a capability it does not use (measured by a
 // consumer: 13 specs, one identical server, zero server variables, zero per-operation overrides).
-func Parse(allowlist, documentHosts []string, allowAny bool) (*Policy, error) {
+func Parse(allowlist, documentHosts []string, allowAny bool) (*Policy, []Discarded, error) {
 	p := &Policy{allowAny: allowAny}
 	for _, raw := range allowlist {
 		e, err := parseEntry(raw)
 		if err != nil {
-			return nil, fmt.Errorf("endpoint allowlist entry %q: %w", raw, err)
+			return nil, nil, fmt.Errorf("endpoint allowlist entry %q: %w", raw, err)
 		}
 		p.entries = append(p.entries, e)
 	}
+	var discarded []Discarded
 	for _, raw := range documentHosts {
 		// A document host arrives as a full server URL. It is permitted with its OWN scheme, including
 		// cleartext: the document is operator-supplied content, and refusing http:// here would break a
 		// document that names one without giving the operator anything to change.
 		e, err := parseEntry(raw)
 		if err != nil {
-			// Not fatal, and not silent. A server URL we cannot parse is a document problem, and refusing
-			// to build the client over it would make the whole kind unreconcilable for a cosmetic defect
-			// in a server we may never use.
+			// NOT FATAL, and the reason for that stands: a server URL we cannot parse is a document
+			// problem, and refusing to build the client over it would make the whole kind unreconcilable
+			// for a cosmetic defect in a server we may never use.
+			//
+			// BUT IT MUST NOT BE SILENT, which is what it was until #403 -- and the comment that used to
+			// sit here said "not fatal, and not silent" while nothing recorded the skip at all. A true
+			// clause carrying a false one, where the false clause is what stops the next reader looking
+			// for a log line that does not exist.
+			//
+			// Returned rather than logged here, so this package keeps no logging dependency -- two other
+			// projects are porting it as a reference implementation -- and so the caller can decide
+			// whether a discard is worth a log line or a condition on the object.
+			discarded = append(discarded, Discarded{URL: raw, Reason: err})
 			continue
 		}
 		p.entries = append(p.entries, e)
 	}
-	return p, nil
+	return p, discarded, nil
+}
+
+// Discarded is one document server URL that could not be parsed and is therefore absent from the
+// permitted set.
+//
+// WHY THIS IS NOT COSMETIC when the dropped URL is the one actually dialled: every credentialed request
+// to it is then refused with a message naming the host and listing the permitted set, which reads to an
+// operator as a policy misconfiguration rather than as an unreadable document. The discard is the only
+// narrowing in this package with no signal of its own -- a bad OPERATOR entry is fatal to Parse, and the
+// entry forms in #402 either fail at startup or refuse a request with a message.
+type Discarded struct {
+	// URL is the raw string from the document, verbatim, so the operator can find it.
+	URL string
+	// Reason is parseEntry's error, so the message says WHY rather than only that it happened.
+	Reason error
 }
 
 // parseEntry normalises one entry. See the package doc for why each step is here.

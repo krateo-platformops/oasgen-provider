@@ -285,7 +285,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	// "the client" up front: IsResourceKnown below runs the GET verb, the observe branch runs get XOR
 	// findby, and the dispatch and async paths run their own verbs. A resource declaring get and findby in
 	// different documents is served correctly only because each use asks for its own action.
-	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg)
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg, h.logger)
 
 	// A dispatch resource is observed by looking its correlation token up in the declared collection, which
 	// replaces the get/findby observe entirely (#199). BEFORE the async check, because the two are mutually
@@ -856,7 +856,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	// One set per reconcile, resolving each verb to the document IT declares (#220). Configuration lives
 	// in the set, so every client it hands out carries SetAuth -- a second client for a second document
 	// would otherwise go out unauthenticated.
-	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg)
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg, h.logger)
 	cli, err := cs.For(ctx, string(apiaction.Create))
 	if err != nil {
 		log.Error(err, "Building REST client")
@@ -1082,7 +1082,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	// One set per reconcile, resolving each verb to the document IT declares (#220). Configuration lives
 	// in the set, so every client it hands out carries SetAuth -- a second client for a second document
 	// would otherwise go out unauthenticated.
-	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg)
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg, h.logger)
 	cli, err := cs.For(ctx, string(apiaction.Update))
 	if err != nil {
 		log.Error(err, "Building REST client")
@@ -1301,7 +1301,7 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// for why a single client per entry point will not do: it verifies itself with the GET verb, so the
 	// verification read must address the get verb's document even when the delete verb declares another
 	// (#220).
-	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg)
+	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg, h.logger)
 	cli, err := cs.For(ctx, string(apiaction.Delete))
 	if err != nil {
 		log.Error(err, "Building REST client")
