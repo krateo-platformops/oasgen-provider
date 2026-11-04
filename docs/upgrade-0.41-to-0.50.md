@@ -4,7 +4,7 @@ title: Upgrading from 0.41.0 to 0.50.0
 description: Evidence for a pin decision across the 0.41.0-0.50.0 span - the security floor stated separately from the feature floor, what is not a barrier, and the operator actions the span requires.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, upgrade, security]
-timestamp: 2026-11-04T17:10:00Z
+timestamp: 2026-11-04T17:30:00Z
 ---
 
 # Upgrading from 0.41.0 to 0.50.0
@@ -140,8 +140,33 @@ definitions with any *ApiRef : 1 of 36
 delegated actions            : 2 of 167   (update and delete, on their compute instance kind)
 ```
 
-So 35 of 36 kinds and 165 of 167 actions are native and covered. They probed every path both halves call,
-none redirects, and both reach the same host — no exposure today, and no protection either.
+So 35 of 36 kinds and 165 of 167 actions are native and covered.
+
+**"Unprotected" and "exposed" are different claims, and the distinction is what makes this row actionable
+for a reader who is not that consumer:**
+
+> The delegated path is not covered until snowplow 1.12.65 rolls. For this consumer that is a **latent**
+> gap rather than an active one: every path its RESTActions call was probed and **none redirects**.
+> **A consumer whose vendor *does* redirect on a called path is exposed now.**
+
+Their measurement, **as of 2026-11-04** — all seven path templates their three RESTActions can render begin
+with the literal `/projects/`, and every one answers 401 or 400 with no redirect. Only the vendor's `/` and
+`/docs` 301 cross-origin, and nothing renders those.
+
+### Two kinds of row in this document, and they perish differently
+
+Worth stating because the page mixes them and they look alike:
+
+- **Rows about our code** — every tag column above — are reproducible indefinitely. `git tag --contains`
+  and a path-existence check give the same answer next year.
+- **The probe immediately above is a measurement of a vendor's live behaviour**, not a property of any
+  codebase here, so it has a shelf life. Hence the date.
+
+**And the rot is asymmetric, which is the reason to date it rather than simply caveat it.** If snowplow
+rolls 1.12.65 and this page still says the path is uncovered, a reader is over-cautious: annoying and
+harmless. If the vendor *adds* a redirect on a called path and this page still says "none redirects", a
+reader is under-cautious **about a credential**. Only the second direction can hurt anyone, and it is the
+one no change in this repository will ever announce.
 
 **Check which of your kinds use `*ApiRef`, not how many — and expect the answer to be your heaviest ones.**
 
