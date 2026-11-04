@@ -3,9 +3,6 @@ package deploy
 import (
 	"context"
 	"fmt"
-	"strings"
-	"testing"
-
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -15,6 +12,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"strings"
+	"testing"
 )
 
 var widgetConfigurationGVK = schema.GroupVersionKind{Group: "widgets.example.io", Version: "v1alpha1", Kind: "WidgetConfiguration"}
@@ -216,6 +215,107 @@ func TestAuthSecretRoleName_DeterministicAndDistinct(t *testing.T) {
 	}
 	if AuthSecretRoleName(a) == AuthSecretRoleName(b) {
 		t.Fatal("expected distinct resources to get distinct role names")
+	}
+}
+
+// THE AXIS THE TEST ABOVE CANNOT SEE, which is why #440 shipped for months.
+//
+// That test holds Group fixed at "widgets.example.io" in BOTH arms and varies only Resource. Its inputs
+// cannot distinguish the axis the function's comment made a claim about ("can never collide across
+// RestDefinitions"), so it asserted distinctness along the one component that was already in the key and
+// said nothing about the one that was missing.
+//
+// Two RestDefinitions sharing a resource plural across groups are admissible -- ownership is enforced per
+// GROUP+KIND, and nothing at admission constrains the pair -- and the objects live in the SECRET's
+// namespace, so they need not even share a namespace.
+func TestAuthSecretRoleNameDistinguishesTheAPIGroup(t *testing.T) {
+	a := schema.GroupVersionResource{Group: "a.example.io", Version: "v1", Resource: "widgets"}
+	b := schema.GroupVersionResource{Group: "b.example.io", Version: "v1", Resource: "widgets"}
+
+	if AuthSecretRoleName(a) == AuthSecretRoleName(b) {
+		t.Fatalf("two RestDefinitions differing ONLY by API group share the auth-secret RBAC name %q. "+
+			"Each reconcile then applies a Role whose resourceNames list only its own secrets, with a "+
+			"RoleBinding subject of only its own ServiceAccount -- so the grant flaps -- and deleting "+
+			"either revokes the other's credential access by name (#440)", AuthSecretRoleName(a))
+	}
+
+	// And it must match the shipped convention it claims to: all five templates in
+	// helm/oasgen-provider/assets/rdc/rbac/ name objects {{ .resource }}-{{ .apiGroup }}-{{ .apiVersion }}.
+	// Asserted on the ORDER too, because a name that merely contains the group would satisfy the arm above
+	// while diverging from the convention the comment cites.
+	if got, want := AuthSecretRoleName(a), "widgets-a.example.io-"+rbacVersion+"-authsecrets"; got != want {
+		t.Fatalf("name = %q, want %q: the shipped RBAC templates order these resource-group-version", got, want)
+	}
+}
+
+// The legacy name must stay EXACTLY the pre-#440 format, because its only job is to find objects already
+// on disk. A "tidying" edit here silently strands every one of them.
+func TestLegacyAuthSecretRoleNameIsThePreMigrationFormat(t *testing.T) {
+	gvr := schema.GroupVersionResource{Group: "a.example.io", Version: "v1", Resource: "widgets"}
+
+	if got, want := legacyAuthSecretRoleName(gvr), "widgets-"+rbacVersion+"-authsecrets"; got != want {
+		t.Fatalf("legacy name = %q, want %q -- this must match what pre-#440 releases actually wrote, "+
+			"not what looks tidy now", got, want)
+	}
+	if legacyAuthSecretRoleName(gvr) == AuthSecretRoleName(gvr) {
+		t.Fatal("the legacy and current names coincide, so the migration would delete the LIVE objects")
+	}
+}
+
+// The migration must remove the pre-#440 group-less objects and MUST NOT touch the current ones. The
+// second half is the safety property: a migration that deleted the live Role would revoke RDC's access to
+// its credential on every reconcile, which is worse than the orphan it is cleaning up.
+func TestDeleteLegacyAuthSecretRBACRemovesTheOldNameAndSparesTheNew(t *testing.T) {
+	gvr := schema.GroupVersionResource{Group: "a.example.io", Version: "v1", Resource: "widgets"}
+	current := AuthSecretRoleName(gvr)
+	legacy := legacyAuthSecretRoleName(gvr)
+	sa := types.NamespacedName{Namespace: "rdc-system", Name: "rdc"}
+
+	kube := fake.NewClientBuilder().WithScheme(rbacScheme(t)).Build()
+
+	// Provision BOTH: the legacy pair as a pre-upgrade cluster would carry it, and the current pair as
+	// this release writes it.
+	for _, name := range []string{legacy, current} {
+		if _, err := SyncAuthSecretRBAC(context.Background(), kube, name,
+			map[string][]string{"ns1": {"creds"}}, nil, sa); err != nil {
+			t.Fatalf("seeding %s: %v", name, err)
+		}
+	}
+
+	// PREMISE: both exist before the migration, or the assertions below prove nothing.
+	for _, name := range []string{legacy, current} {
+		var r rbacv1.Role
+		if err := kube.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: name}, &r); err != nil {
+			t.Fatalf("premise: %s must exist before the migration runs: %v", name, err)
+		}
+	}
+
+	if err := DeleteLegacyAuthSecretRBAC(context.Background(), kube, gvr, []string{"ns1"}); err != nil {
+		t.Fatalf("migration returned an error: %v", err)
+	}
+
+	var gone rbacv1.Role
+	if err := kube.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: legacy}, &gone); !errors.IsNotFound(err) {
+		t.Errorf("the pre-#440 group-less Role %q survived the migration; an orphan there grants secret "+
+			"read access to a ServiceAccount that no longer exists. Get returned: %v", legacy, err)
+	}
+
+	var kept rbacv1.Role
+	if err := kube.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: current}, &kept); err != nil {
+		t.Errorf("the migration deleted the CURRENT Role %q, which revokes RDC's access to its own "+
+			"credential: %v", current, err)
+	}
+}
+
+// A namespace with no legacy object must be a no-op, not an error: the sweep runs on every reconcile and
+// most of them have nothing to clean.
+func TestDeleteLegacyAuthSecretRBACIsANoOpWhenThereIsNothingToRemove(t *testing.T) {
+	gvr := schema.GroupVersionResource{Group: "a.example.io", Version: "v1", Resource: "widgets"}
+	kube := fake.NewClientBuilder().WithScheme(rbacScheme(t)).Build()
+
+	if err := DeleteLegacyAuthSecretRBAC(context.Background(), kube, gvr, []string{"ns1", "ns2"}); err != nil {
+		t.Fatalf("a clean cluster must not error: this runs every reconcile, so a false failure here would "+
+			"log a warning forever. Got: %v", err)
 	}
 }
 

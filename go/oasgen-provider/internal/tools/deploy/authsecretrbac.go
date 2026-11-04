@@ -29,10 +29,70 @@ var authSecretRefPaths = [][]string{
 	{"spec", "authentication", "bearer", "tokenRef"},
 }
 
-// AuthSecretRoleName is deterministic per target resource, matching the naming convention the other RDC
-// RBAC objects already use (<resource>-<version>), so it can never collide across RestDefinitions.
+// AuthSecretRoleName is deterministic per target resource and INCLUDES THE API GROUP, matching the naming
+// convention the shipped RDC RBAC templates use -- `{{ .resource }}-{{ .apiGroup }}-{{ .apiVersion }}` in
+// all five of helm/oasgen-provider/assets/rdc/rbac/.
+//
+// THE GROUP IS WHAT MAKES IT COLLISION-FREE, and it used to be accepted as a parameter and discarded
+// (#440). The old key was `<resource>-<rbacVersion>-authsecrets`, and its comment claimed that being
+// deterministic meant it "can never collide across RestDefinitions" -- which is inverted. Determinism over
+// a PARTIAL key is what makes a collision possible. The same comment also claimed to match the convention
+// it was dropping the group from.
+//
+// Two RestDefinitions sharing a resource plural across groups are admissible: ownership is enforced per
+// GROUP+KIND (crd/apply.go's OwnerAnnotation -- "a CRD for a given group+kind is managed by exactly one
+// LIVE RestDefinition"), and nothing at admission constrains the group/plural pair. Namespace was no
+// protection either, because these objects live in the SECRET's namespace, cross-namespace by design.
+//
+// With the old key the two collided on one name, and each reconcile applied a Role whose resourceNames
+// listed only its own secrets with a RoleBinding subject of only its own ServiceAccount -- so the grant
+// flapped, and deleting either RestDefinition revoked the other's credential access by name.
+//
+// rbacVersion stays the fixed version rather than the target CRD version, for the reason deploy.go gives:
+// it decouples these names from a derived version so a teardown cannot miss them.
 func AuthSecretRoleName(gvr schema.GroupVersionResource) string {
+	return fmt.Sprintf("%s-%s-%s-authsecrets", gvr.Resource, gvr.Group, rbacVersion)
+}
+
+// legacyAuthSecretRoleName returns the pre-#440 name, which omitted the API group.
+//
+// MIGRATION ONLY, AND DELIBERATELY TEMPORARY. Existing clusters carry Role/RoleBinding pairs under this
+// name; after the rename nothing would ever delete them, and they would persist with stale resourceNames
+// granting a since-deleted ServiceAccount read access to real secrets. DeleteLegacyAuthSecretRBAC removes
+// them. Both can be deleted once no supported upgrade path starts from a release older than the one
+// carrying #440.
+func legacyAuthSecretRoleName(gvr schema.GroupVersionResource) string {
 	return fmt.Sprintf("%s-%s-authsecrets", gvr.Resource, rbacVersion)
+}
+
+// DeleteLegacyAuthSecretRBAC removes any pre-#440 auth-secret RBAC left under the group-less name.
+//
+// SEPARATE FROM SyncAuthSecretRBAC on purpose. This is a migration, not part of steady-state
+// reconciliation, and keeping it out of Sync means Sync's contract does not acquire a parameter that stops
+// meaning anything once the migration is retired -- the whole function can be deleted in one commit.
+//
+// Best-effort and error-collecting, like DeleteAllAuthSecretRBAC: a namespace whose legacy object cannot
+// be removed must not stop the others, and the caller logs rather than failing the reconcile, because an
+// orphaned legacy Role grants access to a ServiceAccount that no longer exists.
+//
+// ONE HAZARD WORTH NAMING: where two RestDefinitions previously collided on the legacy name, the first to
+// reconcile deletes the shared object. That is correct -- both then create their own group-qualified name
+// on the same pass -- but between those two events the second RestDefinition's RDC has no read access to
+// its credential. It is one reconcile of degradation to end a permanent flap, and there is no ordering
+// that avoids it without leaving the collision in place.
+func DeleteLegacyAuthSecretRBAC(ctx context.Context, kube client.Client, gvr schema.GroupVersionResource, namespaces []string) error {
+	legacy := legacyAuthSecretRoleName(gvr)
+	if legacy == AuthSecretRoleName(gvr) {
+		// Defensive: if the two ever coincide, deleting the legacy name would delete the live one.
+		return nil
+	}
+	var errs []error
+	for _, ns := range namespaces {
+		if err := DeleteAuthSecretRBAC(ctx, kube, legacy, ns); err != nil {
+			errs = append(errs, fmt.Errorf("namespace %q: %w", ns, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // SelfServiceAccountName returns RDC's own ServiceAccount identity for the given RestDefinition/target GVR
