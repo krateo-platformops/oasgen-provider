@@ -96,15 +96,32 @@ the upgrade out. It is not **sufficient**, and a page like this one cannot make 
 
 If your fleet has both kinds, a delegated kind's credential travels outside the path this release hardened.
 
-**This is not hypothetical, and the shape is easy to miss because it is a minority of kinds.** One consumer
-measured their own split: **36 kinds native to RDC, and one kind whose `update` and `delete` are delegated
-through snowplow via `*ApiRef`.** So 0.50.0 hardens the great majority of their traffic and not that path.
-They probed every path both halves call and none redirects, and both reach the same host — so there is no
-exposure today, and no protection either.
+**This is not hypothetical, and the shape is easy to miss because the delegated set is small.** One consumer
+measured their own split:
 
-**Check which of your kinds use `*ApiRef`, not how many.** A single delegated verb on a single kind is enough
-to put a credential outside this release's coverage, and a fleet that is 97% hardened reads as "hardened" in
-every summary anyone will write.
+```
+definitions with any *ApiRef : 1 of 36
+delegated actions            : 2 of 167   (update and delete, on their compute instance kind)
+```
+
+So 35 of 36 kinds and 165 of 167 actions are native and covered. They probed every path both halves call,
+none redirects, and both reach the same host — no exposure today, and no protection either.
+
+**Check which of your kinds use `*ApiRef`, not how many — and expect the answer to be your heaviest ones.**
+
+That second clause is the part that matters, and it is structural rather than a fact about one fleet.
+**`*ApiRef` is reached for precisely where a lifecycle is too complex for a single call**: multi-call
+teardowns, ordered detach-then-delete, power sequencing. Those are disproportionately the **destructive verbs
+on the expensive resources**. So a delegated set is not a random 3% of a fleet — it is biased toward exactly
+the operations where a credential escaping would matter most.
+
+The consumer above is the canonical shape: their compute kind has no single update endpoint at all, so power
+state, elastic IP and security-group association, and subnet and volume attach/detach are a *sequence* — and
+delete must detach data volumes first. That is why it delegates, and it is why the uncovered verb is the
+destructive one.
+
+A reader told "one kind out of 36" will reasonably downgrade this. A reader told "the uncovered path is
+`delete` on your compute instances" will go and look.
 
 ---
 
