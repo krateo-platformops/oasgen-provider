@@ -1069,6 +1069,38 @@ type RestDefinitionSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^(configmap:\/\/([a-z0-9-]+)\/([a-z0-9-]+)\/([a-zA-Z0-9._-]+)|https?:\/\/\S+)$`
 	OASPath string `json:"oasPath"`
+	// ServerURL overrides the base URL the document declares in `servers[0]`, for every request this
+	// resource makes. It exists for a self-hosted instance of a service whose published OpenAPI document
+	// names the vendor's own endpoint: GitHub Enterprise Server serves the same API as github.com, at
+	// https://<host>/api/v3.
+	//
+	// It REPLACES servers[0] rather than adding to it, and that is a security property rather than a
+	// convenience. The endpoint host policy is built from the document's servers, so on a self-hosted
+	// install the vendor's public host stops being permitted at all -- a misconfigured install fails
+	// closed instead of reaching the public service with the credential meant for the private one.
+	//
+	// Give it a WHOLE base URL, scheme included, and keep the path:
+	//   https://ghe.corp.example.com/api/v3      correct
+	//   https://ghe.corp.example.com:8443/api/v3 correct, port preserved
+	//   ghe.corp.example.com                     REJECTED, no scheme
+	//   https://ghe.corp.example.com             accepted, but on GHES every request 404s -- the
+	//                                            /api/v3 prefix is part of the base URL, not the paths
+	//
+	// A trailing slash is tolerated. The field is deliberately NOT a host: a name containing "host"
+	// invites exactly the prefix-less value on the last line, which is accepted here and fails much
+	// later, at the vendor.
+	//
+	// It is MUTABLE, unlike resourceGroup. Correcting a self-hosted hostname is a legitimate edit, and it
+	// takes effect on the next reconcile with no restart, because the RestDefinition is read before the
+	// client is constructed at every entry point. It also sits OUTSIDE spec.resource on purpose:
+	// resourceHash marshals spec.resource only and that hash gates CRD regeneration, so a field inside it
+	// would re-apply the resource CRD on every hostname change, for a value the generated schema does not
+	// depend on.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?:\/\/[^\/\s]+(\/[^\s]*)?$`
+	ServerURL string `json:"serverURL,omitempty"`
 	// Group: the group of the resource to manage
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="ResourceGroup is immutable, you cannot change that once the CRD has been generated"
 	// +required
