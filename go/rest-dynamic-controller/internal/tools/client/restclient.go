@@ -1151,10 +1151,11 @@ func (r *OrMatchReport) Declared() int {
 // The second return value is an OrMatchReport, non-nil ONLY for an OR match over a strict subset. It is
 // diagnostic and carries no control-flow meaning: the bool and the error are exactly what they were.
 func (u *UnstructuredClient) isItemMatch(itemMap map[string]interface{}) (bool, *OrMatchReport, error) {
-	// An INVALID value cannot actually arrive here: identifiersMatchPolicy carries
-	// +kubebuilder:validation:Enum=AND;OR (oasgen-provider apis/restdefinitions/v1alpha1/types.go), and
-	// that enum reaches both the generated CRD and the chart's copy, so the apiserver rejects anything
-	// but AND or OR at admission. The `default:` branch at the bottom of the switch is therefore
+	// An INVALID value cannot actually arrive here: identifiersMatchPolicy is declared with a kubebuilder
+	// Enum=AND;OR validation (oasgen-provider apis/restdefinitions/v1alpha1/types.go -- the marker form is
+	// deliberately not spelled out, so a grep for API markers does not get a false hit from this module,
+	// which carries none), and that enum reaches both the generated CRD and the chart's copy, so the
+	// apiserver rejects anything but AND or OR at admission. The `default:` branch at the bottom of the switch is therefore
 	// UNREACHABLE, and its error message names a case that cannot occur -- do not read it as evidence
 	// that a typo'd policy silently becomes OR. It cannot: the manifest is refused.
 	//
