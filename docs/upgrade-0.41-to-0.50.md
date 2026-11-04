@@ -1,3 +1,12 @@
+---
+type: Runbook
+title: Upgrading from 0.41.0 to 0.50.0
+description: Evidence for a pin decision across the 0.41.0-0.50.0 span - the security floor stated separately from the feature floor, what is not a barrier, and the operator actions the span requires.
+resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
+tags: [kog, upgrade, security]
+timestamp: 2026-11-04T16:00:00Z
+---
+
 # Upgrading from 0.41.0 to 0.50.0
 
 **This is evidence for a pin decision, not a recommendation.** It records what the span changes, which tag
