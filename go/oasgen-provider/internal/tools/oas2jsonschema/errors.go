@@ -76,6 +76,11 @@ const (
 	// schema does not have. Fatal, unlike the excludedSpecFields equivalent: a typo in an allowlist
 	// silently leaves a field OUT, which is invisible, where a typo in a blocklist leaves it IN.
 	CodeIncludedFieldNotFound GenerationCode = "IncludedFieldNotFound"
+	// CodeIdentifiersMatchPolicyOmitted indicates that a findby whose response can carry more than one
+	// item declares two or more identifiers and no identifiersMatchPolicy, so the OR default applies and
+	// the FIRST item matching ANY ONE identifier is adopted -- possibly a different object than the
+	// resource names (#444).
+	CodeIdentifiersMatchPolicyOmitted GenerationCode = "IdentifiersMatchPolicyOmitted"
 )
 
 // SchemaGenerationError defines a structured error for schema generation warnings.

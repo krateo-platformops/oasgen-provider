@@ -47,6 +47,17 @@ type ResourceConfig struct {
 	// verbsDescription x fieldMapping, and neither list is bounded, so as CEL they exceed the apiserver's
 	// rule cost budget and refuse the whole CRD at install (#169). See the note on the API type.
 	DependentLookups []DependentLookup
+	// ObserveDelegated is true when the resource sets observeApiRef, i.e. observation is delegated to a
+	// Snowplow RESTAction.
+	//
+	// Generation needs it for one thing only: such a resource's findby verb is DECLARED but never
+	// EXECUTED. rest-dynamic-controller's Observe calls observeViaRestAction first and returns -- "this
+	// replaces the get/findby observe entirely (no OAS call is made for this resource)" -- and its Exists
+	// refuses outright rather than reading, because a delegated observe cannot be read without risking a
+	// partial status. Delete verification uses the get verb, and CEL forbids a dispatch verb alongside any
+	// *ApiRef. So nothing reaches the identifier matching, and a findby declared under delegation exists
+	// to satisfy the needs-an-observe-verb rule and to shape the generated CRD (#444).
+	ObserveDelegated bool
 }
 
 type ConfigurationField struct {
@@ -71,6 +82,12 @@ type Verb struct {
 	// ItemsPath names the envelope property holding the collection, for a findby whose response is not a
 	// bare array. Empty means "infer", which succeeds only when the inference is unambiguous.
 	ItemsPath string
+	// IdentifiersMatchPolicy mirrors a findby verb's declared policy: "AND", "OR", or empty for the OR
+	// default. Generation matches nothing -- that is the controller's job -- but it is the only place that
+	// can tell an author, before a single call is made, that omitting it on a findby over a COLLECTION
+	// means "adopt the first item matching ANY identifier" (#444). Read only off the findby verb, which
+	// is also the only verb rest-dynamic-controller copies it from.
+	IdentifiersMatchPolicy string
 	// FieldMapping carries the unified request/response field mappings declared for this verb.
 	// The generation layer consumes the response-direction entries (InResponse set) to resolve the type
 	// of relocated status fields against the response schema; request-direction entries are carried for

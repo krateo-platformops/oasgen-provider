@@ -14,6 +14,13 @@ spec:
     verbsDescription:
     - action: findby
       method: GET
+      # identifiersMatchPolicy is stated rather than left to default, and OR is correct HERE
+      # for a reason that does NOT travel: this path names a single object, so the response is
+      # one item and there is nothing else to adopt. Over a COLLECTION, OR adopts the first
+      # item matching ANY ONE identifier -- which can be a different object than the resource
+      # names, and the reconciler then treats it as this resource, deletions included. If you
+      # copy this verb to a findby that returns a list, set AND.
+      identifiersMatchPolicy: OR
       path: /orgs/{org}/actions/runner-groups/{runner_group_id}
     - action: get
       method: GET

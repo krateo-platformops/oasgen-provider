@@ -54,6 +54,74 @@ func toDomainFieldMapping(v definitionv1alpha1.VerbsDescription) []oas2jsonschem
 	return out
 }
 
+// toDomainVerbs shims VerbsDescription into the generator's library-agnostic Verb, decoupling generation
+// from the RestDefinition CRD types.
+//
+// It is the ONLY place a Verb is built from a CR, and that is the point rather than an accident. A field
+// present on both types but copied in only some of the sites that construct one is invisible: the code
+// compiles, the generator reads a zero value, and the feature is simply absent for whichever path was
+// missed -- the shape behind a release that shipped a converter-reached feature while every hand-built
+// path skipped it. TestEveryVerbFieldIsCarriedByTheShim asserts by reflection that this function leaves
+// no exported field of Verb zero, so adding one to the domain type and forgetting it here fails loudly
+// instead of degrading quietly.
+func toDomainVerbs(verbs []definitionv1alpha1.VerbsDescription) []oas2jsonschema.Verb {
+	out := make([]oas2jsonschema.Verb, len(verbs))
+	for i, v := range verbs {
+		out[i] = oas2jsonschema.Verb{
+			Action:    v.Action,
+			Method:    v.Method,
+			Path:      v.Path,
+			ItemsPath: v.ItemsPath,
+			// Only the findby verb's value is ever read -- rest-dynamic-controller copies it onto the
+			// client for findby alone -- but converting it for every verb keeps this a faithful copy
+			// rather than a filter whose rule has to be kept in step with the consumer's (#444).
+			IdentifiersMatchPolicy: v.IdentifiersMatchPolicy,
+			FieldMapping:           toDomainFieldMapping(v),
+			Correlation:            toDomainCorrelation(v.Correlation),
+			Async:                  toDomainAsync(v.Async),
+		}
+	}
+	return out
+}
+
+// toDomainResourceConfig shims the RestDefinition's resource block into the generator's ResourceConfig.
+//
+// Extracted for the same reason as toDomainVerbs: it is the only place a ResourceConfig is built from a
+// CR, so a field the generator reads and this function does not set is silently zero rather than a
+// compile error. TestEveryResourceConfigFieldIsCarriedByTheShim asserts that by reflection.
+//
+// ObserveDelegated is the field that made the guard worth having. The #444 warning SUPPRESSES itself when
+// observation is delegated, because the findby is then declared but never executed -- so a dropped
+// assignment here does not lose a feature quietly, it makes the warning fire on resources it was
+// specifically taught to stay silent about, which is the exact failure the warning exists to avoid.
+func toDomainResourceConfig(cr *definitionv1alpha1.RestDefinition, verbs []oas2jsonschema.Verb) (*oas2jsonschema.ResourceConfig, error) {
+	configurationFields := make([]oas2jsonschema.ConfigurationField, 0, len(cr.Spec.Resource.ConfigurationFields))
+	for i, v := range cr.Spec.Resource.ConfigurationFields {
+		actions, aerr := expandWildcardActions(v.FromRestDefinition.Actions, cr.Spec.Resource.VerbsDescription)
+		if aerr != nil {
+			return nil, &FieldError{
+				Field: fmt.Sprintf("spec.resource.configurationFields[%d].fromRestDefinition.actions", i),
+				Err:   fmt.Errorf("expanding wildcard for actions in configurationFields: %w", aerr),
+			}
+		}
+		configurationFields = append(configurationFields, oas2jsonschema.ConfigurationField{
+			FromOpenAPI:        oas2jsonschema.FromOpenAPI{Name: v.FromOpenAPI.Name, In: v.FromOpenAPI.In},
+			FromRestDefinition: oas2jsonschema.FromRestDefinition{Actions: actions},
+		})
+	}
+
+	return &oas2jsonschema.ResourceConfig{
+		Verbs:                  verbs,
+		Identifiers:            cr.Spec.Resource.Identifiers,
+		AdditionalStatusFields: cr.Spec.Resource.AdditionalStatusFields,
+		ConfigurationFields:    configurationFields,
+		ExcludedSpecFields:     cr.Spec.Resource.ExcludedSpecFields,
+		IncludedSpecFields:     cr.Spec.Resource.IncludedSpecFields,
+		DependentLookups:       toDomainDependentLookups(cr.Spec.Resource.DependentLookups),
+		ObserveDelegated:       cr.Spec.Resource.ObserveApiRef != nil,
+	}, nil
+}
+
 // expandWildcardActions expands "*" wildcard to all available verb actions
 func expandWildcardActions(actions []string, verbsDescription []definitionv1alpha1.VerbsDescription) ([]string, error) {
 	// Check for mixed wildcard usage first

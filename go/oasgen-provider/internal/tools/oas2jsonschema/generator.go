@@ -81,6 +81,13 @@ func (g *OASSchemaGenerator) Generate() (*GenerationResult, error) {
 	}
 	generationWarnings = append(generationWarnings, warnings...)
 
+	// A findby that can adopt the WRONG object because the resource never said which identifiers must
+	// match. Non-fatal by decision: the alternative is flipping a released default under existing
+	// resources, which is the more dangerous of the two changes (#444).
+	if w := g.warnIdentifiersMatchPolicyOmitted(); w != nil {
+		generationWarnings = append(generationWarnings, w)
+	}
+
 	// Validate Status Schema
 	validationWarnings := ValidateSchemas(g.docs, g.resourceConfig.Verbs, g.generatorConfig)
 

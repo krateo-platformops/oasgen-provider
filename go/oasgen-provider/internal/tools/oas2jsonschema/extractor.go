@@ -182,10 +182,43 @@ func (g *OASSchemaGenerator) getBaseSchemaForStatus() (*Schema, error) {
 
 // ExtractSchemaForAction resolves targetAction's path against the document that action belongs to.
 //
+// For findby it returns ONE ITEM of the collection; for every other action, the response schema as it
+// stands. The path/operation/response walk itself lives in extractRawResponseSchemaForAction, which
+// warnIdentifiersMatchPolicyOmitted also uses -- it needs the ENVELOPE rather than the item, to ask how
+// many items the response can carry. Sharing the walk is deliberate: a second copy of it would be a
+// second thing to keep in step with per-verb document resolution.
+func ExtractSchemaForAction(docs *DocumentSet, verbs []Verb, targetAction string, config *GeneratorConfig) (*Schema, error) {
+	schema, itemsPath, err := extractRawResponseSchemaForAction(docs, verbs, targetAction, config)
+	if err != nil {
+		return nil, err
+	}
+
+	// For 'findby' we want ONE ITEM of the collection, not the response envelope.
+	//
+	// This used to unwrap only when the 200 schema was itself an array, so an envelope --
+	// {total, values:[...]}, which is what most real APIs return -- left the envelope as the base schema.
+	// Everything downstream then looked for identifiers that were a level deeper than it was searching:
+	// their types degraded to string, and the not-resolvable warning fired identically whether the
+	// identifier was valid or genuinely absent, which made it useless for the one job it exists to do
+	// (#110).
+	if strings.EqualFold(targetAction, ActionFindBy) {
+		return unwrapFindByItems(schema, itemsPath)
+	}
+	return schema.deepCopy(), nil
+}
+
+// extractRawResponseSchemaForAction returns targetAction's success-response schema exactly as the
+// document declares it, together with the matched verb's ItemsPath.
+//
+// "Raw" is the whole point: for a findby this is the ENVELOPE, before unwrapFindByItems reduces it to one
+// item. Callers that want the item call ExtractSchemaForAction; the only caller that wants the envelope is
+// the identifiersMatchPolicy warning, which asks how many items the response can carry -- a question the
+// unwrapped item schema can no longer answer, since by then a collection and a single object look alike.
+//
 // docs.For(targetAction) is the ONLY place in the codebase where a verb meets a document, which is why
 // per-verb oasPath (#108) lands here and nowhere else. While that feature is unimplemented the set holds
 // one document and For always returns it, so this is the same lookup it has always been.
-func ExtractSchemaForAction(docs *DocumentSet, verbs []Verb, targetAction string, config *GeneratorConfig) (*Schema, error) {
+func extractRawResponseSchemaForAction(docs *DocumentSet, verbs []Verb, targetAction string, config *GeneratorConfig) (*Schema, string, error) {
 	doc := docs.For(targetAction)
 	var verbFound bool
 	for _, verb := range verbs {
@@ -194,22 +227,19 @@ func ExtractSchemaForAction(docs *DocumentSet, verbs []Verb, targetAction string
 		}
 		verbFound = true
 
-		//log.Printf("Verb matched for action '%s': %s %s", targetAction, verb.Method, verb.Path)
-
 		path, ok := doc.FindPath(verb.Path)
 		if !ok {
-			return nil, fmt.Errorf("path '%s' not found in OAS document", verb.Path)
+			return nil, "", fmt.Errorf("path '%s' not found in OAS document", verb.Path)
 		}
 
 		ops := path.GetOperations()
 		op, ok := ops[strings.ToLower(verb.Method)]
 		if !ok {
-			return nil, fmt.Errorf("method '%s' not found for path '%s'", verb.Method, verb.Path)
+			return nil, "", fmt.Errorf("method '%s' not found for path '%s'", verb.Method, verb.Path)
 		}
 
 		responses := op.GetResponses()
 		if responses == nil {
-			// log.Printf("No responses defined for action '%s' in verb %s %s", targetAction, verb.Method, verb.Path)
 			continue // Or return an error if responses are expected
 		}
 
@@ -224,27 +254,14 @@ func ExtractSchemaForAction(docs *DocumentSet, verbs []Verb, targetAction string
 				if !ok || schema == nil {
 					continue
 				}
-
-				// For 'findby' we want ONE ITEM of the collection, not the response envelope.
-				//
-				// This used to unwrap only when the 200 schema was itself an array, so an envelope --
-				// {total, values:[...]}, which is what most real APIs return -- left the envelope as the
-				// base schema. Everything downstream then looked for identifiers that were a level deeper
-				// than it was searching: their types degraded to string, and the not-resolvable warning
-				// fired identically whether the identifier was valid or genuinely absent, which made it
-				// useless for the one job it exists to do (#110).
-				if strings.EqualFold(targetAction, ActionFindBy) {
-					return unwrapFindByItems(schema, verb.ItemsPath)
-				}
-				// For other actions, we return the schema as is
-				return schema.deepCopy(), nil
+				return schema, verb.ItemsPath, nil
 			}
 		}
 	}
 
 	if !verbFound {
-		return nil, fmt.Errorf("action '%s' not defined in resource verbs", targetAction)
+		return nil, "", fmt.Errorf("action '%s' not defined in resource verbs", targetAction)
 	}
 
-	return nil, fmt.Errorf("no suitable response schema found for action '%s'", targetAction)
+	return nil, "", fmt.Errorf("no suitable response schema found for action '%s'", targetAction)
 }
