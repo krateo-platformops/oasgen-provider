@@ -37,6 +37,31 @@ type StatusError struct {
 	// So IsNotFoundError deliberately still returns true for these: every existing caller keeps its
 	// behaviour, and only a caller that asks the narrower question gets the narrower answer.
 	Synthesised bool
+	// BodySnippet is the vendor's own response text, read off the failed response and capped, and it is
+	// DELIBERATELY NOT PART OF Error(). That omission is the whole mechanism (#433).
+	//
+	// Every error a reconciler returns lands verbatim in the Synced condition message -- and, on
+	// unstructured-runtime, on Ready's too -- where it is readable by anyone with `get` on the resource.
+	// That is a far wider audience than a Secret's RBAC, and a vendor error body is attacker-influenced
+	// text of unknown content that may echo whatever was submitted. provider-runtime#28 (merged, 499ea69)
+	// makes it a rule: providers summarise in the returned error and log the full body at Info, capped.
+	//
+	// WHY A FIELD RATHER THAN A SANITISER. There is no way to ensure a vendor puts safe values in
+	// predictable keys: a vendor may send prose under `code`, or a credential under `field`. A key-name
+	// allowlist would be a heuristic that LOOKS like a guarantee, which this package already argues
+	// against -- "a redactor that misses is worse than none: it invites the assumption that what got
+	// through is safe." The only text safe by construction is text we generated ourselves.
+	//
+	// So the split is by PROVENANCE: Error() carries only our own words (the operation and the status
+	// code), and the vendor's text is reachable only by a caller that names this field. Nothing can leak
+	// it by accident, because the accident -- %v on the error -- no longer reaches it.
+	//
+	// Same precedent as Header above, and the same as DiscardedServerURLs in clienttools.go: nothing in
+	// this package logs, so the layer that has a logger reads the field and says so. That layer must log
+	// it at Info, not Debug: rest-dynamic-controller defaults REST_CONTROLLER_DEBUG to false and the
+	// Deployment oasgen renders passes no -debug, so Debug reaches nobody on a default install -- which
+	// would discard the explanation rather than relocate it, re-creating #334.
+	BodySnippet string
 }
 
 func (e *StatusError) Error() string {
@@ -48,6 +73,24 @@ func (e *StatusError) Error() string {
 
 func (e *StatusError) Unwrap() error {
 	return e.Inner
+}
+
+// VendorBodySnippet returns the vendor's own response text carried by err, or "" if there is none.
+//
+// THE ONLY WAY TO REACH IT, deliberately. It is not in Error(), so a caller that wants the vendor's
+// explanation has to name this function -- which makes putting it somewhere inappropriate a visible act
+// rather than a side effect of %v or %w (#433).
+//
+// Log the result at INFO, never into a condition and never at Debug. A condition is readable by anyone
+// with `get` on the resource; Debug reaches nobody on a default rest-dynamic-controller install. And never
+// log a credential at any level: Krateo exports logs to the platform's log store, so a log line is
+// narrower than a condition but is not private.
+func VendorBodySnippet(err error) string {
+	se := new(StatusError)
+	if err == nil || !errors.As(err, &se) {
+		return ""
+	}
+	return se.BodySnippet
 }
 
 // HasStatusErr returns true if err is a ResponseError caused by any of the codes given.

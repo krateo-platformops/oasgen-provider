@@ -24,6 +24,24 @@ const (
 	// Distinct from a 401, which is deliberately NOT in this family: a 401 is what a credential being
 	// rotated under us looks like, and retrying it is how rotation is tolerated (#313).
 	ReasonAuthorizationDenied string = "AuthorizationDenied"
+	// ReasonCreateFailed and ReasonUpdateFailed say the verb was attempted and failed in a way that
+	// retrying cannot change -- today, an endpoint the host policy refuses, which no reconcile will
+	// permit until an operator edits the allowlist or the document.
+	//
+	// THEY EXIST BECAUSE "Creating" READS AS PROGRESS. The runtime sets Creating on both create outcomes
+	// and separates them only on Synced, so a permanently stuck resource reported Ready=False/Creating --
+	// and a composition rollup, a portal pill and an operator all read that as "still working on it".
+	// The distinction was living in the MESSAGE, which consumers cannot branch on because it is ours to
+	// reword freely; a reason is a contract and a message is prose (#42, requested by the portal).
+	//
+	// Named so they cannot be read as transient: "CreateError" would imply a retry is coming, which is
+	// the one thing that is not true here. Mapped to childFailed by core-provider#323.
+	//
+	// There is deliberately NO DeleteFailed. A refused delete holds its finalizer (#261) and a
+	// terminal-looking Ready reason there invites the finalizer removal that orphans a resource which
+	// still exists and still costs money.
+	ReasonCreateFailed string = "CreateFailed"
+	ReasonUpdateFailed string = "UpdateFailed"
 	// ReasonResponseObtained and ReasonNoResponseBody are the two states of TypeObserved below.
 	ReasonResponseObtained string = "ResponseObtained"
 	ReasonNoResponseBody   string = "NoResponseBody"
@@ -133,6 +151,34 @@ func DriftNotConverging(field, detail string) metav1.Condition {
 // `get` on the CR while an error reaches logs and events, which are operator-only. #334 made that call for
 // error bodies generally and this follows it rather than carving out an exception for the one body most
 // likely to describe someone's permission model. The message says where to look instead.
+// CreateFailed and UpdateFailed report a verb that failed permanently, carrying the cause in the message
+// while the REASON carries the only distinction a consumer can key on: this is not converging.
+//
+// The detail goes in the message rather than into more reasons on purpose. A refused endpoint, a malformed
+// request and a rejected payload are all "attempted, failed, will not self-correct" to every consumer of
+// the rollup, and splitting them would multiply a cross-repo contract to say something only a human reads.
+func CreateFailed(detail string) metav1.Condition {
+	return permanentVerbFailure(ReasonCreateFailed, "create", detail)
+}
+
+func UpdateFailed(detail string) metav1.Condition {
+	return permanentVerbFailure(ReasonUpdateFailed, "update", detail)
+}
+
+func permanentVerbFailure(reason, verb, detail string) metav1.Condition {
+	msg := "the " + verb + " request will not be retried because it cannot succeed as declared"
+	if detail != "" {
+		msg = msg + ": " + detail
+	}
+	return metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             reason,
+		Message:            msg,
+	}
+}
+
 func AuthorizationDenied(verb string) metav1.Condition {
 	msg := "the API refused this request for the configured credential; see the controller log for the API's explanation"
 	if verb != "" {

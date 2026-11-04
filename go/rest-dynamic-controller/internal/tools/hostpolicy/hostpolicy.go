@@ -29,6 +29,7 @@ package hostpolicy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -309,22 +310,40 @@ func normaliseHost(h string) (string, error) {
 // PermitsURL reports whether a request to u is allowed by the host list. It does NOT check the resolved
 // address -- that is the dialer's job (see DialContext), because only the dialer sees what is actually
 // being connected to.
+// ErrEndpointNotPermitted marks every refusal this package issues, so a caller can tell "the request was
+// never sent, and will not be until configuration changes" from "the request was sent and failed".
+//
+// IT EXISTS BECAUSE A REFUSAL IS PERMANENT AND NOTHING COULD SEE THAT. Every return here was an untyped
+// fmt.Errorf -- 29 of them -- so a reconciler had no way to distinguish a refused endpoint from a transient
+// vendor failure, and reported both as "still creating". A resource whose endpoint is not permitted never
+// becomes ready and nothing retried will change it: the remedy is an operator editing the allowlist or the
+// document, which is a human's decision (#42).
+//
+// Sentinel rather than a type, because callers only ever need the yes/no: there is nothing structured to
+// read off a refusal that the message does not already say better, and errors.Is is cheaper to use
+// correctly than errors.As with a pointer-to-pointer.
+//
+// Wrapped with %w at EVERY return, including the two "no policy configured" / "no URL" cases. Those are
+// programming errors rather than configuration ones, but they are equally permanent and equally not the
+// vendor's fault, and a caller that treated them as transient would retry a nil policy forever.
+var ErrEndpointNotPermitted = errors.New("endpoint not permitted by the host policy")
+
 func (p *Policy) PermitsURL(u *url.URL) error {
 	if p == nil {
-		return fmt.Errorf("refusing to send a credentialed request: no host policy is configured")
+		return fmt.Errorf("refusing to send a credentialed request: no host policy is configured: %w", ErrEndpointNotPermitted)
 	}
 	if p.allowAny {
 		return nil
 	}
 	if u == nil {
-		return fmt.Errorf("refusing to send a credentialed request: no URL")
+		return fmt.Errorf("refusing to send a credentialed request: no URL: %w", ErrEndpointNotPermitted)
 	}
 	// Hostname(), not Host: it discards userinfo and brackets. buildPath can produce
 	// "https://@evil.example.com", whose Host is evil.example.com but whose raw string a prefix check
 	// would read as starting with something else.
 	host, err := normaliseHost(u.Hostname())
 	if err != nil {
-		return fmt.Errorf("refusing to send a credentialed request to %q: %w", u.Host, err)
+		return fmt.Errorf("refusing to send a credentialed request to %q: %w: %w", u.Host, err, ErrEndpointNotPermitted)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	port := u.Port()
@@ -335,7 +354,7 @@ func (p *Policy) PermitsURL(u *url.URL) error {
 		case "http":
 			port = "80"
 		default:
-			return fmt.Errorf("refusing to send a credentialed request to %q: unsupported scheme %q", u.Host, scheme)
+			return fmt.Errorf("refusing to send a credentialed request to %q: unsupported scheme %q: %w", u.Host, scheme, ErrEndpointNotPermitted)
 		}
 	}
 	for _, e := range p.entries {
@@ -345,10 +364,10 @@ func (p *Policy) PermitsURL(u *url.URL) error {
 	}
 	if len(p.entries) == 0 {
 		return fmt.Errorf("refusing to send a credentialed request to %q: no endpoint is permitted, because the "+
-			"OAS document names no usable server and the operator allowlist is empty", host)
+			"OAS document names no usable server and the operator allowlist is empty: %w", host, ErrEndpointNotPermitted)
 	}
 	return fmt.Errorf("refusing to send a credentialed request to %q: it is not the document's server and is "+
-		"not in the operator's endpoint allowlist (%s)", net.JoinHostPort(host, port), p.describe())
+		"not in the operator's endpoint allowlist (%s): %w", net.JoinHostPort(host, port), p.describe(), ErrEndpointNotPermitted)
 }
 
 func (e entry) matches(host, port, scheme string) bool {

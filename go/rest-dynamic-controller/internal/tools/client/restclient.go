@@ -74,11 +74,8 @@ const maxErrorBodyBytes = 2048
 // statusCodeError builds the inner error for a rejected status, with the vendor's explanation when there is
 // one. Both request paths use it so their messages cannot drift apart -- an asymmetry between those two
 // sites has already caused several defects in this package.
-func statusCodeError(code int, snippet string) error {
-	if snippet == "" {
-		return fmt.Errorf("invalid status code: %d", code)
-	}
-	return fmt.Errorf("invalid status code: %d: %s", code, snippet)
+func statusCodeError(code int) error {
+	return fmt.Errorf("invalid status code: %d", code)
 }
 
 // errorBodySnippet reads up to maxErrorBodyBytes of a failed response so the VENDOR'S OWN EXPLANATION
@@ -364,8 +361,12 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 	if !HasValidStatusCode(resp.StatusCode, validStatusCodes...) {
 		return Response{}, &StatusError{
 			StatusCode: resp.StatusCode,
-			Inner:      statusCodeError(resp.StatusCode, errorBodySnippet(resp.Body)),
+			Inner:      statusCodeError(resp.StatusCode),
 			Header:     resp.Header,
+			// The vendor's text goes on the field, NOT into Inner: Inner is what Error() renders and
+			// therefore what reaches a condition message (#433). The body is still READ either way, so
+			// connection reuse is unaffected -- what changed is where it is readable from.
+			BodySnippet: errorBodySnippet(resp.Body),
 		}
 	}
 
@@ -871,8 +872,12 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 	if !HasValidStatusCode(resp.StatusCode, validStatusCodes...) {
 		return Response{}, nil, &StatusError{
 			StatusCode: resp.StatusCode,
-			Inner:      statusCodeError(resp.StatusCode, errorBodySnippet(resp.Body)),
+			Inner:      statusCodeError(resp.StatusCode),
 			Header:     resp.Header,
+			// The vendor's text goes on the field, NOT into Inner: Inner is what Error() renders and
+			// therefore what reaches a condition message (#433). The body is still READ either way, so
+			// connection reuse is unaffected -- what changed is where it is readable from.
+			BodySnippet: errorBodySnippet(resp.Body),
 		}
 	}
 

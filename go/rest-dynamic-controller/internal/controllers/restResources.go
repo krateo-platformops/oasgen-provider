@@ -364,7 +364,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}
 		if err != nil {
 			log.Error(err, "Performing REST call")
-			return controller.ExternalObservation{}, err
+			logVendorBody(log, "get", mg, err)
+			return controller.ExternalObservation{}, h.observeAuthorizationDenied(ctx, mg, "get", err, log)
 		}
 	} else {
 		observeAction = "findby"
@@ -462,7 +463,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}
 		if err != nil {
 			log.Error(err, "Performing REST call")
-			return controller.ExternalObservation{}, err
+			logVendorBody(log, "findby", mg, err)
+			return controller.ExternalObservation{}, h.observeAuthorizationDenied(ctx, mg, "findby", err, log)
 		}
 	}
 
@@ -760,12 +762,122 @@ func lastReconcileErrored(mg *unstructured.Unstructured) bool {
 	return false
 }
 
+// logVendorBody puts the vendor's own response text in the log, at INFO, and nowhere else (#433).
+//
+// It is the other half of moving that text off the returned error. The error now carries only our own
+// words -- the operation and the status code -- because every returned error lands verbatim in the Synced
+// condition message, and on Ready's too under unstructured-runtime, where anyone with `get` on the
+// resource can read it. A vendor error body is attacker-influenced text of unknown content.
+//
+// INFO, NOT DEBUG, and that is measured rather than stylistic: rest-dynamic-controller defaults
+// REST_CONTROLLER_DEBUG to false and the Deployment oasgen renders passes no -debug, so a Debug line
+// reaches nobody on a default install. Logging it there would DISCARD the explanation rather than
+// relocate it, re-creating the defect #334 was filed for -- a measured 34-minute investigation whose
+// entire answer was the sentence the controller threw away.
+//
+// Called at every site that surfaces a failed call, so the four cannot drift: an operator who finds the
+// condition uninformative must find the detail in the log for the same reconcile, whichever verb it was.
+//
+// A no-op when there is no snippet, so a 404 with an empty body adds no line.
+func logVendorBody(log logging.Logger, verb string, mg *unstructured.Unstructured, err error) {
+	snippet := restclient.VendorBodySnippet(err)
+	if snippet == "" {
+		return
+	}
+	log.Info("Vendor rejected the request; its explanation follows and is deliberately NOT on the resource",
+		"kind", mg.GetKind(), "name", mg.GetName(), "verb", verb, "vendorResponse", snippet)
+}
+
+// stopOnEndpointRefusal reports whether err is the host policy refusing the request, and if so records a
+// terminal Ready reason so the resource does not read as "still creating" forever (#42).
+//
+// A REFUSAL IS PERMANENT AND NOTHING COULD SEE THAT UNTIL NOW. Every refusal hostpolicy issued was an
+// untyped fmt.Errorf, so a reconciler could not distinguish "the request was never sent, and will not be
+// until an operator edits the allowlist" from "the vendor had a bad minute". hostpolicy now wraps
+// ErrEndpointNotPermitted into each one, which is what makes this classifiable rather than guessed.
+//
+// SAME CONTRACT AS stopOnAuthorizationDenied: true means the caller must STOP, returning nil rather than
+// the error. Retrying cannot change a configuration decision, and the condition recorded here is what
+// tells the operator which one.
+//
+// And note what this does NOT need: no ReadyAssessed wrap. The caller returns nil, so the runtime never
+// takes its failure path and never overwrites Ready. The wrap is only required where an error is returned
+// -- the Observe and async paths -- and adding it here would be cargo-cult.
+//
+// NOT CALLED BY Delete, for the same reason stopOnAuthorizationDenied is not: stopping a delete lets the
+// finalizer be removed while the external resource still exists. Asserted at the source level, for both
+// guards, by TestDeleteDoesNotReachTheGuardINDIRECTLY.
+func (h *handler) stopOnEndpointRefusal(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) bool {
+	if !errors.Is(err, hostpolicy.ErrEndpointNotPermitted) {
+		return false
+	}
+	cond := customcondition.CreateFailed(err.Error())
+	if verb == "update" {
+		cond = customcondition.UpdateFailed(err.Error())
+	}
+	if serr := unstructuredtools.SetConditions(mg, cond); serr != nil {
+		log.Error(serr, "Setting condition")
+		return false
+	}
+	h.eventRecorder.Event(mg, event.Warning(reasonUpdated, event.Action(verb), fmt.Errorf(
+		"the %s request for %s was refused before it was sent; it will not be retried until the endpoint "+
+			"policy or the document permits it", verb, mg.GetName())))
+	log.Info("Endpoint refused by the host policy; no longer issuing this verb",
+		"kind", mg.GetKind(), "verb", verb, "error", err.Error())
+	// PERSISTED, not merely set. A condition left in memory is absent from the object the next reconcile
+	// reads, so the resource would go back to reading as Creating on the following pass -- the defect this
+	// exists to fix, returning a minute later.
+	if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+		Pluralizer:    h.pluralizer,
+		DynamicClient: h.dynamicClient,
+	}); uerr != nil {
+		log.Error(uerr, "Updating status")
+		return false
+	}
+	return true
+}
+
+// observeAuthorizationDenied classifies a failed OBSERVE call, so a permanent refusal does not reach the
+// runtime as a generic "could not observe" (#436).
+//
+// IT STILL RETURNS AN ERROR, and that is the difference from create and update. There the caller returns
+// nil to stop retrying; here nil would be a disaster: Observe returning ExternalObservation{} with no error
+// means "the external resource does not exist and is not up to date", which dispatches a CREATE. A 403 on a
+// read would then provoke a write. So Observe must surface the error, and the only thing worth changing is
+// WHICH Ready condition survives it.
+//
+// Without this, unstructured-runtime's handleObserve writes Ready=Unknown/ObserveFailed (worker.go:649),
+// which per core-provider's rollup buckets as CONVERGING -- so a credential that cannot read presents as an
+// install still in progress, indefinitely, and the installer's gate (strict on False/<anything>) never
+// emits a dependent. With it, the CR keeps AuthorizationDenied, which the rollup reads as failed.
+//
+// Reuses stopOnAuthorizationDenied for the whole recording path -- condition, event, log and the status
+// write -- so the two cannot describe the same refusal differently. Its FALSE return is the safe fallback
+// in both of its meanings: either the error was not a permanent refusal, or recording it failed. Either way
+// the bare error goes back and the runtime's generic reason is correct, because we did not establish a
+// specific one.
+func (h *handler) observeAuthorizationDenied(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) error {
+	if !h.stopOnAuthorizationDenied(ctx, mg, verb, err, log) {
+		return err
+	}
+	// The wrap is only meaningful because stopOnAuthorizationDenied PERSISTED the condition above: the
+	// object handleObserve writes Synced onto is a fresh re-fetch from the apiserver, so a condition set in
+	// memory and never written would simply be absent, with Ready showing whatever was in etcd and nothing
+	// erroring or logging. Persist-then-wrap; neither half works alone.
+	return controller.ReadyAssessed(err)
+}
+
 // stopOnAuthorizationDenied reports whether err is a permanent authorisation refusal, and if so records it
 // on the CR so the refusal is visible without reading logs.
 //
-// Returns true when the caller must STOP rather than return the error. Returning the error would retry the
-// same verb with the same credential on every reconcile, forever: a 403 with no rate-limit signal is a
-// decision, and nothing the controller does next can change it (#313).
+// Returns true when the caller must STOP rather than return the error -- which is what CREATE and UPDATE do.
+// Returning the error would retry the same verb with the same credential on every reconcile, forever: a 403
+// with no rate-limit signal is a decision, and nothing the controller does next can change it (#313).
+//
+// OBSERVE USES IT DIFFERENTLY: see observeAuthorizationDenied directly above. It takes the recording and
+// still returns an error, because a nil from Observe means "does not exist" and would dispatch a create.
+// So "the caller must stop" is true of two of the three callers, and this comment named only those two
+// until #436 added the third.
 //
 // NOT USED BY Delete, deliberately, and that asymmetry is the point. A refused delete leaves the external
 // resource in place; stopping there would let the finalizer be removed and the CR disappear while the thing
@@ -973,7 +1085,11 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		if h.stopOnAuthorizationDenied(ctx, mg, "create", err, log) {
 			return nil
 		}
+		if h.stopOnEndpointRefusal(ctx, mg, "create", err, log) {
+			return nil
+		}
 		log.Error(err, "Performing REST call")
+		logVendorBody(log, "create", mg, err)
 		return err
 	}
 
@@ -1170,7 +1286,11 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		if h.stopOnAuthorizationDenied(ctx, mg, "update", err, log) {
 			return nil
 		}
+		if h.stopOnEndpointRefusal(ctx, mg, "update", err, log) {
+			return nil
+		}
 		log.Error(err, "Performing REST call")
+		logVendorBody(log, "update", mg, err)
 		return err
 	}
 
