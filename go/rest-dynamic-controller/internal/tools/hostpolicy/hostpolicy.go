@@ -124,7 +124,7 @@ type Config struct {
 func Parse(allowlist, documentHosts []string, allowAny bool) (*Policy, []Discarded, error) {
 	p := &Policy{allowAny: allowAny}
 	for _, raw := range allowlist {
-		e, err := parseEntry(raw)
+		e, err := parseEntry(raw, originOperator)
 		if err != nil {
 			return nil, nil, fmt.Errorf("endpoint allowlist entry %q: %w", raw, err)
 		}
@@ -135,7 +135,7 @@ func Parse(allowlist, documentHosts []string, allowAny bool) (*Policy, []Discard
 		// A document host arrives as a full server URL. It is permitted with its OWN scheme, including
 		// cleartext: the document is operator-supplied content, and refusing http:// here would break a
 		// document that names one without giving the operator anything to change.
-		e, err := parseEntry(raw)
+		e, err := parseEntry(raw, originDocument)
 		if err != nil {
 			// NOT FATAL, and the reason for that stands: a server URL we cannot parse is a document
 			// problem, and refusing to build the client over it would make the whole kind unreconcilable
@@ -172,9 +172,27 @@ type Discarded struct {
 	Reason error
 }
 
+// entryOrigin says which of Parse's two inputs an entry came from. The two are NOT interchangeable and
+// one rule differs between them -- see the path step below -- so the distinction is a parameter rather
+// than a comment, and both call sites have to state which they are.
+type entryOrigin int
+
+const (
+	// originOperator is an entry from chart values: a HOST the operator is naming.
+	originOperator entryOrigin = iota
+	// originDocument is a full server URL out of the OAS document, which legitimately carries a path.
+	originDocument
+)
+
 // parseEntry normalises one entry. See the package doc for why each step is here.
-func parseEntry(raw string) (entry, error) {
-	raw = strings.TrimSpace(raw)
+func parseEntry(raw string, origin entryOrigin) (entry, error) {
+	// Lowercased ONCE, here, before anything inspects the string. The scheme prefix test below is a
+	// byte-exact lowercase HasPrefix, so `HTTPS://Example.COM` used to fall through to "unsupported
+	// scheme: only http:// and https:// are permitted" -- confusing precisely because the operator wrote
+	// one of them. The host was already lowercased later in normaliseHost, so case was handled for the
+	// host and not for the scheme within one entry (#402). Lowercasing the whole entry costs nothing:
+	// ports are digits and the only other syntax is `*.` and `/`.
+	raw = strings.ToLower(strings.TrimSpace(raw))
 	if raw == "" {
 		return entry{}, fmt.Errorf("is empty")
 	}
@@ -194,8 +212,26 @@ func parseEntry(raw string) (entry, error) {
 	case strings.Contains(raw, "://"):
 		return entry{}, fmt.Errorf("unsupported scheme: only http:// and https:// are permitted")
 	}
-	// A server URL carries a path; it plays no part in matching a destination host.
+	// A server URL carries a path; it plays no part in matching a destination host, so it is discarded.
+	//
+	// BUT THE TWO ORIGINS GET DIFFERENT TREATMENT, and conflating them is a live hazard rather than a
+	// tidiness point. A DOCUMENT server URL legitimately carries a path -- GHES serves its REST API under
+	// /api/v3 -- so discarding it silently is correct there. An OPERATOR entry with a path is always a
+	// mistake, and discarding it silently is how `example.com/*` became an EXACT entry: truncation ran
+	// before the wildcard checks, so the `*` sat in the discarded path and was never seen by the checks
+	// that exist to reject a misplaced one. The operator then gets a refusal naming a host while their
+	// values file visibly contains something that looks like it should match (#402).
+	//
+	// Rejecting rather than reinterpreting, because the error can say what to write instead and a silent
+	// reinterpretation cannot. The cost is real and accepted: an operator can no longer paste a document's
+	// servers[0] verbatim into the allowlist, which worked before.
 	if i := strings.IndexByte(raw, '/'); i >= 0 {
+		path := raw[i:]
+		if origin == originOperator && path != "/" {
+			return entry{}, fmt.Errorf("a path plays no part in matching a host, so %q is ignored: "+
+				"write %q for that host alone, or %q for its subdomains",
+				path, raw[:i], "*."+strings.TrimPrefix(raw[:i], "*."))
+		}
 		raw = raw[:i]
 	}
 	if raw == "" {
