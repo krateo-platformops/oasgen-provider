@@ -866,12 +866,25 @@ func (e *external) versionSelectorFor(version string) string {
 // resource that is otherwise healthy, and on a cluster whose RBAC lagged the chart it would break every
 // RestDefinition at once. A warning plus an event makes the absence visible without that blast radius.
 //
-// EnsureVersionPolicy already returns nil on a cluster that does not serve the API (< 1.36), so this
-// stays quiet there rather than warning once per reconcile.
+// IT DOES WARN ONCE PER RECONCILE ON A CLUSTER WITHOUT THE API, AND THAT IS NOW CORRECT. This comment
+// used to say the opposite -- that EnsureVersionPolicy "already returns nil on a cluster that does not
+// serve the API (< 1.36), so this stays quiet there". It does not: all three IsUnsupported branches
+// return &ErrPolicyAPIUnsupported (policy.go:297, :313, :333), a non-nil error, so the warning and the
+// VersionPolicyNotEnsured event below fire on every pass.
 //
-// This is hygiene today, because rest-dynamic-controller stamps the label itself when it observes an
-// instance without one. It becomes load-bearing once watching is version-scoped: an unlabelled instance
-// then matches no controller's watch, so it is never observed, so that fallback never runs.
+// The comment was true of a world that ended at 0.28.0, when the chart floor moved 1.33 -> 1.36 and an
+// absent MutatingAdmissionPolicy API became an error "where it used to be tolerated". A cluster without
+// the API can now only be reached by bypassing the chart, which refuses to install below 1.36 -- and in
+// that configuration instances ARE being admitted unlabelled and matched by no controller's watch. That
+// is a persistent, serious misconfiguration, so persistent noise is proportionate rather than spam, and
+// the apiserver aggregates duplicate events rather than creating one per pass.
+//
+// The second stale claim, also corrected: this is NOT "hygiene today because rest-dynamic-controller
+// stamps the label itself". That fallback existed in 0.27.0 and was REMOVED in 0.28.0, replaced by
+// backfillVersionLabel, which stamps the same value by selecting on label absence. So the policy is
+// load-bearing now rather than becoming so later: an unlabelled instance matches no controller's watch,
+// is never observed, and -- because the listwatcher filters SERVER-SIDE on both ListFunc and WatchFunc --
+// cannot carry a condition or an event saying so.
 func (e *external) ensureVersionPolicyBestEffort(ctx context.Context, cr *definitionv1alpha1.RestDefinition) {
 	outcome, err := policy.EnsureVersionPolicy(ctx, e.kube, cr.Spec.ResourceGroup)
 	if err != nil {
