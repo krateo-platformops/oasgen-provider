@@ -7,6 +7,7 @@ import (
 
 	"github.com/pb33f/libopenapi"
 	v2 "github.com/pb33f/libopenapi/datamodel/high/v2"
+	"github.com/pb33f/libopenapi/orderedmap"
 	"gopkg.in/yaml.v3"
 )
 
@@ -277,6 +278,12 @@ func convertV2Parameter(p *v2.Parameter) ParameterInfo {
 // ambiguity convertLibopenapiSchema has to warn about.
 func synthesiseV2ParameterSchema(p *v2.Parameter) *Schema {
 	s := &Schema{Format: p.Format}
+	// x-nullable, by hand, because a Swagger 2.0 NON-BODY parameter never reaches the shared converter --
+	// it has no `schema` at all, which is the same reason #255 had to hand-copy the validation keywords
+	// here. v2.Parameter has no Nullable field, so the extension is the only channel that exists.
+	if xn, ok := extensionBool(p.Extensions, "x-nullable"); ok && xn {
+		s.Nullable = true
+	}
 	if p.Type != "" {
 		s.Type = []string{p.Type}
 	}
@@ -314,6 +321,14 @@ func synthesiseV2ItemsSchema(items *v2.Items) *Schema {
 		return nil
 	}
 	s := &Schema{Format: items.Format}
+	// NO x-nullable HERE, AND NOT BECAUSE IT WAS FORGOTTEN. libopenapi's v2.Items type has no Extensions
+	// field at all -- the compiler refuses `items.Extensions` -- so a Swagger 2.0 document cannot express
+	// a nullable ITEM of a non-body parameter through any channel we could read. Swagger 2.0 itself has no
+	// keyword for it either.
+	//
+	// Stated rather than silently omitted, because the next person to extend nullability will look for
+	// this site and should find the reason instead of an oversight. If libopenapi ever surfaces the
+	// extension map here, this is where it goes, read with extensionBool like the other two sites.
 	if items.Type != "" {
 		s.Type = []string{items.Type}
 	}
@@ -409,6 +424,28 @@ func v2Float64(p *int) *float64 {
 
 func v2Bool(p *bool) bool {
 	return p != nil && *p
+}
+
+// extensionBool reads a boolean extension from a libopenapi extension map, reporting whether it was
+// present at all so a caller can tell `x-nullable: false` from absent.
+//
+// Lives beside decodeYAMLNode and uses it, so the three call sites -- the shared converter and the two
+// hand-built Swagger 2.0 sites -- read the extension exactly the same way. A second spelling of this
+// would be the seam the next partial fix slips through.
+func extensionBool(ext *orderedmap.Map[string, *yaml.Node], key string) (value bool, present bool) {
+	if ext == nil {
+		return false, false
+	}
+	n := ext.GetOrZero(key)
+	if n == nil {
+		return false, false
+	}
+	b, ok := decodeYAMLNode(n).(bool)
+	if !ok {
+		log.Printf("extension %q is declared with a non-boolean value, which cannot be honoured; it is ignored", key)
+		return false, false
+	}
+	return b, true
 }
 
 func decodeYAMLNode(n *yaml.Node) interface{} {

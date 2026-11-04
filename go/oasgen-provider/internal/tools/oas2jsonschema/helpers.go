@@ -310,6 +310,15 @@ func schemaToMapWithVisited(
 	if schema.MaxProperties > 0 {
 		m["maxProperties"] = schema.MaxProperties
 	}
+	if schema.MinProperties != nil {
+		m["minProperties"] = *schema.MinProperties
+	}
+
+	// nullable is emitted only when true: apiextensions treats false and absent identically, so writing
+	// the default would add a key to every property in every generated CRD for no gain.
+	if schema.Nullable {
+		m["nullable"] = true
+	}
 
 	// Process object properties
 	if len(schema.Properties) > 0 {

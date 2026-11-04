@@ -194,8 +194,24 @@ type Schema struct {
 	Enum                 []interface{}
 	AdditionalProperties *AdditionalProperties
 	MaxProperties        int
-	Format               string                 // JSON Schema "format"; numeric formats (int32/int64/float/double) are emitted into the generated schema, all formats are also added to the description
-	Extensions           map[string]interface{} // Currently not used but can hold custom extensions
+	// MinProperties is a POINTER where MaxProperties is a plain int, deliberately. MaxProperties is
+	// emitted under a `> 0` guard, which conflates "declared as 0" with "not declared". For a maximum
+	// that is pathological; for a minimum, `minProperties: 0` is meaningful and is JSON Schema's own
+	// default, so the distinction has to survive. Matches MinItems/MaxItems, which are already *int64,
+	// rather than matching its own neighbour (#423).
+	MinProperties *int64
+	// Nullable carries OAS 3.0's `nullable: true` and Swagger 2.0's `x-nullable` into the generated CRD.
+	//
+	// A bool rather than a pointer because `nullable: false` and absent mean the same thing to
+	// apiextensions, so there is nothing for a third state to express.
+	//
+	// OAS 3.1 needs nothing here: it spells nullability as `type: [T, "null"]`, which already survives
+	// because Type is a []string the converter copies whole, getPrimaryType skips "null", and schemaToMap
+	// emits a multi-element type as a JSON array. That is why 3.1 worked while 3.0 and 2.0 did not --
+	// 3.1 expresses it inside a field that was already carried (#420).
+	Nullable   bool
+	Format     string                 // JSON Schema "format"; numeric formats (int32/int64/float/double) are emitted into the generated schema, all formats are also added to the description
+	Extensions map[string]interface{} // Currently not used but can hold custom extensions
 
 	// --- validation keywords (#249) ---
 	//
@@ -395,6 +411,11 @@ func (s *Schema) deepCopyRec(visited map[*Schema]*Schema) *Schema {
 		newSchema.AdditionalProperties = ap
 	}
 	newSchema.MaxProperties = s.MaxProperties
+	if s.MinProperties != nil {
+		v := *s.MinProperties
+		newSchema.MinProperties = &v
+	}
+	newSchema.Nullable = s.Nullable
 	newSchema.Format = s.Format
 
 	// Extensions was dropped here before #249 -- found by the reflection guard rather than by looking,
