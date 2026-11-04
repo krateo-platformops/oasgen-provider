@@ -760,6 +760,55 @@ func lastReconcileErrored(mg *unstructured.Unstructured) bool {
 	return false
 }
 
+// stopOnEndpointRefusal reports whether err is the host policy refusing the request, and if so records a
+// terminal Ready reason so the resource does not read as "still creating" forever (#42).
+//
+// A REFUSAL IS PERMANENT AND NOTHING COULD SEE THAT UNTIL NOW. Every refusal hostpolicy issued was an
+// untyped fmt.Errorf, so a reconciler could not distinguish "the request was never sent, and will not be
+// until an operator edits the allowlist" from "the vendor had a bad minute". hostpolicy now wraps
+// ErrEndpointNotPermitted into each one, which is what makes this classifiable rather than guessed.
+//
+// SAME CONTRACT AS stopOnAuthorizationDenied: true means the caller must STOP, returning nil rather than
+// the error. Retrying cannot change a configuration decision, and the condition recorded here is what
+// tells the operator which one.
+//
+// And note what this does NOT need: no ReadyAssessed wrap. The caller returns nil, so the runtime never
+// takes its failure path and never overwrites Ready. The wrap is only required where an error is returned
+// -- the Observe and async paths -- and adding it here would be cargo-cult.
+//
+// NOT CALLED BY Delete, for the same reason stopOnAuthorizationDenied is not: stopping a delete lets the
+// finalizer be removed while the external resource still exists. Asserted at the source level, for both
+// guards, by TestDeleteDoesNotReachTheGuardINDIRECTLY.
+func (h *handler) stopOnEndpointRefusal(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) bool {
+	if !errors.Is(err, hostpolicy.ErrEndpointNotPermitted) {
+		return false
+	}
+	cond := customcondition.CreateFailed(err.Error())
+	if verb == "update" {
+		cond = customcondition.UpdateFailed(err.Error())
+	}
+	if serr := unstructuredtools.SetConditions(mg, cond); serr != nil {
+		log.Error(serr, "Setting condition")
+		return false
+	}
+	h.eventRecorder.Event(mg, event.Warning(reasonUpdated, event.Action(verb), fmt.Errorf(
+		"the %s request for %s was refused before it was sent; it will not be retried until the endpoint "+
+			"policy or the document permits it", verb, mg.GetName())))
+	log.Info("Endpoint refused by the host policy; no longer issuing this verb",
+		"kind", mg.GetKind(), "verb", verb, "error", err.Error())
+	// PERSISTED, not merely set. A condition left in memory is absent from the object the next reconcile
+	// reads, so the resource would go back to reading as Creating on the following pass -- the defect this
+	// exists to fix, returning a minute later.
+	if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+		Pluralizer:    h.pluralizer,
+		DynamicClient: h.dynamicClient,
+	}); uerr != nil {
+		log.Error(uerr, "Updating status")
+		return false
+	}
+	return true
+}
+
 // observeAuthorizationDenied classifies a failed OBSERVE call, so a permanent refusal does not reach the
 // runtime as a generic "could not observe" (#436).
 //
@@ -1008,6 +1057,9 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		if h.stopOnAuthorizationDenied(ctx, mg, "create", err, log) {
 			return nil
 		}
+		if h.stopOnEndpointRefusal(ctx, mg, "create", err, log) {
+			return nil
+		}
 		log.Error(err, "Performing REST call")
 		return err
 	}
@@ -1203,6 +1255,9 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	h.emitAudit(ctx, mg, cli.ServerURL(), callInfo.Method, externalStatusCode(&response, err), err)
 	if err != nil {
 		if h.stopOnAuthorizationDenied(ctx, mg, "update", err, log) {
+			return nil
+		}
+		if h.stopOnEndpointRefusal(ctx, mg, "update", err, log) {
 			return nil
 		}
 		log.Error(err, "Performing REST call")

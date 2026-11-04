@@ -119,8 +119,20 @@ func TestDeleteDoesNotReachTheGuardINDIRECTLY(t *testing.T) {
 		calls[fn.Name.Name] = out
 	}
 
+	// BOTH stop-guards, because #42 added a second one and Delete must reach NEITHER for the same
+	// reason: stopping a delete lets the finalizer be removed while the external resource still exists
+	// (#261). Enumerated here rather than discovered, so adding a third guard without adding it to this
+	// list is a visible omission in a diff rather than a silent gap.
+	guards := []string{"stopOnAuthorizationDenied", "stopOnEndpointRefusal"}
+	for _, guard := range guards {
+		t.Run(guard, func(t *testing.T) { assertDeleteDoesNotReach(t, fset, calls, guard) })
+	}
+}
+
+func assertDeleteDoesNotReach(t *testing.T, fset *token.FileSet, calls map[string]map[string]bool, guard string) {
+	t.Helper()
+	_ = fset
 	// Fixpoint: a method reaches the guard if it calls it, or calls anything that reaches it.
-	const guard = "stopOnAuthorizationDenied"
 	reaches := map[string]bool{guard: true}
 	for changed := true; changed; {
 		changed = false
@@ -152,11 +164,16 @@ func TestDeleteDoesNotReachTheGuardINDIRECTLY(t *testing.T) {
 			"external resource; #261 settled that an unverifiable delete holds it. If a wrapper made this "+
 			"path look harmless, it is not -- the wrapper still stops.", guard, calls["Delete"])
 
-	// Observe SHOULD reach it as of #436, via observeAuthorizationDenied. Asserted so that the wiring
-	// cannot be silently removed: without it a permanent 403 on a read falls back to the runtime's generic
-	// ObserveFailed, which a composition rollup buckets as CONVERGING -- a credential that cannot read
-	// then presents as an install still in progress, indefinitely.
-	require.True(t, reaches["Observe"],
-		"Observe no longer reaches %s, so a permanent 403 on a read is reported as a generic observe "+
-			"failure and rolls up as converging rather than failed (#436)", guard)
+	// Observe SHOULD reach the 403 guard as of #436, via observeAuthorizationDenied. Asserted so the
+	// wiring cannot be silently removed: without it a permanent 403 on a read falls back to the runtime's
+	// generic ObserveFailed, which a composition rollup buckets as CONVERGING -- a credential that cannot
+	// read then presents as an install still in progress, indefinitely.
+	//
+	// Only for that guard: an endpoint refusal on the OBSERVE path is a separate decision nobody has
+	// taken, and asserting it here would pin a behaviour that does not exist.
+	if guard == "stopOnAuthorizationDenied" {
+		require.True(t, reaches["Observe"],
+			"Observe no longer reaches %s, so a permanent 403 on a read is reported as a generic observe "+
+				"failure and rolls up as converging rather than failed (#436)", guard)
+	}
 }
