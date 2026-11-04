@@ -82,7 +82,24 @@ func TestPathItemParameterSuppressedByFieldMapping(t *testing.T) {
 	specBytes, warnings, err := g.BuildSpecSchema()
 	require.NoError(t, err)
 	require.NotNil(t, specBytes)
-	require.Empty(t, warnings)
+
+	// THIS ASSERTION USED TO BE require.Empty(t, warnings), and that silence was the defect (#409).
+	//
+	// The removal below is correct and unchanged. What was wrong is that it happened with no signal: the
+	// generated spec sets neither additionalProperties:false nor x-kubernetes-preserve-unknown-fields, so
+	// an existing CR setting `uuid` has the value PRUNED by the API server rather than rejected --
+	// `kubectl apply` succeeds, `get -o yaml` stops showing it, and nothing says why. Meanwhile
+	// excludedSpecFields WARNS when it matches nothing, so a stanza doing no work was loud while a
+	// property leaving the schema was quiet. The asymmetry was backwards.
+	//
+	// Asserted on the SHIPPED message via mappingRemovalMessage rather than on a copy of its text: a test
+	// that rebuilds the string passes whatever the real one says.
+	require.Len(t, warnings, 1, "the removal must be reported; its silence is #409")
+	require.Contains(t, warnings[0].Error(),
+		mappingRemovalMessage("uuid", mappingSource{action: "get", in: "path", from: "spec.name"}),
+		"the warning must name the property, the verb whose mapping removed it, and the CR path the value "+
+			"now comes from -- a message saying a field was removed and not by WHAT sends the author to "+
+			"read every verb's fieldMapping")
 
 	var schema map[string]any
 	require.NoError(t, json.Unmarshal(specBytes, &schema))
