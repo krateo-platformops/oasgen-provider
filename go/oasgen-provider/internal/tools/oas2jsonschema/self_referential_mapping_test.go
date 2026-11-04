@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -54,6 +55,35 @@ paths:
         '202': {description: accepted}
 `
 
+// bodyAndPathSameNameSpec is the consumer's GA shape: `username` is BOTH a create-body property (with its
+// own minLength) and a get path parameter (with its own maxLength), mapped self-referentially from
+// spec.username. The two declare DIFFERENT keywords, which is what makes the merge observable without a
+// conflict confusing the result.
+const bodyAndPathSameNameSpec = `
+openapi: 3.0.3
+info: {title: aruba, version: "1.0"}
+paths:
+  /users:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: {type: string, minLength: 3}
+                password: {type: string}
+      responses:
+        '201': {description: created}
+  /users/{username}:
+    get:
+      parameters:
+        - {name: username, in: path, required: true, schema: {type: string, maxLength: 64}}
+      responses:
+        '200': {description: ok}
+`
+
 func selfRefSpecFor(t *testing.T, mapping []FieldMappingEntry) (map[string]any, []any, []error) {
 	t.Helper()
 	doc, err := NewLibOASParser().Parse([]byte(selfReferentialSpec))
@@ -95,6 +125,60 @@ func TestSelfReferentialMappingLeavesItsOwnSourceInTheSpec(t *testing.T) {
 	for _, w := range warnings {
 		require.NotContains(t, w.Error(), "is omitted from the generated spec because verb",
 			"a removal warning for a property that is still present is the #409 false positive again")
+	}
+}
+
+// CASE 1b — THE CONSEQUENCE A CONSUMER FOUND BEFORE THE TAG, pinned because it is deliberate.
+//
+// When the parameter's name is ALSO a create-body property, the property has an independent origin and
+// never disappeared, so #419 was never a breakage for that shape. A consumer with three GA kinds in
+// exactly this configuration asked why their verbs executed correctly if the property was being deleted --
+// and the answer is that it was not. Their three are unaffected by the DEFECT.
+//
+// But they are NOT unaffected by the FIX, and that is worth a test rather than a release note alone.
+// Lifting the suppression lets execution reach reconcileParameterValidation at the end of
+// addParametersToSpec, which merges the parameter's validation keywords into the body property. So the
+// generated property gains the parameter's constraints where before it kept only the body's.
+//
+// THAT IS #257's BEHAVIOUR FINALLY REACHING A CASE THE SUPPRESSION WAS HIDING IT FROM, not a new defect.
+// #257's own words: a colliding parameter's keywords "used to be discarded entirely... Worse than not
+// supporting the keyword, because the document reads as though the constraint applies." The suppression
+// was bypassing that fix for every mapping-supplied parameter. Narrowing #419 to avoid the merge would
+// have reintroduced #257 for this class, which is why it is pinned here instead of avoided.
+//
+// It IS a tightening -- a CR that previously passed admission can now be rejected -- which is the same
+// consumer-visible consequence 0.49.0 carried for #257 itself, and it belongs in the release note.
+func TestASelfReferentialMappingNowCarriesTheParametersKeywordsOntoABodyProperty(t *testing.T) {
+	doc, err := NewLibOASParser().Parse([]byte(bodyAndPathSameNameSpec))
+	require.NoError(t, err)
+	g := NewOASSchemaGenerator(doc, DefaultGeneratorConfig(), &ResourceConfig{
+		Verbs: []Verb{
+			{Action: "create", Method: "post", Path: "/users"},
+			{Action: "get", Method: "get", Path: "/users/{username}",
+				FieldMapping: []FieldMappingEntry{{InPath: "username", InCustomResource: "spec.username"}}},
+		},
+		Identifiers: []string{"username"},
+	})
+	raw, warnings, err := g.BuildSpecSchema()
+	require.NoError(t, err)
+	var spec map[string]any
+	require.NoError(t, json.Unmarshal(raw, &spec))
+	props, _ := spec["properties"].(map[string]any)
+	u, ok := props["username"].(map[string]any)
+	require.True(t, ok, "premise: the property must exist from the create BODY, independently of the parameter")
+
+	assert.EqualValues(t, 3, u["minLength"], "the body's own constraint must survive")
+	assert.EqualValues(t, 64, u["maxLength"],
+		"the PARAMETER's constraint now reaches the property too (#257's merge, which the suppression was "+
+			"bypassing). A value longer than 64 cannot work in the URL, so carrying it is the faithful "+
+			"result -- and it is a TIGHTENING, which belongs in the release note")
+
+	// No conflict here because the two declare different keywords rather than the same one differently.
+	// A test that merely counted warnings would pass for the wrong reason, so assert the absence of the
+	// specific conflict rather than emptiness.
+	for _, w := range warnings {
+		assert.NotContains(t, w.Error(), "maxLength",
+			"body and parameter declare DIFFERENT keywords, so there is nothing to conflict over")
 	}
 }
 
