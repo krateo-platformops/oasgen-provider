@@ -43,7 +43,39 @@ func Apply(ctx context.Context, kube client.Client, obj client.Object, opts Appl
 			}
 			return kube.Update(ctx, obj, updateOpts)
 		},
+		retry.RetryIf(retryableAPIError),
 	)
+}
+
+// retryableAPIError reports whether err is worth retrying. These three operations used retry.Do with NO
+// options, so every error got the library defaults -- 10 attempts with exponential backoff from 100ms,
+// which is ~50 SECONDS of waiting before giving up.
+//
+// MEASURED: a single Forbidden injected into one Delete took a unit test from milliseconds to 51.6s. And
+// it cannot succeed: RBAC does not change inside the backoff, a malformed object does not become valid,
+// and a method the apiserver does not support does not start supporting it. The retry spends a minute
+// establishing what the first attempt already knew.
+//
+// The cost is not just latency. Uninstall runs during Delete, holding the finalizer -- so a permission
+// error stalls teardown for ~50s per object, and nothing retries afterwards because the caller is already
+// in its final pass. That is also what made collecting errors across namespaces look expensive rather
+// than correct: the price was the pointless retry, not the extra namespaces.
+//
+// Everything NOT listed here still retries exactly as before: conflicts, timeouts, server errors, "too
+// many requests" and connection failures are all transient and are what the retry was added for.
+func retryableAPIError(err error) bool {
+	switch {
+	case apierrors.IsForbidden(err),
+		apierrors.IsUnauthorized(err),
+		apierrors.IsInvalid(err),
+		apierrors.IsBadRequest(err),
+		apierrors.IsMethodNotSupported(err),
+		apierrors.IsNotAcceptable(err),
+		apierrors.IsRequestEntityTooLargeError(err):
+		// Permanent by construction: the apiserver has judged the request itself, not its timing.
+		return false
+	}
+	return true
 }
 
 func Uninstall(ctx context.Context, kube client.Client, obj client.Object, opts UninstallOptions) error {
@@ -78,6 +110,7 @@ func Uninstall(ctx context.Context, kube client.Client, obj client.Object, opts 
 			}
 			return nil
 		},
+		retry.RetryIf(retryableAPIError),
 	)
 }
 
@@ -115,6 +148,7 @@ func UninstallFromReference(ctx context.Context, kube client.Client, ref v1.Obje
 			}
 			return nil
 		},
+		retry.RetryIf(retryableAPIError),
 	)
 }
 
