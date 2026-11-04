@@ -26,6 +26,7 @@ func TestSchemaDeepCopyCopiesEveryField(t *testing.T) {
 	minLen, maxLen := int64(3), int64(255)
 	minItems, maxItems := int64(1), int64(5)
 	minimum, maximum, multipleOf := 1.5, 99.5, 0.5
+	minProps := int64(2)
 
 	original := &Schema{
 		Type:                 []string{"object"},
@@ -38,6 +39,8 @@ func TestSchemaDeepCopyCopiesEveryField(t *testing.T) {
 		Enum:                 []interface{}{"a", "b"},
 		AdditionalProperties: &AdditionalProperties{Bool: true},
 		MaxProperties:        7,
+		MinProperties:        &minProps,
+		Nullable:             true,
 		Format:               "int64",
 		Extensions:           map[string]interface{}{"x-foo": "bar"},
 		Pattern:              "^(heads|tags)/.+",
@@ -77,6 +80,13 @@ func TestSchemaDeepCopyCopiesEveryField(t *testing.T) {
 
 	// And the values must match, not merely be present.
 	assert.Equal(t, original.Pattern, copied.Pattern)
+	assert.Equal(t, original.Nullable, copied.Nullable, "#420")
+	// MinProperties is a pointer, so assert the VALUE and that the copy does not share the original's
+	// pointer -- a deepCopy that assigned the pointer would pass a presence check and alias the source.
+	require.NotNil(t, copied.MinProperties, "#423")
+	assert.Equal(t, *original.MinProperties, *copied.MinProperties, "#423")
+	assert.NotSame(t, original.MinProperties, copied.MinProperties,
+		"deepCopy must copy the pointed-to value, not share the pointer")
 	require.NotNil(t, copied.MinLength)
 	assert.Equal(t, minLen, *copied.MinLength)
 	require.NotNil(t, copied.Minimum)

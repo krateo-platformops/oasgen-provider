@@ -405,6 +405,24 @@ func convertLibopenapiSchemaWithVisited(
 	if s.MaxProperties != nil {
 		domainSchema.MaxProperties = int(*s.MaxProperties)
 	}
+	if s.MinProperties != nil {
+		domainSchema.MinProperties = s.MinProperties
+	}
+
+	// NULLABILITY, from BOTH spellings, in the shared converter rather than per document version.
+	//
+	// `nullable` is OAS 3.0's keyword; `x-nullable` is what the Swagger 2.0 ecosystem actually uses, and
+	// it arrives only as an extension because 2.0 has no such keyword. Reading both here is what stops
+	// this becoming the repo's recurring defect: a feature that reaches one document path through the
+	// shared converter and silently skips every hand-built one (#249 shipped OAS-3-only and #255 had to
+	// follow it). An OAS 3 document carrying `x-nullable` meant the same thing by it, so honouring it
+	// everywhere costs nothing and removes the version branch that would otherwise be the place to forget.
+	if s.Nullable != nil && *s.Nullable {
+		domainSchema.Nullable = true
+	}
+	if xn, ok := extensionBool(s.Extensions, "x-nullable"); ok && xn {
+		domainSchema.Nullable = true
+	}
 
 	// Format handling
 	// Preserve the format on the domain schema so numeric widths (notably int64)
