@@ -248,7 +248,7 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 				}
 			}
 
-			if mappingSupplied[param.Name] {
+			if src, mapped := mappingSupplied[param.Name]; mapped {
 				// Supplied by a fieldMapping: not the author's to provide, so neither required, nor
 				// present in spec, nor protected from excludedSpecFields pruning.
 				//
@@ -259,6 +259,28 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 				// parameters this change touches.
 				if _, exists := uniqueParams[param.Name]; !exists {
 					uniqueParams[param.Name] = paramOrigin{action: verb.Action, doc: verbDoc, schema: param.Schema}
+
+					// SAY SO. This removal has been silent since 0.43.0, and the asymmetry was backwards:
+					// excludedSpecFields WARNS when it matches nothing -- a stanza doing no work is loud --
+					// while a mapping removing a property an author may have been setting emitted nothing.
+					// The generated spec sets neither additionalProperties:false nor
+					// x-kubernetes-preserve-unknown-fields, so the API server PRUNES rather than rejects:
+					// an existing CR keeps working with the value dropped, `kubectl apply` succeeds, and
+					// `get -o yaml` simply stops showing it. The case that changes what a CR MEANS was the
+					// quiet one (#409).
+					//
+					// A WARNING, not an error: by #327's rationale no request changes, because the request
+					// already took the mapped value. Nothing here is broken -- it is a property leaving the
+					// schema, which an author must be able to find out about.
+					//
+					// Named BY THE MAPPING, so a reader of this message and of the excludedSpecFields
+					// not-found warning can tell which one is now doing the work. Below 0.43.0 the
+					// exclusion was load-bearing and silent; at or above it the exclusion is inert and
+					// loud, and neither message mentions the version boundary.
+					warnings = append(warnings, SchemaGenerationError{
+						Code:    CodeFieldNotFound,
+						Message: mappingRemovalMessage(param.Name, src),
+					})
 				}
 				continue
 			}
@@ -782,8 +804,8 @@ func (g *OASSchemaGenerator) removeFieldAtPathRec(ctx context.Context, schema *S
 // body's own `required` -- the two must not overlap, because that function's doc comment is explicit that
 // pruning a PARAMETER afterwards would silently unrequire one that merely shares a name with a
 // resolver-supplied body field.
-func mappingSuppliedParams(verbs []Verb) map[string]bool {
-	supplied := map[string]bool{}
+func mappingSuppliedParams(verbs []Verb) map[string]mappingSource {
+	supplied := map[string]mappingSource{}
 	for _, verb := range verbs {
 		for _, m := range verb.FieldMapping {
 			// A request-direction entry names its source in the CR. An entry with no source is a
@@ -792,15 +814,45 @@ func mappingSuppliedParams(verbs []Verb) map[string]bool {
 			if m.InCustomResource == "" {
 				continue
 			}
+			// FIRST declaration wins the attribution, matching uniqueParams' own first-seen rule, so the
+			// warning names a stable verb across renders rather than whichever one verbsDescription
+			// happens to list last.
 			if m.InPath != "" {
-				supplied[m.InPath] = true
+				if _, seen := supplied[m.InPath]; !seen {
+					supplied[m.InPath] = mappingSource{action: verb.Action, in: "path", from: m.InCustomResource}
+				}
 			}
 			if m.InQuery != "" {
-				supplied[m.InQuery] = true
+				if _, seen := supplied[m.InQuery]; !seen {
+					supplied[m.InQuery] = mappingSource{action: verb.Action, in: "query", from: m.InCustomResource}
+				}
 			}
 		}
 	}
 	return supplied
+}
+
+// mappingRemovalMessage is the text for a parameter omitted from the spec because a request-direction
+// fieldMapping supplies it (#409).
+//
+// EXTRACTED rather than built inline, so a test asserts the shipped string instead of a reimplementation
+// of it: a test that rebuilds the message passes whatever the real one says, which is the failure where a
+// rule and the artifact it produces are each verified alone and never against each other.
+func mappingRemovalMessage(param string, src mappingSource) string {
+	return fmt.Sprintf("parameter %q is omitted from the generated spec because verb %q supplies it with a "+
+		"request-direction fieldMapping (in%s, from %q), so it is not the author's to set. If a CR "+
+		"previously set %q, that value is now pruned by the API server rather than rejected. Remove it "+
+		"from the CR, or remove the fieldMapping if the author should supply it",
+		param, src.action, strings.ToUpper(src.in[:1])+src.in[1:], src.from, param)
+}
+
+// mappingSource records WHICH mapping suppressed a parameter, so the warning can name the verb and the CR
+// path rather than only the property. A warning that says a field was removed and not by what sends the
+// author to read every verb's fieldMapping to find out (#409).
+type mappingSource struct {
+	action string
+	in     string // "path" or "query"
+	from   string // the inCustomResource path the value is taken from
 }
 
 func dropResolverSuppliedRequired(schema *Schema, verbs []Verb) {
