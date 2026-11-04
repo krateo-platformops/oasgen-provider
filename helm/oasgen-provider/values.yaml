@@ -118,6 +118,14 @@ rdc:
   # has to be asked for), and may use a single leading `*.` wildcard, which matches one or more leading
   # labels and NOT the bare suffix. A bare `*` is rejected at startup; see allowAnyHost below.
   #
+  # A PATH IS REFUSED AT STARTUP, with a message saying what to write instead. A path plays no part in
+  # matching a host, so pasting a document's `servers[0]` verbatim -- `https://ghe.corp.example.com/api/v3`
+  # -- does not belong here; write the host alone. The refusal exists because `example.com/*` used to be
+  # accepted as an EXACT entry for example.com: the path was discarded before the `*` checks ran, so the
+  # `*` was never seen, and sub.example.com was then refused while this file visibly contained something
+  # that looks like it should match (#402). The document's own server URLs are unaffected -- those
+  # legitimately carry a path and are read from the document, not from here.
+  #
   #   endpointAllowlist:
   #     - ghe.corp.example.com
   #     - ghe.corp.example.com:8443
