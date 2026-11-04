@@ -1014,55 +1014,55 @@ paths:
 // 400` while the vendor had said "There is already a backup policy assigned to the resource" -- the entire
 // explanation for a 34-minute investigation, discarded because StatusError was built before the body was
 // read.
-func TestFailedCallCarriesTheVendorExplanation(t *testing.T) {
+func TestTheVendorExplanationIsReachableButNotInTheErrorString(t *testing.T) {
+	// #433 changed WHERE the vendor's explanation lives, not whether it survives. It used to be embedded
+	// in the error, which lands verbatim in the Synced condition message -- and on Ready's too under
+	// unstructured-runtime -- readable by anyone with `get` on the resource. A vendor error body is
+	// attacker-influenced text of unknown content, so provider-runtime#28 (499ea69) makes summarising a
+	// rule: our own words in the error, the vendor's body logged at Info, capped.
+	//
+	// THE CASES BELOW ARE THE ORIGINAL ONES FROM #334 and they still matter: collapsing, truncation and
+	// whitespace handling are properties of the snippet whichever channel carries it. What changed is the
+	// assertion TARGET, and the pair of assertions is the point -- present in the snippet, absent from
+	// the error. Either alone would pass a regression: asserting only the snippet passes if the error
+	// also carries it, and asserting only the absence passes if the snippet was dropped entirely.
 	cases := []struct {
-		name         string
-		status       int
-		body         string
-		wantContains []string
-		wantAbsent   []string
+		name          string
+		status        int
+		body          string
+		wantInSnippet []string
+		absentSnippet []string
 	}{
 		{
-			name:         "the vendor's message reaches the error",
-			status:       http.StatusBadRequest,
-			body:         `{"errorMessage":"There is already a backup policy assigned to the resource"}`,
-			wantContains: []string{"400", "There is already a backup policy assigned to the resource"},
+			name:          "the vendor's message is reachable",
+			status:        http.StatusBadRequest,
+			body:          `{"errorMessage":"There is already a backup policy assigned to the resource"}`,
+			wantInSnippet: []string{"There is already a backup policy assigned to the resource"},
 		},
 		{
-			// No body is the common case for a 404 and must not produce a dangling colon or an empty tail.
-			name:         "an empty body leaves the old wording intact",
-			status:       http.StatusInternalServerError,
-			body:         "",
-			wantContains: []string{"invalid status code: 500"},
-			// Not `"500: "` -- that appears in StatusError's own outer format
-			// (`unexpected status: %d: %v`). The dangling fragment to exclude is a colon-space after the
-			// INNER code with nothing following it.
-			wantAbsent: []string{"invalid status code: 500: "},
+			// No body is the common case for a 404 and must not produce a dangling fragment anywhere.
+			name:   "an empty body yields an empty snippet",
+			status: http.StatusInternalServerError,
+			body:   "",
 		},
 		{
-			// Whitespace-only is the same as empty: a reader gains nothing from "400: ".
-			name:         "a whitespace-only body is treated as empty",
-			status:       http.StatusBadRequest,
-			body:         "\n\n   \t\n",
-			wantContains: []string{"invalid status code: 400"},
-			wantAbsent:   []string{"invalid status code: 400: "},
+			name:   "a whitespace-only body is treated as empty",
+			status: http.StatusBadRequest,
+			body:   "\n\n   \t\n",
 		},
 		{
-			// A multi-line body must collapse: an error spanning lines is unreadable in a log line and in
-			// kubectl output.
-			name:         "a multi-line body is collapsed to one line",
-			status:       http.StatusConflict,
-			body:         "line one\nline two\n\tline three",
-			wantContains: []string{"line one line two line three"},
-			wantAbsent:   []string{"\n"},
+			// A snippet spanning lines is unreadable in a log line, which is now its only destination.
+			name:          "a multi-line body is collapsed to one line",
+			status:        http.StatusBadRequest,
+			body:          "line one\nline two\n\tline three",
+			wantInSnippet: []string{"line one line two line three"},
+			absentSnippet: []string{"\n"},
 		},
 		{
-			// An oversized body is capped and SAYS it was capped, so a clipped sentence is not mistaken for
-			// the vendor's whole answer. 2 KiB + slack of 'x' must come back marked.
-			name:         "an oversized body is truncated and marked",
-			status:       http.StatusBadGateway,
-			body:         strings.Repeat("x", maxErrorBodyBytes+500),
-			wantContains: []string{"[truncated]"},
+			name:          "an oversized body is truncated and marked",
+			status:        http.StatusBadRequest,
+			body:          strings.Repeat("x", maxErrorBodyBytes+500),
+			wantInSnippet: []string{"[truncated]"},
 		},
 	}
 
@@ -1084,11 +1084,29 @@ func TestFailedCallCarriesTheVendorExplanation(t *testing.T) {
 			require.Error(t, err, "a rejected status must still be an error")
 
 			msg := err.Error()
-			for _, want := range tc.wantContains {
-				assert.Contains(t, msg, want, "the error a reconciler surfaces must carry this")
+			snippet := VendorBodySnippet(err)
+
+			// OUR OWN WORDS ARE STILL THERE. Without this the test passes against an error that says
+			// nothing at all, which would be a worse regression than the one it guards.
+			assert.Contains(t, msg, fmt.Sprintf("%d", tc.status),
+				"the error a reconciler surfaces must still name the status code: that is our text, not "+
+					"the vendor's, and it is the minimum an operator needs to classify the failure")
+
+			for _, want := range tc.wantInSnippet {
+				assert.Contains(t, snippet, want,
+					"the vendor's explanation must still be REACHABLE via VendorBodySnippet -- #433 "+
+						"relocated it, and discarding it would re-create #334's 34-minute investigation")
 			}
-			for _, absent := range tc.wantAbsent {
-				assert.NotContains(t, msg, absent, "this would be a dangling or unreadable fragment")
+			for _, absent := range tc.absentSnippet {
+				assert.NotContains(t, snippet, absent, "this would be an unreadable fragment in a log line")
+			}
+
+			// THE #433 PROPERTY. The vendor's text must not be in the string that reaches a condition.
+			if snippet != "" {
+				assert.NotContains(t, msg, snippet,
+					"the vendor's response text is in err.Error(), so it reaches the Synced condition "+
+						"message (and Ready's, under unstructured-runtime) where anyone with `get` on the "+
+						"resource can read it. It must be reachable only through VendorBodySnippet")
 			}
 		})
 	}

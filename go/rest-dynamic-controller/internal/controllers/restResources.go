@@ -364,6 +364,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}
 		if err != nil {
 			log.Error(err, "Performing REST call")
+			logVendorBody(log, "get", mg, err)
 			return controller.ExternalObservation{}, h.observeAuthorizationDenied(ctx, mg, "get", err, log)
 		}
 	} else {
@@ -462,6 +463,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}
 		if err != nil {
 			log.Error(err, "Performing REST call")
+			logVendorBody(log, "findby", mg, err)
 			return controller.ExternalObservation{}, h.observeAuthorizationDenied(ctx, mg, "findby", err, log)
 		}
 	}
@@ -758,6 +760,32 @@ func lastReconcileErrored(mg *unstructured.Unstructured) bool {
 		}
 	}
 	return false
+}
+
+// logVendorBody puts the vendor's own response text in the log, at INFO, and nowhere else (#433).
+//
+// It is the other half of moving that text off the returned error. The error now carries only our own
+// words -- the operation and the status code -- because every returned error lands verbatim in the Synced
+// condition message, and on Ready's too under unstructured-runtime, where anyone with `get` on the
+// resource can read it. A vendor error body is attacker-influenced text of unknown content.
+//
+// INFO, NOT DEBUG, and that is measured rather than stylistic: rest-dynamic-controller defaults
+// REST_CONTROLLER_DEBUG to false and the Deployment oasgen renders passes no -debug, so a Debug line
+// reaches nobody on a default install. Logging it there would DISCARD the explanation rather than
+// relocate it, re-creating the defect #334 was filed for -- a measured 34-minute investigation whose
+// entire answer was the sentence the controller threw away.
+//
+// Called at every site that surfaces a failed call, so the four cannot drift: an operator who finds the
+// condition uninformative must find the detail in the log for the same reconcile, whichever verb it was.
+//
+// A no-op when there is no snippet, so a 404 with an empty body adds no line.
+func logVendorBody(log logging.Logger, verb string, mg *unstructured.Unstructured, err error) {
+	snippet := restclient.VendorBodySnippet(err)
+	if snippet == "" {
+		return
+	}
+	log.Info("Vendor rejected the request; its explanation follows and is deliberately NOT on the resource",
+		"kind", mg.GetKind(), "name", mg.GetName(), "verb", verb, "vendorResponse", snippet)
 }
 
 // stopOnEndpointRefusal reports whether err is the host policy refusing the request, and if so records a
@@ -1061,6 +1089,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 			return nil
 		}
 		log.Error(err, "Performing REST call")
+		logVendorBody(log, "create", mg, err)
 		return err
 	}
 
@@ -1261,6 +1290,7 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 			return nil
 		}
 		log.Error(err, "Performing REST call")
+		logVendorBody(log, "update", mg, err)
 		return err
 	}
 
