@@ -67,6 +67,40 @@ type DeployOptions struct {
 	DryRunServer bool
 }
 
+// absenceOrError classifies a failed Get for Lookup, which must be able to say "not deployed yet" WITHOUT
+// saying "I could not tell". Returns nil when err means the object genuinely does not exist, and otherwise
+// logs and returns err.
+//
+// THE THREE CALL SITES USED TO RETURN ("", nil) FOR EVERY FAILURE, which reported a failed lookup as a
+// successful EMPTY one (#427). Observe then compared status.Digest against "" , concluded drift, and called
+// Update -- forever, for as long as the underlying error persisted, re-applying identical manifests.
+//
+// That contradicted the rule the other three drift inputs state explicitly in their own comments: a
+// transient failure is NOT drift, "to avoid flapping when the OAS source is briefly unreachable"
+// (restdefinition.go:449), "for the same reason as the OAS check" (:496), and "a transient List failure
+// must not flap a healthy resource into Creating" (:516). This input is the fourth and it did the
+// opposite, invisibly, because its caller cannot distinguish an empty digest from a failed one.
+//
+// And since the drift branches began reporting Ready=False/Creating with a message naming the drift, the
+// consequence stopped being a wasteful loop and became a PUBLISHED WRONG DIAGNOSIS: "the deployed
+// resources drifted from the render; redeploying", propagated by core-provider's rollup to the owning
+// composition, when nothing drifted and nothing needs redeploying.
+//
+// ONE CLASSIFIER FOR THREE SITES rather than three copies of the branch. The three were identical in
+// shape and all three were wrong the same way, which is how a fix editing them in place misses one.
+//
+// The model is crd.Lookup (internal/tools/crd/crd.go:49-56), which has always made exactly this split for
+// exactly this question.
+func absenceOrError(log func(msg string, keysAndValues ...any), msg string, err error) error {
+	if apierrors.IsNotFound(err) {
+		// A true answer, not a dropped one: a first install has nothing deployed, and Observe relies on
+		// an empty digest to mean that.
+		return nil
+	}
+	logError(log, msg, err)
+	return err
+}
+
 func logError(log func(msg string, keysAndValues ...any), msg string, err error) {
 	if log != nil {
 		log(msg, "error", err)
@@ -581,7 +615,10 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 
 	err = lookupRBACResources(ctx, opts.KubeClient, clusterrole, clusterrolebinding, role, rolebinding, sa, opts.Log, &hsh)
 	if err != nil {
-		return "", nil
+		// This site also gains its own log line. It was the only one of the three that logged nothing
+		// itself, so the sole reason a failure here was visible at all is that lookupRBACResources logged
+		// on its way out -- via opts.Log, which is e.log.Debug.
+		return "", absenceOrError(opts.Log, "Error looking up RBAC resources", err)
 	}
 
 	cmNSName := types.NamespacedName{
@@ -598,8 +635,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 
 	err = kubecli.Get(ctx, opts.KubeClient, &cm)
 	if err != nil {
-		logError(opts.Log, "Error fetching configmap", err)
-		return "", nil
+		return "", absenceOrError(opts.Log, "Error fetching configmap", err)
 	}
 	err = hsh.SumHash(cm.ObjectMeta.Name, cm.ObjectMeta.Namespace, cm.Data)
 	if err != nil {
@@ -624,8 +660,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 
 	err = kubecli.Get(ctx, opts.KubeClient, &dep)
 	if err != nil {
-		logError(opts.Log, "Error fetching deployment", err)
-		return "", nil
+		return "", absenceOrError(opts.Log, "Error fetching deployment", err)
 	}
 
 	deployment.CleanFromRestartAnnotation(&dep)
