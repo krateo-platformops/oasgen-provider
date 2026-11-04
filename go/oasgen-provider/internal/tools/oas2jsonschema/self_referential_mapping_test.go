@@ -59,6 +59,33 @@ paths:
 // own minLength) and a get path parameter (with its own maxLength), mapped self-referentially from
 // spec.username. The two declare DIFFERENT keywords, which is what makes the merge observable without a
 // conflict confusing the result.
+// bareParamSameNameSpec is a consumer's MEASURED shape: the path parameter is bare `{"type":"string"}`
+// while the body property carries a description. Four of their four path parameters look like this, which
+// is why #257's merge has nothing to merge for them.
+const bareParamSameNameSpec = `
+openapi: 3.0.3
+info: {title: aruba, version: "1.0"}
+paths:
+  /users:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: {type: string, description: "The username of the new database user."}
+      responses:
+        '201': {description: created}
+  /users/{username}:
+    get:
+      parameters:
+        - {name: username, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: ok}
+`
+
 const bodyAndPathSameNameSpec = `
 openapi: 3.0.3
 info: {title: aruba, version: "1.0"}
@@ -179,6 +206,64 @@ func TestASelfReferentialMappingNowCarriesTheParametersKeywordsOntoABodyProperty
 	for _, w := range warnings {
 		assert.NotContains(t, w.Error(), "maxLength",
 			"body and parameter declare DIFFERENT keywords, so there is nothing to conflict over")
+	}
+}
+
+// CASE 1c — THE NO-CHANGE CASE, and a consumer had to point out that I only had the change case.
+//
+// Their words, and the correction is the useful part: "a fix verified only against cases where it visibly
+// changes something cannot distinguish 'correctly left alone' from 'didn't run'." Case 1b asserts the
+// parameter's keywords DO arrive. Nothing asserted that a parameter which declares nothing extra leaves
+// the body property exactly as it was.
+//
+// This is their measured shape rather than a constructed one. All four of their path parameters are bare
+// `{"type":"string"}` while the body properties carry descriptions (and in one case `nullable`), so #257's
+// merge has nothing to merge and the tightening in case 1b does not reach them at all. That makes their
+// kinds the inertness case, not the tightening case -- the opposite of what I had told them.
+//
+// WHAT THIS CATCHES THAT 1b CANNOT: a fix that lifted the suppression too broadly, letting the parameter
+// win precedence over the body property. The add path stamps `Description = "PARAMETER: <in>"` on a
+// property it creates, so if the parameter ever displaced the body's property the description would change
+// -- which is why the description is asserted rather than just the type. It is the cheapest available
+// signal that the body property, and not a parameter-derived replacement, is what survived.
+func TestABareSelfReferentialParameterLeavesTheBodyPropertyUntouched(t *testing.T) {
+	doc, err := NewLibOASParser().Parse([]byte(bareParamSameNameSpec))
+	require.NoError(t, err)
+	g := NewOASSchemaGenerator(doc, DefaultGeneratorConfig(), &ResourceConfig{
+		Verbs: []Verb{
+			{Action: "create", Method: "post", Path: "/users"},
+			{Action: "get", Method: "get", Path: "/users/{username}",
+				FieldMapping: []FieldMappingEntry{{InPath: "username", InCustomResource: "spec.username"}}},
+		},
+		Identifiers: []string{"username"},
+	})
+	raw, warnings, err := g.BuildSpecSchema()
+	require.NoError(t, err)
+	var spec map[string]any
+	require.NoError(t, json.Unmarshal(raw, &spec))
+	props, _ := spec["properties"].(map[string]any)
+	u, ok := props["username"].(map[string]any)
+	require.True(t, ok, "premise: the body-derived property must be present")
+
+	// The BODY's own description, not a parameter-stamped one. This is the arm that fails if the parameter
+	// ever displaces the body property.
+	assert.Equal(t, "The username of the new database user.", u["description"],
+		"the body property must survive AS ITSELF; a `PARAMETER: path` description here would mean the "+
+			"parameter displaced it, which is the over-broad lift this case exists to catch")
+
+	// And it must have gained NOTHING. Asserted as the exact key set rather than as the absence of a few
+	// keywords I happened to think of, because the failure mode is a keyword arriving that I did not
+	// predict.
+	keys := make([]string, 0, len(u))
+	for k := range u {
+		keys = append(keys, k)
+	}
+	assert.ElementsMatch(t, []string{"type", "description"}, keys,
+		"a bare parameter declares nothing to merge, so the property's key set must be exactly the body's")
+
+	for _, w := range warnings {
+		assert.NotContains(t, w.Error(), "username",
+			"nothing conflicts and nothing is removed, so there is nothing to report about this property")
 	}
 }
 
