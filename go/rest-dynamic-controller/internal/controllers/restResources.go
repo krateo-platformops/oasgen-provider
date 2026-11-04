@@ -466,6 +466,38 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			logVendorBody(log, "findby", mg, err)
 			return controller.ExternalObservation{}, h.observeAuthorizationDenied(ctx, mg, "findby", err, log)
 		}
+
+		// An OR identifier policy -- THE DEFAULT when identifiersMatchPolicy is omitted -- adopts on the
+		// FIRST declared identifier whose value agrees and never looks at the rest. So with two or more
+		// identifiers declared, the adoption rests on exactly one of them. That is how a CR naming one
+		// object adopted a DIFFERENT one through a single non-unique identifier, reported Synced=True
+		// against it, and then deleted it (#444).
+		//
+		// Said here because this is the innermost layer that has a logger: nothing in the restclient
+		// package logs, so the matcher carries the basis of its decision up on the Response. Same shape as
+		// the DiscardedServerURLs report in clientset.go.
+		//
+		// INFO, not DEBUG. RDC's chart does not turn debug on, so a Debug line would be invisible in a
+		// default install -- and this one names the precondition for deleting a vendor resource the CR
+		// never identified. It is also rate-limited by construction: at most one line per findby reconcile
+		// of an affected CR, and none at all for a kind declaring one identifier or asking for AND.
+		//
+		// Purely diagnostic: the adopted item is whatever it was before this line existed.
+		if response.MatchReport != nil {
+			log.Info("findby adopted an external resource on a SUBSET of the declared identifiers: the OR "+
+				"identifier match policy returns on the first identifier that agrees, so the identifiers "+
+				"listed as notConsulted were never compared. If one of those is the discriminating "+
+				"identifier, this may be the wrong object. Declare identifiersMatchPolicy: AND to require "+
+				"all of them to agree",
+				"kind", mg.GetKind(),
+				"name", mg.GetName(),
+				"matchedIdentifier", response.MatchReport.MatchedIdentifier,
+				"notConsulted", response.MatchReport.NotConsulted,
+				"declaredIdentifiers", response.MatchReport.Declared(),
+				"consultedAbsentFromItem", response.MatchReport.AbsentFromItem,
+				"consultedPresentButDiffering", response.MatchReport.PresentButDiffering,
+				"unparseableIdentifierPaths", response.MatchReport.Unparseable)
+		}
 	}
 
 	// Body-based absence: some APIs signal "not found" with a successful (2xx) body rather than a 404/other

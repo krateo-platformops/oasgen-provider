@@ -1072,7 +1072,7 @@ func TestFindItemInList(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotItem, gotFound, err := tt.client.findItemInList(tt.items)
+			gotItem, gotFound, _, err := tt.client.findItemInList(tt.items)
 			// No case in this table drives a structural comparison failure, so the error must stay nil.
 			// Asserted rather than discarded: a case that started erroring would otherwise read as a
 			// changed match result (#439).
@@ -1298,7 +1298,7 @@ func TestIsItemMatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotMatch, err := tt.client.isItemMatch(tt.itemMap)
+			gotMatch, _, err := tt.client.isItemMatch(tt.itemMap)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("isItemMatch() error = %v, wantErr %v", err, tt.wantErr)
 				return
