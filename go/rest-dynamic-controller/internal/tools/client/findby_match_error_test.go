@@ -26,7 +26,7 @@ func TestAComparisonErrorIsPropagatedNotSwallowed(t *testing.T) {
 		Resource:         nil,
 	}
 
-	item, found, err := u.findItemInList([]interface{}{
+	item, found, _, err := u.findItemInList([]interface{}{
 		map[string]interface{}{"id": "abc123"},
 	})
 
@@ -53,7 +53,7 @@ func TestAnIdentifierAbsentFromTheItemIsStillACleanNoMatch(t *testing.T) {
 		Resource:         res,
 	}
 
-	item, found, err := u.findItemInList([]interface{}{
+	item, found, _, err := u.findItemInList([]interface{}{
 		// The vendor's collection simply has no node_id field, which is the measured real case.
 		map[string]interface{}{"uuid": "n-1", "name": "blade01"},
 		map[string]interface{}{"uuid": "n-2", "name": "blade02"},
@@ -72,7 +72,7 @@ func TestAnIdentifierAbsentFromTheItemIsStillACleanNoMatch(t *testing.T) {
 func TestAnEmptyListIsStillACleanNoMatch(t *testing.T) {
 	u := &UnstructuredClient{IdentifierFields: []string{"id"}, Resource: &unstructured.Unstructured{}}
 
-	item, found, err := u.findItemInList(nil)
+	item, found, _, err := u.findItemInList(nil)
 
 	require.NoError(t, err)
 	assert.False(t, found)

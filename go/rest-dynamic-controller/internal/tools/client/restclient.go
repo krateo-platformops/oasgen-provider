@@ -40,7 +40,18 @@ type Response struct {
 	// guaranteed idempotent, and a per-entry fieldMapping LIFTS a value and then REMOVES its source, so
 	// re-running it finds the source already gone. Silent corruption rather than an error.
 	Normalized bool
-	statusCode int
+	// MatchReport is set ONLY by findby, ONLY on a match, and ONLY when an OR identifier policy decided
+	// that match on a strict subset of the declared identifiers. Nil in every other case. See
+	// OrMatchReport: it records the basis of an adoption that already happened and changes nothing about
+	// it (#444).
+	//
+	// Carried on the Response rather than logged where it is discovered because nothing in this package
+	// logs -- UnstructuredClient has no logger, and the same reasoning that put DiscardedServerURLs on the
+	// client applies here. It is NOT a field on the client, though: that one is immutable build-time data,
+	// while this is per-call, and the client is cached and shared across verbs for a document, so a
+	// mutable field on it would be a data race under -race.
+	MatchReport *OrMatchReport
+	statusCode  int
 }
 
 // StatusCode is the external API's HTTP status for this response, or 0 when none was recorded (a
@@ -497,7 +508,7 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 		}
 
 		// Search for a matching item in the current page's results.
-		matchedItem, found, merr := u.findItemInList(normalized)
+		matchedItem, found, matchReport, merr := u.findItemInList(normalized)
 		if merr != nil {
 			return Response{}, merr
 		}
@@ -507,6 +518,7 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 			return Response{
 				ResponseBody: matchedItem,
 				Normalized:   findByAction != nil,
+				MatchReport:  matchReport,
 				statusCode:   response.statusCode,
 			}, nil
 		}
@@ -657,12 +669,12 @@ func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Cli
 	}
 
 	// Delegate the search logic to a dedicated helper function.
-	matchedItem, found, merr := u.findItemInList(normalized)
+	matchedItem, found, matchReport, merr := u.findItemInList(normalized)
 	if merr != nil {
 		return Response{}, merr
 	}
 	if found {
-		return Response{ResponseBody: matchedItem, Normalized: findByAction != nil, statusCode: response.statusCode}, nil
+		return Response{ResponseBody: matchedItem, Normalized: findByAction != nil, MatchReport: matchReport, statusCode: response.statusCode}, nil
 	}
 
 	// If no match is found after checking all items, return a Not Found error.
@@ -1050,9 +1062,9 @@ func valueAtPath(body map[string]interface{}, path string) (interface{}, bool, e
 // identifier is not a field on the listed items still never matches, still reports not-exists, and still
 // gets its create -- because no error is produced on that path. Only a structurally broken lookup changes
 // behaviour, and for that one "nothing matched" was never the truthful answer.
-func (u *UnstructuredClient) findItemInList(items []interface{}) (map[string]interface{}, bool, error) {
+func (u *UnstructuredClient) findItemInList(items []interface{}) (map[string]interface{}, bool, *OrMatchReport, error) {
 	if len(items) == 0 {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 
 	for _, item := range items {
@@ -1063,29 +1075,82 @@ func (u *UnstructuredClient) findItemInList(items []interface{}) (map[string]int
 		}
 
 		// Delegate the matching logic for a single item to a dedicated helper.
-		isMatch, err := u.isItemMatch(itemMap)
+		//
+		// report is the basis of THIS item's match and is kept only for the item actually returned: the
+		// basis of a match that did not happen is not a diagnostic, and the items skipped before it were
+		// rejected outright rather than adopted on a subset.
+		isMatch, report, err := u.isItemMatch(itemMap)
 		if err != nil {
 			// Propagated, not discarded. A comparison that failed structurally did not establish that
 			// this item is a different resource, and "nothing matched" is the one answer a caller may act
 			// on by CREATING (#371).
-			return nil, false, fmt.Errorf("matching a list item against the resource's identifiers: %w", err)
+			return nil, false, nil, fmt.Errorf("matching a list item against the resource's identifiers: %w", err)
 		}
 
 		// If a match is found, return the item immediately.
 		if isMatch {
-			return itemMap, true, nil
+			return itemMap, true, report, nil
 		}
 	}
 
 	// Return false if no match was found in the entire list.
-	return nil, false, nil
+	return nil, false, nil, nil
+}
+
+// OrMatchReport records that an adoption was decided by an OR identifier policy on a STRICT SUBSET of the
+// declared identifiers.
+//
+// Under OR, isItemMatch returns on the FIRST identifier whose value agrees, so exactly one identifier is
+// ever responsible for an adoption. With two or more identifiers declared, every OR match is therefore
+// decided on a subset, and the identifiers declared after the matching one were never looked at. When one
+// of those is the discriminating identifier -- the name, behind a shared non-unique field -- the controller
+// adopts a DIFFERENT vendor object than the CR names, reports Synced=True against it, and then deletes it.
+// That is measured, not hypothetical (#444).
+//
+// THIS IS DIAGNOSTIC OUTPUT ONLY. It describes a decision the matcher has already taken and does not
+// influence which item is returned, or whether a match is reported, in any case. OR remains the default
+// when identifiersMatchPolicy is omitted; making the narrow basis visible is the non-breaking half of
+// #444, and flipping that default is not part of it.
+type OrMatchReport struct {
+	// MatchedIdentifier is the one identifier whose value agreed, and therefore the whole basis of the
+	// adoption.
+	MatchedIdentifier string
+	// NotConsulted are the identifiers declared AFTER MatchedIdentifier. OR returned before reaching
+	// them, so they were never compared at all: their agreement is UNKNOWN, not established. This is the
+	// field that matters -- a disagreement hiding in here is the data-loss case.
+	//
+	// Empty when the match landed on the last declared identifier. That is still a subset match: the
+	// earlier ones were consulted and did not agree.
+	NotConsulted []string
+	// AbsentFromItem are identifiers consulted before the match that the response item did not carry (or
+	// whose lookup ran into a non-object on the way, which the matcher treats identically). Free to
+	// record, since the OR loop already separates this branch from the next one.
+	AbsentFromItem []string
+	// PresentButDiffering are identifiers consulted before the match that the item did carry, with a value
+	// that disagreed with the CR's.
+	PresentButDiffering []string
+	// Unparseable are identifiers whose declared path does not parse. The matcher skips them without
+	// comparing anything, so they are neither absent nor differing; kept apart rather than misfiled into
+	// one of those, which would make that field's claim false.
+	Unparseable []string
+}
+
+// Declared is the number of identifiers the CR declared, which is the denominator the matched identifier
+// is one of.
+func (r *OrMatchReport) Declared() int {
+	if r == nil {
+		return 0
+	}
+	return 1 + len(r.NotConsulted) + len(r.AbsentFromItem) + len(r.PresentButDiffering) + len(r.Unparseable)
 }
 
 // isItemMatch checks if a single item (from an API response) matches the local resource
 // by comparing all configured identifier fields.
 // The match logic can be either "AND" (all identifiers must match) or "OR" (any identifier matches).
 // Default is "OR" if not specified.
-func (u *UnstructuredClient) isItemMatch(itemMap map[string]interface{}) (bool, error) {
+// The second return value is an OrMatchReport, non-nil ONLY for an OR match over a strict subset. It is
+// diagnostic and carries no control-flow meaning: the bool and the error are exactly what they were.
+func (u *UnstructuredClient) isItemMatch(itemMap map[string]interface{}) (bool, *OrMatchReport, error) {
 	policy := strings.ToLower(u.IdentifiersMatchPolicy)
 	if policy == "" || (policy != "and" && policy != "or") {
 		policy = "or" // Default to "or" if not specified or invalid
@@ -1094,7 +1159,7 @@ func (u *UnstructuredClient) isItemMatch(itemMap map[string]interface{}) (bool, 
 	// If no identifiers are specified, no match is possible.
 	if len(u.IdentifierFields) == 0 {
 		// TODO: probably warning or error log
-		return false, nil
+		return false, nil, nil
 	}
 
 	switch policy {
@@ -1109,53 +1174,74 @@ func (u *UnstructuredClient) isItemMatch(itemMap map[string]interface{}) (bool, 
 			val, found, err := unstructured.NestedFieldNoCopy(itemMap, pathSegments...)
 			if err != nil || !found {
 				// If any identifier is missing, it's not an AND match.
-				return false, nil
+				return false, nil, nil
 			}
 
 			ok, err := u.isInResource(val, pathSegments...)
 			if err != nil {
 				// A hard error during comparison should be propagated up.
-				return false, err
+				return false, nil, err
 			}
 			if !ok {
 				// If any identifier does not match, it's not an AND match.
-				return false, nil
+				return false, nil, nil
 			}
 		}
 
-		// If the loop completes, it means all identifiers matched (AND logic succeeded).
-		return true, nil
+		// If the loop completes, it means all identifiers matched (AND logic succeeded). NO report: an AND
+		// match consulted every declared identifier by construction, so its basis is never a subset.
+		return true, nil, nil
 	case "or":
 		// OR Logic (default): Return true on the first successful identifier match.
-		for _, ide := range u.IdentifierFields {
+		//
+		// THE CONTROL FLOW BELOW IS UNCHANGED. Every append is on a branch the loop already took, the
+		// `continue`s still continue, and the return on the first agreement is still the first agreement.
+		// report is write-only here and is read by no condition in this function.
+		report := &OrMatchReport{}
+		for i, ide := range u.IdentifierFields {
 
 			pathSegments, err := pathparsing.ParsePath(ide)
 			if err != nil || len(pathSegments) == 0 {
+				report.Unparseable = append(report.Unparseable, ide)
 				continue
 			}
 
 			val, found, err := unstructured.NestedFieldNoCopy(itemMap, pathSegments...)
 			if err != nil || !found {
 				// If field is not found or there is an error, it's not a match for this identifier, so we continue.
+				report.AbsentFromItem = append(report.AbsentFromItem, ide)
 				continue
 			}
 
 			ok, err := u.isInResource(val, pathSegments...)
 			if err != nil {
 				// A hard error during comparison should be propagated up. // TODO: is this the desired behavior for OR logic?
-				return false, err
+				return false, nil, err
 			}
 
 			if ok {
 				// On the first match, we can return true.
-				return true, nil
+				//
+				// Which identifier that was, and which ones this return is about to skip, is the whole
+				// content of the report: indices above i are never reached, so their agreement is
+				// unknown rather than established (#444).
+				if len(u.IdentifierFields) == 1 {
+					// Nothing can have gone unconsulted and the basis was the full declared set, so there
+					// is no subset to report.
+					return true, nil, nil
+				}
+				report.MatchedIdentifier = ide
+				report.NotConsulted = append(report.NotConsulted, u.IdentifierFields[i+1:]...)
+				return true, report, nil
 			}
+			report.PresentButDiffering = append(report.PresentButDiffering, ide)
 		}
 
-		// If the loop completes, no identifiers matched (OR logic failed).
-		return false, nil
+		// If the loop completes, no identifiers matched (OR logic failed). No match, so no adoption, so
+		// nothing was decided on a subset.
+		return false, nil, nil
 	default:
-		return false, fmt.Errorf("unknown identifier match policy: %s", u.IdentifiersMatchPolicy)
+		return false, nil, fmt.Errorf("unknown identifier match policy: %s", u.IdentifiersMatchPolicy)
 	}
 }
 
