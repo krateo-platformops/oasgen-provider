@@ -508,9 +508,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
 	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
 	// working resource over a migration concern, and the next pass retries.
-	if bferr := e.backfillVersionLabels(ctx, cr, gvk, hasSecuritySchemes); bferr != nil {
-		e.log.Debug("Backfilling the oas-version label", "error", bferr)
-	}
+	e.backfillVersionLabelsReporting(ctx, cr, gvk, hasSecuritySchemes)
 
 	// Drive the served-version prune to completion. Reporting not-up-to-date here is what makes Update
 	// run, and Update prunes exactly what this counted -- the SAME predicate decides both, which is the
@@ -698,9 +696,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
 	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
 	// working resource over a migration concern, and the next pass retries.
-	if bferr := e.backfillVersionLabels(ctx, cr, gvk, hasSecuritySchemes); bferr != nil {
-		e.log.Debug("Backfilling the oas-version label", "error", bferr)
-	}
+	e.backfillVersionLabelsReporting(ctx, cr, gvk, hasSecuritySchemes)
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
@@ -846,6 +842,43 @@ func (e *external) deployOptions(
 // version must never be empty here. Callers pass gvk.Version, which generation.VersionSelector guards.
 func (e *external) versionSelectorFor(version string) string {
 	return generation.VersionSelector(version)
+}
+
+// backfillVersionLabelsReporting runs the backfill and REPORTS A FAILURE, which it previously did only at
+// Debug -- and `debug` defaults to false (main.go:44), so on a default install the failure was emitted
+// nowhere at all (#425).
+//
+// WHY THAT SILENCE WAS WORSE THAN AN ORDINARY MISSING LOG LINE. The failure it hid is unobservable by any
+// other route. Version-scoped watching filters SERVER-SIDE on both ListFunc and WatchFunc, so an
+// unlabelled instance never enters the informer cache, is never enqueued, and cannot carry a condition or
+// an event. The CR is created, looks healthy, and belongs to nobody. This log line is therefore not one
+// diagnostic among several: on a default install it was the ONLY place the failure could ever have been
+// reported, and it was switched off.
+//
+// THE ASYMMETRY IS THE ARGUMENT. ensureVersionPolicyBestEffort, directly below, reports its failure with
+// Warn plus an event -- and that mechanism cannot reach the unlabelled state at all, because the policy it
+// ensures DENIES an unstampable write rather than admitting one. So the loud mechanism was the one that
+// could not fail into this state, and the quiet one was the only repair for it. Same backwards asymmetry
+// as #409, where a stanza doing no work warned while a property leaving the schema did not.
+//
+// ONE HELPER FOR THREE CALL SITES, deliberately. The three sites were identical copies and all three were
+// wrong in the same way, which is exactly how the third one would have been missed by a fix that edited
+// them in place.
+//
+// Not a condition on the RestDefinition and not fatal: the RestDefinition itself is healthy, and failing
+// the observation would stop reconciling a resource that is otherwise fine -- the same reasoning
+// ensureVersionPolicyBestEffort already documents for its own non-fatality. The instances are what is
+// affected, and they are precisely what cannot be annotated.
+func (e *external) backfillVersionLabelsReporting(ctx context.Context, cr *definitionv1alpha1.RestDefinition,
+	gvk schema.GroupVersionKind, hasSecuritySchemes bool) {
+	if bferr := e.backfillVersionLabels(ctx, cr, gvk, hasSecuritySchemes); bferr != nil {
+		e.log.Warn("Could not backfill the oas-version label; instances of this kind that carry no label "+
+			"are matched by no controller's watch and cannot report that themselves",
+			"kind", gvk.Kind, "group", gvk.Group, "error", bferr)
+		e.rec.Eventf(cr, corev1.EventTypeWarning, "VersionLabelNotBackfilled",
+			"could not backfill the %s label on instances of %s: %v; such instances are never reconciled "+
+				"and carry no condition saying so", generation.VersionLabel, gvk.Kind, bferr)
+	}
 }
 
 // ensureVersionPolicyBestEffort keeps the group's oas-version policy present on every reconcile.
@@ -1077,9 +1110,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
 	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
 	// working resource over a migration concern, and the next pass retries.
-	if bferr := e.backfillVersionLabels(ctx, cr, gvk, hasSecuritySchemes); bferr != nil {
-		e.log.Debug("Backfilling the oas-version label", "error", bferr)
-	}
+	e.backfillVersionLabelsReporting(ctx, cr, gvk, hasSecuritySchemes)
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
