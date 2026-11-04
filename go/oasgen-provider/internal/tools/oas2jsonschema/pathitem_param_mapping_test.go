@@ -2,6 +2,7 @@ package oas2jsonschema
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -126,4 +127,159 @@ func TestPathItemParameterSuppressedByFieldMapping(t *testing.T) {
 		t.Error("`name` is missing from the spec: the suppression has removed more than the mapped " +
 			"parameter, and the kind now has no identity field at all")
 	}
+}
+
+// --- fixtures for the #409 suppression cases ---
+
+// bodyAndPathNameCollisionSpec is the consumer's measured shape: `name` is BOTH a create-body property
+// and a get path parameter. Nothing synthetic about it -- it is how a vendor that lets you address a
+// resource by the name you gave it is described.
+const bodyAndPathNameCollisionSpec = `
+openapi: 3.0.3
+info: {title: github, version: "1.0"}
+paths:
+  /repos/{org}/{name}:
+    get:
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: name, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: ok}
+  /orgs/{org}/repos:
+    post:
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                visibility: {type: string}
+      responses:
+        '201': {description: created}
+`
+
+func newGeneratorForBodyAndPathCollision(t *testing.T) *OASSchemaGenerator {
+	t.Helper()
+	doc, err := NewLibOASParser().Parse([]byte(bodyAndPathNameCollisionSpec))
+	require.NoError(t, err)
+	return NewOASSchemaGenerator(doc, DefaultGeneratorConfig(), &ResourceConfig{
+		Verbs: []Verb{
+			{Action: "create", Method: "post", Path: "/orgs/{org}/repos"},
+			{
+				Action: "get", Method: "get", Path: "/repos/{org}/{name}",
+				// Keyed on the vendor's NORMALISED name, read back from status -- which is why the path
+				// parameter is mapping-supplied while the body property is still the author's.
+				FieldMapping: []FieldMappingEntry{
+					{InPath: "name", InCustomResource: "status.name"},
+				},
+			},
+		},
+		Identifiers: []string{"name"},
+	})
+}
+
+// newGeneratorForMappedPathParam builds the simple case: one mapped path parameter with no same-named
+// body property, so the suppression genuinely removes it from the spec. excluded controls whether the
+// author declared the exclusion.
+func newGeneratorForMappedPathParam(t *testing.T, excluded []string) *OASSchemaGenerator {
+	t.Helper()
+	doc, err := NewLibOASParser().Parse([]byte(pathItemParamRedirectedSpec))
+	require.NoError(t, err)
+	return NewOASSchemaGenerator(doc, DefaultGeneratorConfig(), &ResourceConfig{
+		Verbs: []Verb{
+			{Action: "create", Method: "post", Path: "/v1/nodes"},
+			{
+				Action: "get", Method: "get", Path: "/v1/nodes/{uuid}",
+				FieldMapping: []FieldMappingEntry{
+					{InPath: "uuid", InCustomResource: "status.uuid"},
+				},
+			},
+		},
+		Identifiers:        []string{"name"},
+		ExcludedSpecFields: excluded,
+	})
+}
+
+// #409's FALSE POSITIVE, reported by a consumer against f93f6fe before the tag.
+//
+// A name can be BOTH a path parameter and a create-body property. Suppressing the parameter does not
+// remove the body's property, so the field stays in the spec -- often required. Their measured case: the
+// Repository CRD has `spec.required = [configurationRef, name, org]` while `name` is also a get/update
+// path parameter mapped from `status.name`, and the warning said the property was "omitted from the
+// generated spec" and told them to "remove it from the CR". Following that advice produces a CR rejected
+// for a missing required field.
+//
+// So the warning must assert the OUTCOME (is the property actually gone) rather than the MECHANISM (does
+// a mapping supply the parameter). Asserted both ways round here, because either alone passes on the bug:
+// the no-warning check alone would pass if the property were also wrongly removed, and the
+// property-present check alone was already true when the warning was wrong.
+func TestNoRemovalWarningWhenTheNameIsAlsoACreateBodyProperty(t *testing.T) {
+	g := newGeneratorForBodyAndPathCollision(t)
+
+	specBytes, warnings, err := g.BuildSpecSchema()
+	require.NoError(t, err)
+	require.NotNil(t, specBytes)
+
+	var schema map[string]any
+	require.NoError(t, json.Unmarshal(specBytes, &schema))
+	props, _ := schema["properties"].(map[string]any)
+
+	// THE PREMISE. If `name` were genuinely absent the warning would be correct and this test would be
+	// asserting the wrong thing, so establish that the property survives before judging the warning.
+	require.Contains(t, props, "name",
+		"`name` must remain a spec property: it is a create-body field, and suppressing the same-named "+
+			"PATH parameter does not remove it. If this fails the fix is wrong in the other direction")
+
+	for _, w := range warnings {
+		require.NotContains(t, w.Error(), mappingRemovalMessage("name", mappingSource{action: "get", in: "path", from: "status.name"}),
+			"the removal warning fired for a property that is still in the spec, and its advice "+
+				"(\"remove it from the CR\") would produce a CR rejected for a missing required field")
+	}
+}
+
+// An excludedSpecFields entry is the author's acknowledgement that the field is not theirs to set, so
+// pruning is the DECLARED INTENT and there is nothing to tell them. And it is not merely noise:
+// ExcludedSpecFields carries `self == oldSelf` (types.go:958), so an author CANNOT withdraw the entry --
+// warning about it is a permanent message they have no action for.
+//
+// The consumer's argument inverted what I had proposed: the case worth warning about is a mapped
+// parameter the author NEVER declared, where a CR plausibly set it before.
+func TestNoRemovalWarningWhenTheAuthorDeclaredTheExclusion(t *testing.T) {
+	g := newGeneratorForMappedPathParam(t, []string{"uuid"})
+
+	_, warnings, err := g.BuildSpecSchema()
+	require.NoError(t, err)
+	for _, w := range warnings {
+		require.NotContains(t, w.Error(), "is omitted from the generated spec because verb",
+			"the author declared `uuid` in excludedSpecFields, which they cannot withdraw; a warning they "+
+				"have no action for teaches people to ignore warnings")
+	}
+}
+
+// AND THE CASE THE WARNING EXISTS FOR must still fire, or the two suppressions above have removed the
+// signal rather than narrowed it: a mapped parameter the author never declared, absent from the spec.
+func TestTheRemovalWarningStillFiresForAnUndeclaredMappedParameter(t *testing.T) {
+	g := newGeneratorForMappedPathParam(t, nil)
+
+	specBytes, warnings, err := g.BuildSpecSchema()
+	require.NoError(t, err)
+
+	var schema map[string]any
+	require.NoError(t, json.Unmarshal(specBytes, &schema))
+	props, _ := schema["properties"].(map[string]any)
+	require.NotContains(t, props, "uuid", "premise: `uuid` must genuinely be absent for the warning to be right")
+
+	var found bool
+	for _, w := range warnings {
+		if strings.Contains(w.Error(), "is omitted from the generated spec because verb") {
+			found = true
+		}
+	}
+	require.True(t, found,
+		"the warning must still fire for an undeclared mapped parameter that really is gone -- that is "+
+			"the silent removal #409 exists to report, and suppressing it too would make the fix a no-op")
 }

@@ -192,6 +192,14 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 	// optional string) when includeIdentifiersInSpec is on.
 	mappingSupplied := mappingSuppliedParams(g.resourceConfig.Verbs)
 
+	// Names the author has explicitly declared are not theirs to set. Used only to suppress the
+	// mapping-removal warning (#409): the declaration IS the acknowledgement, and the field is immutable
+	// so the author could not withdraw it even if the warning convinced them to.
+	excludedSpecField := make(map[string]bool, len(g.resourceConfig.ExcludedSpecFields))
+	for _, f := range g.resourceConfig.ExcludedSpecFields {
+		excludedSpecField[f] = true
+	}
+
 	propertyAlreadyRequired := func(name string) bool {
 		for _, req := range schema.Required {
 			if req == name {
@@ -277,10 +285,37 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 					// not-found warning can tell which one is now doing the work. Below 0.43.0 the
 					// exclusion was load-bearing and silent; at or above it the exclusion is inert and
 					// loud, and neither message mentions the version boundary.
-					warnings = append(warnings, SchemaGenerationError{
-						Code:    CodeFieldNotFound,
-						Message: mappingRemovalMessage(param.Name, src),
-					})
+					// TWO SUPPRESSIONS, and the first is a BUG FIX for a false positive that told users to
+					// break their CRs.
+					//
+					// (1) THE PROPERTY MAY NOT BE OMITTED AT ALL. A name can be both a path parameter and
+					// a create-BODY property, and the body contributes it before this function runs
+					// (getBaseSchemaForSpec, then dropResolverSuppliedRequired, then here). Suppressing the
+					// parameter does not remove the body's property, so the field stays in the spec --
+					// often REQUIRED. A consumer measured it: their Repository CRD has
+					// spec.required=[configurationRef, name, org] while `name` is also a get/update path
+					// parameter mapped from status.name, and the warning told them "remove it from the CR",
+					// which would have produced a CR rejected for a missing required field.
+					//
+					// propertyExists is the right test and it is the authority rather than a
+					// reimplementation of one: it reads the schema being built. Residual risk is in the
+					// safe direction -- a body property present now could still be pruned later by
+					// configurationFields or excludedSpecFields, which would suppress a warning that should
+					// fire, and both of those paths emit their own.
+					//
+					// (2) AN excludedSpecFields ENTRY IS THE AUTHOR'S ACKNOWLEDGEMENT, so pruning is the
+					// declared intent and there is nothing to tell them. The consumer's argument, which
+					// inverts what I had proposed: the case worth warning about is a mapped parameter the
+					// author NEVER declared, where a CR plausibly set it before. And it is not merely
+					// noise -- ExcludedSpecFields carries `self == oldSelf` (types.go:958), so an author
+					// CANNOT remove the entry. Warning about it is a permanent message they have no action
+					// for, which is the fastest way to teach people to ignore warnings.
+					if !propertyExists(param.Name) && !excludedSpecField[param.Name] {
+						warnings = append(warnings, SchemaGenerationError{
+							Code:    CodeFieldNotFound,
+							Message: mappingRemovalMessage(param.Name, src),
+						})
+					}
 				}
 				continue
 			}
