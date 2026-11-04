@@ -126,6 +126,11 @@ type UnstructuredClient struct {
 	// after BuildClient, and a nil one REFUSES rather than permits -- an unguarded credentialed request
 	// succeeds, so failing open would be invisible.
 	HostPolicy *hostpolicy.Policy
+	// DiscardedServerURLs holds the document server URLs that could not be parsed and are therefore
+	// ABSENT from HostPolicy's permitted set. Non-fatal by design -- one malformed `servers:` entry must
+	// not make a whole kind unreconcilable -- but it must not be silent either, which is what it was
+	// until #403. The layer that has a logger reads this and says so; nothing in this package logs.
+	DiscardedServerURLs []hostpolicy.Discarded
 	//Validator             Validator 				    // Validator for request validation. TODO: to be re-enabled when libopenapi-validator is stable
 }
 
@@ -685,7 +690,7 @@ func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath 
 	//
 	// Index 0 only, on both, because that is all the code ever dials -- admitting the rest would widen
 	// the permitted set for nothing.
-	policy, perr := hostpolicy.Parse(policyCfg.Allowlist, DocumentHosts(doc), policyCfg.AllowAnyHost)
+	policy, discardedHosts, perr := hostpolicy.Parse(policyCfg.Allowlist, DocumentHosts(doc), policyCfg.AllowAnyHost)
 	if perr != nil {
 		// A malformed allowlist entry is an operator mistake and must stop startup rather than degrade
 		// into "permit nothing" or "permit everything" -- both of which surface later, in opposite and
@@ -694,7 +699,10 @@ func BuildClient(ctx context.Context, kubeclient dynamic.Interface, swaggerPath 
 	}
 
 	return &UnstructuredClient{
-		Server: doc.Model.Servers[0].URL,
+		// DiscardedServerURLs is set even when empty-nil, so a reader of this literal sees that the
+		// question is asked here rather than wondering where a discard would surface (#403).
+		DiscardedServerURLs: discardedHosts,
+		Server:              doc.Model.Servers[0].URL,
 		//Doc:       d,
 		DocScheme:  doc,
 		HostPolicy: policy,

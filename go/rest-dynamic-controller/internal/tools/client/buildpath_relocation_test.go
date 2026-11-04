@@ -146,7 +146,7 @@ func TestTheRelocatedRequestsAreTheOnesThePolicyRefuses(t *testing.T) {
 	//
 	// Built the way BuildClient builds it with no operator configuration: empty allowlist, the document's
 	// own host as the derived set, allowAny false.
-	policy, err := hostpolicy.Parse(nil, []string{"https://api.example.com"}, false)
+	policy, _, err := hostpolicy.Parse(nil, []string{"https://api.example.com"}, false)
 	if err != nil {
 		t.Fatalf("the document-derived policy must build: %v", err)
 	}

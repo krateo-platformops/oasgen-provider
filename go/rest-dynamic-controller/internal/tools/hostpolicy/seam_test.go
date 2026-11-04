@@ -103,7 +103,7 @@ func TestAPolicyEnforcedClientReachesAnHTTPTestServerWithTheSeam(t *testing.T) {
 	defer srv.Close()
 
 	host := hostOf(t, srv.URL)
-	p, err := Parse([]string{"http://" + host}, nil, false)
+	p, _, err := Parse([]string{"http://" + host}, nil, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestTheSameRequestIsRefusedWithoutTheSeam(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
 
-	p, err := Parse([]string{"http://" + hostOf(t, srv.URL)}, nil, false)
+	p, _, err := Parse([]string{"http://" + hostOf(t, srv.URL)}, nil, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestTheSeamAppliesOnTheResolverPathToo(t *testing.T) {
 	}
 
 	target := "http://localhost:" + port
-	p, err := Parse([]string{"http://localhost:" + port}, nil, false)
+	p, _, err := Parse([]string{"http://localhost:" + port}, nil, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestTheSeamAppliesOnTheResolverPathToo(t *testing.T) {
 	defer resp.Body.Close()
 
 	// And refused without it, or the case above proves nothing about the seam.
-	strict, err := Parse([]string{"http://localhost:" + port}, nil, false)
+	strict, _, err := Parse([]string{"http://localhost:" + port}, nil, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

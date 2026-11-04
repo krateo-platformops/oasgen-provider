@@ -25,7 +25,7 @@ func mustURL(t *testing.T, raw string) *url.URL {
 // "configuration error": requiring the value would turn every single-host provider into a config error on
 // upgrade for a capability it does not use.
 func TestEmptyAllowlistPermitsTheDocumentsHostAndNothingElse(t *testing.T) {
-	p, err := Parse(nil, []string{"https://api.github.com"}, false)
+	p, _, err := Parse(nil, []string{"https://api.github.com"}, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestMatching(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p, err := Parse(tc.allowlist, nil, false)
+			p, _, err := Parse(tc.allowlist, nil, false)
 			if err != nil {
 				t.Fatalf("Parse(%v): %v", tc.allowlist, err)
 			}
@@ -114,11 +114,11 @@ func TestMatching(t *testing.T) {
 // values list. It has to be spelled as its own field, where it shows up in a diff.
 func TestParseRejectsDangerousEntries(t *testing.T) {
 	for _, bad := range []string{"*", "", "   ", "*foo.example.com", "foo.*.example.com", "ftp://example.com", "*."} {
-		if _, err := Parse([]string{bad}, nil, false); err == nil {
+		if _, _, err := Parse([]string{bad}, nil, false); err == nil {
 			t.Errorf("Parse(%q) must fail", bad)
 		}
 	}
-	p, err := Parse(nil, nil, true)
+	p, _, err := Parse(nil, nil, true)
 	if err != nil {
 		t.Fatalf("allowAny must parse: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestParseRejectsDangerousEntries(t *testing.T) {
 // produces, the policy must refuse it -- the point being that the refusal does not depend on recognising
 // the `..`, only on the destination.
 func TestARelocatedHostIsRefusedWhateverProducedIt(t *testing.T) {
-	p, err := Parse(nil, []string{"https://api.github.com"}, false)
+	p, _, err := Parse(nil, []string{"https://api.github.com"}, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestARedirectToAnUnpermittedHostIsRefused(t *testing.T) {
 	// 127.0.0.1, so a policy-enforced dialer would refuse them for being loopback -- which would make
 	// this case pass for a reason that has nothing to do with redirects. Using a plain client with only
 	// CheckRedirect installed isolates the redirect decision from the IP decision.
-	strict, err := Parse([]string{"http://" + vendorHostPort(t, vendor.URL)}, nil, false)
+	strict, _, err := Parse([]string{"http://" + vendorHostPort(t, vendor.URL)}, nil, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestARedirectWithinThePermittedHostIsFollowed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, err := Parse([]string{"http://" + vendorHostPort(t, srv.URL)}, nil, false)
+	p, _, err := Parse([]string{"http://" + vendorHostPort(t, srv.URL)}, nil, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

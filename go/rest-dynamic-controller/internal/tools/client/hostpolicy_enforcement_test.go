@@ -132,7 +132,7 @@ func TestDocumentHostsCollectsPerOperationOverrides(t *testing.T) {
 			"a host the document explicitly names, for every document that uses one", hosts)
 	}
 
-	p, err := hostpolicy.Parse(nil, hosts, false)
+	p, _, err := hostpolicy.Parse(nil, hosts, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

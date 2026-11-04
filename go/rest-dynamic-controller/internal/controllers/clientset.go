@@ -3,6 +3,7 @@ package restResources
 import (
 	"context"
 	"fmt"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"strings"
 
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
@@ -41,16 +42,22 @@ type clientSet struct {
 	// hostPolicyCfg is the OPERATOR half of the #379 endpoint policy. BuildClient collects the
 	// document half itself, so this carries only what chart values say.
 	hostPolicyCfg hostpolicy.Config
-	byPath        map[string]restclient.UnstructuredClientInterface
+	// logger reports a document server URL that the host policy had to discard (#403). A REQUIRED
+	// parameter rather than a settable field, for the same reason hostPolicyCfg is: a set built without
+	// it would silently stop reporting, and the thing it reports is already the only narrowing in the
+	// policy with no signal of its own.
+	logger logging.Logger
+	byPath map[string]restclient.UnstructuredClientInterface
 }
 
-func newClientSet(kube dynamic.Interface, info *getter.Info, mg *unstructured.Unstructured, prettyJSON bool, hostPolicyCfg hostpolicy.Config) *clientSet {
+func newClientSet(kube dynamic.Interface, info *getter.Info, mg *unstructured.Unstructured, prettyJSON bool, hostPolicyCfg hostpolicy.Config, logger logging.Logger) *clientSet {
 	return &clientSet{
 		kube:          kube,
 		info:          info,
 		mg:            mg,
 		prettyJSON:    prettyJSON,
 		hostPolicyCfg: hostPolicyCfg,
+		logger:        logger,
 		byPath:        map[string]restclient.UnstructuredClientInterface{},
 	}
 }
@@ -140,6 +147,22 @@ func (c *clientSet) forDocument(ctx context.Context, path, forWhat string) (rest
 	cli, err := restclient.BuildClient(ctx, c.kube, path, c.hostPolicyCfg)
 	if err != nil {
 		return nil, fmt.Errorf("building the client for %s against %q: %w", forWhat, path, err)
+	}
+	// A document server URL the host policy could not parse is DISCARDED from the permitted set, and
+	// until #403 that discard left no trace anywhere -- while the comment beside it claimed otherwise.
+	// Reported here because this is the innermost layer that has a logger, and inside the cache miss so
+	// it is said once per document per reconcile rather than once per verb.
+	//
+	// WARN rather than DEBUG: when the discarded URL is the one actually dialled, every credentialed
+	// request to it is refused with a message naming the host and listing the permitted set, which reads
+	// as a policy misconfiguration rather than as an unreadable document. This line is what connects
+	// the two.
+	if c.logger != nil {
+		for _, d := range cli.DiscardedServerURLs {
+			c.logger.Info("endpoint policy: ignoring an unusable server URL from the OAS document; "+
+				"requests to that host will be refused as not permitted",
+				"document", path, "serverURL", d.URL, "reason", d.Reason.Error())
+		}
 	}
 	c.configure(cli)
 	c.byPath[path] = cli
