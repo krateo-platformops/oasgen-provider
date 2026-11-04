@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 var widgetConfigurationGVK = schema.GroupVersionKind{Group: "widgets.example.io", Version: "v1alpha1", Kind: "WidgetConfiguration"}
@@ -213,5 +216,67 @@ func TestAuthSecretRoleName_DeterministicAndDistinct(t *testing.T) {
 	}
 	if AuthSecretRoleName(a) == AuthSecretRoleName(b) {
 		t.Fatal("expected distinct resources to get distinct role names")
+	}
+}
+
+// ONE NAMESPACE FAILING USED TO LEAVE EVERY LATER NAMESPACE UNTOUCHED.
+//
+// The loop returned on the first error. Fail-fast is right when the caller can try again — here the caller
+// is in Delete, so there is no second attempt, nothing retries, and nothing records what was skipped.
+// status.AuthSecretRBACNamespaces, the only list of what needed cleaning, disappears with the object.
+//
+// THE DISCRIMINATING ASSERTION IS ns3, NOT THE ERROR. An error-only test passes against the old
+// fail-fast code, because that also returned an error — it just stopped. ns3 being cleaned is the only
+// observation that distinguishes "collected and continued" from "returned at the first failure".
+//
+// And the error must NAME the failing namespace, because the caller's Warn is the only durable channel
+// once the object is gone: a message naming one namespace out of three would understate the residue in
+// exactly the way the old Debug level did.
+func TestDeleteAllAuthSecretRBAC_CollectsAndContinuesPastAFailure(t *testing.T) {
+	roleName := "widgets-v1alpha1-authsecrets"
+	sa := types.NamespacedName{Namespace: "rdc-system", Name: "rdc"}
+
+	kube := fake.NewClientBuilder().WithScheme(rbacScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetNamespace() == "ns2" {
+					return errors.NewForbidden(
+						schema.GroupResource{Group: "rbac.authorization.k8s.io", Resource: "roles"},
+						obj.GetName(), fmt.Errorf("no delete permission in ns2"))
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).Build()
+
+	if _, err := SyncAuthSecretRBAC(context.Background(), kube, roleName,
+		map[string][]string{"ns1": {"a"}, "ns2": {"b"}, "ns3": {"c"}}, nil, sa); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	err := DeleteAllAuthSecretRBAC(context.Background(), kube, roleName, []string{"ns1", "ns2", "ns3"})
+
+	if err == nil {
+		t.Fatal("a namespace that could not be cleaned must be reported: the caller is in Delete and this " +
+			"is the only channel left once the object is gone")
+	}
+	if !strings.Contains(err.Error(), "ns2") {
+		t.Errorf("the error must name the namespace that failed, got: %v", err)
+	}
+
+	// THE POINT OF THE TEST. ns3 comes after the failure, so pre-fix it was never attempted.
+	var role rbacv1.Role
+	if gerr := kube.Get(context.Background(), client.ObjectKey{Namespace: "ns3", Name: roleName}, &role); !errors.IsNotFound(gerr) {
+		t.Errorf("ns3 is AFTER the failing namespace and must still have been cleaned; a fail-fast loop "+
+			"leaves it behind with nothing to retry and no record that it was skipped. Get returned: %v", gerr)
+	}
+	// And ns1, before the failure, must also be gone — so the test cannot pass by the loop doing nothing.
+	if gerr := kube.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: roleName}, &role); !errors.IsNotFound(gerr) {
+		t.Errorf("ns1 precedes the failure and must have been cleaned: %v", gerr)
+	}
+	// The failing namespace's Role must REMAIN — otherwise the interceptor did not actually block anything
+	// and both assertions above are vacuous.
+	if gerr := kube.Get(context.Background(), client.ObjectKey{Namespace: "ns2", Name: roleName}, &role); gerr != nil {
+		t.Errorf("premise: ns2's Role must survive, or the injected failure did nothing and this test "+
+			"proves nothing: %v", gerr)
 	}
 }
