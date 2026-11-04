@@ -283,6 +283,21 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 
 	if meta.WasDeleted(cr) {
 		e.log.Debug("RestDefinition was deleted, skipping observation")
+
+		// Ready=Deleting. This path answers like any other, and provider-runtime's contract is that every
+		// successful Observe sets Ready.
+		//
+		// Set BEFORE the two error returns below, though at the pinned version that no longer changes what
+		// they report: v1.8.2's markNotObserved answers a resource carrying a deletion timestamp with
+		// Deleting rather than NotObserved, whatever the condition on the object says. On v1.8.0 and v1.8.1
+		// it checked only the condition, so setting it first was the one thing standing between a failed
+		// uninstall and a Ready that read "we could not tell" about an object whose fate is not in doubt.
+		//
+		// Kept, not because the runtime needs it, but because Observe should state what it knows: that this
+		// RestDefinition is being deleted is the provider's own answer, not something a caller should have
+		// to see inferred from a timestamp. It also keeps this branch correct if the pin ever moves back.
+		cr.SetConditions(rtv1.Deleting())
+
 		err := manageFinalizers(ctx, e.kube, cr, e.log.Debug)
 		if err != nil {
 			return reconciler.ExternalObservation{}, fmt.Errorf("managing finalizers: %w", err)
@@ -458,10 +473,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		e.log.Debug("Could not fetch OAS for content-drift check; skipping", "error", ferr)
 	} else if h := compositeOASDigest(byPath); cr.Status.OASHash != h {
 		e.log.Debug("OAS document content changed", "status", cr.Status.OASHash, "current", h)
-		return reconciler.ExternalObservation{
-			ResourceExists:   true,
-			ResourceUpToDate: false,
-		}, nil
+		return e.observeDrift(cr, "the OpenAPI document changed; regenerating the CRD")
 	}
 
 	// spec.resource can change the generated schema while the OAS is byte-identical -- additionalStatusFields
@@ -479,10 +491,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	// can reintroduces exactly this silence. Same trade the OAS-content check above already makes.
 	if rh := resourceHash(cr); cr.Status.ResourceHash != rh {
 		e.log.Debug("spec.resource changed", "status", cr.Status.ResourceHash, "current", rh)
-		return reconciler.ExternalObservation{
-			ResourceExists:   true,
-			ResourceUpToDate: false,
-		}, nil
+		return e.observeDrift(cr, "spec.resource changed; regenerating the CRD")
 	}
 
 	// A Configuration instance's usernameRef/passwordRef/tokenRef can change (or an instance can appear/
@@ -498,10 +507,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 			e.log.Debug("Could not hash auth secret references for drift check; skipping", "error", herr)
 		} else if cr.Status.AuthSecretDigest != h {
 			e.log.Debug("Auth secret references changed", "status", cr.Status.AuthSecretDigest, "current", h)
-			return reconciler.ExternalObservation{
-				ResourceExists:   true,
-				ResourceUpToDate: false,
-			}, nil
+			return e.observeDrift(cr, "the Configuration's authentication secret references changed; redeploying the controller")
 		}
 	}
 
@@ -523,10 +529,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		e.log.Debug("Could not evaluate served-version prune; skipping", "error", perr)
 	} else if len(prunable) > 0 {
 		e.log.Debug("Served versions are prunable", "versions", prunable)
-		return reconciler.ExternalObservation{
-			ResourceExists:   true,
-			ResourceUpToDate: false,
-		}, nil
+		return e.observeDrift(cr, fmt.Sprintf("retiring served CRD versions that are no longer declared: %v", prunable))
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -545,10 +548,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 
 	if cr.Status.Digest != dig {
 		e.log.Debug("Rendered resources digest changed", "status", cr.Status.Digest, "rendered", dig)
-		return reconciler.ExternalObservation{
-			ResourceExists:   true,
-			ResourceUpToDate: false,
-		}, nil
+		return e.observeDrift(cr, "the rendered resources changed; redeploying")
 	}
 
 	dig, err = deploy.Lookup(ctx, e.kube, opts)
@@ -557,10 +557,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	}
 	if cr.Status.Digest != dig {
 		e.log.Debug("Deployed resources digest changed", "status", cr.Status.Digest, "deployed", dig)
-		return reconciler.ExternalObservation{
-			ResourceExists:   true,
-			ResourceUpToDate: false,
-		}, nil
+		return e.observeDrift(cr, "the deployed resources drifted from the render; redeploying")
 	}
 
 	err = manageFinalizers(ctx, e.kube, cr, e.log.Debug)
@@ -581,8 +578,20 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	// produces costs far more to diagnose than it does to hit.
 	if served, pending, serr := e.generatedKindsServed(ctx, cr); serr != nil {
 		// Could not determine servability. NOT the same as "not served": claiming Available here would be
-		// the guess, and claiming Creating would hide a working install behind a transient API error. Return
-		// the error so the reconcile retries and the condition is left as it was.
+		// the guess, and claiming Creating would hide a working install behind a transient API error.
+		//
+		// Returned UNWRAPPED, deliberately. Under provider-runtime v1.8.0 that makes the runtime set
+		// Ready=Unknown/NotObserved, which is what this branch has always meant and previously could not
+		// say: before v1.8.0 the error merely left the condition as it was, so a resource that had been
+		// Available went on asserting it for as long as this check kept failing. Ignorance now has its own
+		// answer, and reconciler.ReadyAssessed is precisely the wrong wrapper here -- it promises that
+		// Observe assessed Ready, and the entire content of this branch is that it could not.
+		//
+		// The cost is real and accepted: one failed read of the served kinds drops a healthy resource from
+		// Available to Unknown. That is the honest direction, and it is not merely pessimism -- this read
+		// goes against the apiserver's own discovery of the generated kind, so a failure here correlates
+		// with the consumer's `kubectl apply` of that kind failing too. The ignorance is about the very
+		// thing Ready promises.
 		return reconciler.ExternalObservation{}, fmt.Errorf("checking whether the generated kinds are served: %w", serr)
 	} else if !served {
 		e.log.Debug("Generated kind not yet served by the apiserver; holding Creating",
@@ -1246,6 +1255,40 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 	e.rec.Eventf(cr, corev1.EventTypeNormal, "RestDefinitionDeleting",
 		"RestDefinition '%s/%s' deleting", cr.Spec.Resource.Kind, cr.Spec.ResourceGroup)
 	return err
+}
+
+// observeDrift is Observe's answer for "the cluster does not match this RestDefinition yet, and Update is
+// what fixes it". Every drift branch goes through here so the condition cannot be forgotten at one of them.
+//
+// THE CONDITION IS THE POINT. Reporting drift without touching Ready left the previous Ready in place,
+// and on a healthy resource that is Available -- so a RestDefinition went on reporting Ready=True for the
+// whole window in which its CRD was being regenerated after an OAS edit. That is #314 in a different coat:
+// the documented "kubectl wait --for condition=Ready=True, then apply a CR" returns immediately, the apply
+// meets the OLD schema, the new field is pruned, and nothing says why. Ready has to mean "the kind this
+// RestDefinition describes is the kind being served", not merely "some CRD is served".
+//
+// It also left the six branches depending on Update to set Creating. That does not happen when Update is
+// blocked by policy or keeps failing, so under v1.8.0 a NotObserved left by an earlier outage would stick
+// here -- the contract is what found this, not a symptom.
+//
+// Creating rather than Unavailable: Unavailable is documented as "expected to be available and known not
+// to be", and this resource works, it just does not yet match its spec.
+//
+// Checked with the three consumers it reaches, before shipping rather than after:
+//   - core-provider's cdc rollup maps reason Creating to childConverging, putting the owning composition at
+//     Ready=False/Creating for the window. That verdict feeds the condition write and nothing else: no
+//     rollback, no failure verdict, no timeout-then-abort. It is waited on, not acted on.
+//   - the installer gates dependents on the PARENT's Ready, so dependents pause for the regeneration
+//     window. A visible depsReady=false, not a failure -- and new pausing where a stale Available used to
+//     sail through, which is the behaviour change to expect on upgrade.
+//   - the one documented consumer check that reads a RestDefinition's Ready before applying CRs of its
+//     kind becomes correct rather than racy.
+func (e *external) observeDrift(cr *definitionv1alpha1.RestDefinition, what string) (reconciler.ExternalObservation, error) {
+	cr.SetConditions(rtv1.Creating().WithMessage(what))
+	return reconciler.ExternalObservation{
+		ResourceExists:   true,
+		ResourceUpToDate: false,
+	}, nil
 }
 
 // observePermanentFailure is Observe's answer for a failure that will never clear on its own: a manifest
