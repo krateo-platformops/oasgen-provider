@@ -151,7 +151,7 @@ func TestRemoveExcludedSpecFields(t *testing.T) {
 			}
 
 			// Act
-			warnings := g.removeExcludedSpecFields(tc.schema)
+			warnings := g.removeExcludedSpecFields(tc.schema, nil)
 
 			// Assert
 			assert.Equal(t, tc.expectedSchema, tc.schema)

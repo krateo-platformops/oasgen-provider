@@ -99,7 +99,7 @@ func (g *OASSchemaGenerator) BuildSpecSchema() ([]byte, []error, error) {
 	warnings = append(warnings, g.removeConfiguredFields(baseSchema)...)
 
 	// Remove excluded fields from the spec schema.
-	warnings = append(warnings, g.removeExcludedSpecFields(baseSchema)...)
+	warnings = append(warnings, g.removeExcludedSpecFields(baseSchema, requiredParameters)...)
 
 	// Narrow the spec to the allowlist, if one is declared. Mutually exclusive with excludedSpecFields at
 	// admission, so the two never both apply; it runs here, last, because an allowlist has to see the
@@ -624,7 +624,24 @@ func (g *OASSchemaGenerator) removeConfiguredFields(schema *Schema) []error {
 }
 
 // removeExcludedSpecFields removes the fields from the schema that are defined in the `excludedSpecFields` list.
-func (g *OASSchemaGenerator) removeExcludedSpecFields(schema *Schema) []error {
+//
+// requiredParameters is the set of parameters some verb REQUIRES, and an exclusion naming one is refused
+// rather than honoured (#410). The reasoning is the one addParametersToSpec already states: dropping a
+// required parameter leaves a kind that cannot build its own URL. The result would be generated,
+// statically valid, admitted by the API server, and non-functional -- the #75 shape, arrived at from the
+// author's own configuration instead of from a missing create body.
+//
+// THIS GUARD WAS DOCUMENTED AND NOT WIRED. The comment in addParametersToSpec said requiredParameters
+// "exists to protect a field from excludedSpecFields pruning", and nothing passed it here: the set was
+// produced at the top of the caller and consumed only by retainIncludedSpecFields, the includedSpecFields
+// ALLOWLIST path -- which the two stanzas being mutually exclusive at admission means an excludedSpecFields
+// definition never reaches. So the set did real work for the allowlist and none for the exclusion, while
+// its own documentation named the exclusion.
+//
+// Refused rather than warned-and-skipped: a kind that cannot build its own URL cannot work at all, so a
+// warning would be a note attached to something already broken. Generation failing loudly is what gives
+// the author a chance to fix the definition.
+func (g *OASSchemaGenerator) removeExcludedSpecFields(schema *Schema, requiredParameters map[string]bool) []error {
 	if len(g.resourceConfig.ExcludedSpecFields) == 0 {
 		return nil
 	}
@@ -635,6 +652,21 @@ func (g *OASSchemaGenerator) removeExcludedSpecFields(schema *Schema) []error {
 		//log.Printf("Removing excluded field '%s' with path segments: %v", excludedField, pathSegments)
 		if err != nil {
 			warnings = append(warnings, SchemaGenerationError{Code: CodeFieldNotFound, Message: fmt.Sprintf("invalid path format for excluded field '%s': %v", excludedField, err)})
+			continue
+		}
+
+		// Checked on the TOP-LEVEL name only, and deliberately: requiredParameters is keyed by parameter
+		// name, and a parameter is always a top-level spec property. An exclusion of `a.b.c` cannot be
+		// naming a parameter, so consulting the set for it would be comparing values from two different
+		// namespaces -- and a false match there would refuse a legitimate nested exclusion.
+		if len(pathSegments) == 1 && requiredParameters[pathSegments[0]] {
+			warnings = append(warnings, SchemaGenerationError{
+				Code: CodeFieldNotFound,
+				Message: fmt.Sprintf("field '%s' set in excludedSpecFields is a REQUIRED parameter of this "+
+					"resource's verbs: excluding it would leave a kind that cannot build its own request "+
+					"URL. Remove it from excludedSpecFields, or supply it with a request-direction "+
+					"fieldMapping, which omits it from the spec without breaking the URL", excludedField),
+			})
 			continue
 		}
 
