@@ -64,6 +64,25 @@ pointed at a host that does not appear in its document.
 **Verify that on a staging install rather than taking it from this page** — it is the one claim here that
 depends on your documents rather than on our tags.
 
+**What a static check of your documents can and cannot settle.** One consumer checked theirs and reported the
+bound rather than just the result, which is the right shape:
+
+```
+documents scanned                           : 13
+documents WITHOUT a top-level servers[]     :  0
+distinct hosts declared across all servers[]: 1
+per-path / per-operation servers overrides  :  0
+hosts anything actually reaches             : that same single host
+```
+
+Uniform, so on that fleet the policy built from `servers[]` admits 100% of traffic and the upgrade cannot
+break the install on that axis. **But that verifies the input, not the mechanism**: it confirms the documents
+are uniform and match the dialled host, and it does *not* confirm that the policy is assembled from
+`servers[]` the way this page says. Only watching a real install admit a real request does that.
+
+So: a document scan is a **necessary** condition and worth running first, because it is cheap and it can rule
+the upgrade out. It is not **sufficient**, and a page like this one cannot make it so.
+
 > **Answer "do I need an allowlist?" from `servers[]` in your document — not from the logs.** One consumer
 > grepped the controller's logs for dialled hosts and got eight, including a Helm download and an apt
 > repository. The controller dials none of them: they are strings **inside the CR body**, a 49 KB cloud-config
@@ -76,7 +95,16 @@ depends on your documents rather than on our tags.
 **snowplow** and are **not** covered; snowplow tracks the same channels as snowplow#1106 and snowplow#1112.
 
 If your fleet has both kinds, a delegated kind's credential travels outside the path this release hardened.
-Today that is typically the same host, so there is no exposure — but there is no protection either.
+
+**This is not hypothetical, and the shape is easy to miss because it is a minority of kinds.** One consumer
+measured their own split: **36 kinds native to RDC, and one kind whose `update` and `delete` are delegated
+through snowplow via `*ApiRef`.** So 0.50.0 hardens the great majority of their traffic and not that path.
+They probed every path both halves call and none redirects, and both reach the same host — so there is no
+exposure today, and no protection either.
+
+**Check which of your kinds use `*ApiRef`, not how many.** A single delegated verb on a single kind is enough
+to put a credential outside this release's coverage, and a fleet that is 97% hardened reads as "hardened" in
+every summary anyone will write.
 
 ---
 
