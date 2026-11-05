@@ -138,3 +138,60 @@ through the chart's `rdc.env`, which restarts every RDC instance.
 > `helm upgrade`: the provider re-renders every generated ConfigMap, and because it hashes
 > the result it restarts each generated Deployment so the new environment is actually
 > picked up.
+
+## Inspecting a running controller — there is no shell in either image
+
+Both images run on `gcr.io/distroless/static:nonroot`: `rest-dynamic-controller` since **0.20.0**, and
+`oasgen-provider` since **0.41.0**, which brought it into line (#271). Checked against both
+Dockerfiles rather than inferred from the release note, which recorded only what the change *saved* —
+338.4 MB compressed down to 33.9 — and nothing about what it removed.
+
+What it removed is every in-container diagnostic. There is no shell, no `env`, no `cat`, no package
+manager, so these no longer work **on either controller**:
+
+```console
+kubectl exec -n krateo-system deploy/oasgen-provider -- env       # no shell, no env binary
+kubectl exec -n krateo-system deploy/oasgen-provider -- /bin/sh   # no shell
+```
+
+This is worth knowing **before** you need it. The people who reach for `exec` are debugging something
+at the time, and discovering the shell is gone mid-incident is the worst moment to learn it — "exec
+into the pod" sits in enough runbooks and enough habits that nobody checks a release note first. It
+was found exactly that way, by a consumer reaching for `kubectl exec ... -- env` to read a
+controller's environment.
+
+### The substitutes, which cover nearly every real use
+
+Reading the environment — the most common reason to exec, and the pod spec is the better source
+anyway, because it shows what was *configured* rather than what a shell happens to resolve:
+
+```console
+kubectl get deploy/oasgen-provider -n krateo-system -o jsonpath='{.spec.template.spec.containers[0].env}' | jq .
+kubectl set env deploy/oasgen-provider --list -n krateo-system
+```
+
+For a generated controller, the same two commands against its own Deployment (`<restdefinition-name>-controller`).
+
+| instead of | use |
+|---|---|
+| `exec ... -- env` | `kubectl set env <deploy> --list`, or the `jsonpath` above |
+| `exec ... -- cat /etc/...` | `kubectl describe pod` for the resolved spec, mounts and events |
+| `exec ... -- ls /mnt` | `kubectl get pod -o jsonpath='{.spec.volumes}'` plus the container's `volumeMounts` |
+| `exec ... -- ps` | `kubectl logs`, and `kubectl describe pod` for restarts and exit codes |
+
+### The escape hatch, for the cases that genuinely need a shell
+
+`kubectl debug` restores the old workflow without reverting the image, by attaching an **ephemeral
+container** that shares the target's namespaces:
+
+```console
+kubectl debug -it <pod> -n krateo-system --image=busybox --target=<container-name>
+```
+
+`--target` is what makes it useful: without it the debug container shares the pod's network but not
+its process namespace, so you cannot see the controller process or its `/proc`. Ephemeral containers
+are on by default since Kubernetes 1.25, and these charts floor at 1.36, so the feature is always
+available where the charts install at all.
+
+The filesystem you land in is **busybox's**, not the controller's. To read the controller's files, go
+through `/proc/1/root/` from the debug container.
