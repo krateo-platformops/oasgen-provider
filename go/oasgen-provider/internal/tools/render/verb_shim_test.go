@@ -28,6 +28,12 @@ func everyFieldSet() definitionv1alpha1.VerbsDescription {
 			EchoedAt: ".inputs.correlationId",
 		},
 		Async: &definitionv1alpha1.AsyncConfig{Mode: "poll"},
+		// The static injections. They SUPPLY a parameter, which makes them indistinguishable from a
+		// fieldMapping for any check asking whether a parameter will have a value -- and they beat both
+		// spec and status, because rest-dynamic-controller sets them before auto-population and
+		// auto-population does not overwrite. The shim dropped them until #463 needed them.
+		Queries: []definitionv1alpha1.QueryParam{{Name: "api-version", Value: "2024-01-01"}},
+		Headers: []definitionv1alpha1.HeaderItem{{Name: "Accept", Value: "application/json"}},
 	}
 }
 
@@ -133,4 +139,31 @@ func TestEveryResourceConfigFieldIsCarriedByTheShim(t *testing.T) {
 	got2, err := toDomainResourceConfig(cr, nil)
 	require.NoError(t, err)
 	assert.False(t, got2.ObserveDelegated, "observeApiRef absent must mean !ObserveDelegated")
+}
+
+// TestTheShimCarriesStaticInjections closes the blind spot that lost them.
+//
+// The reflection guard in this file iterates the DOMAIN type's fields, so it catches a domain field the
+// shim forgets to SET. It cannot catch a field present on VerbsDescription and ABSENT from the domain
+// type -- which is how Queries and Headers were dropped silently, and why a generation check later fired
+// on a parameter a static query always supplies.
+//
+// This asserts the carry directly. It does not close the general class: any other VerbsDescription field
+// the generator comes to need has the same invisibility, and a guard for that needs an explicit
+// carried/not-carried inventory of the source type.
+func TestTheShimCarriesStaticInjections(t *testing.T) {
+	verbs := toDomainVerbs([]definitionv1alpha1.VerbsDescription{{
+		Action: "get", Method: "GET", Path: "/x",
+		Queries: []definitionv1alpha1.QueryParam{{Name: "api-version", Value: "2024-01-01"}},
+		Headers: []definitionv1alpha1.HeaderItem{{Name: "Accept", Value: "application/json"}},
+	}})
+	require.Len(t, verbs, 1)
+
+	require.Len(t, verbs[0].StaticQueries, 1, "the verb's static queries were dropped by the shim")
+	assert.Equal(t, "api-version", verbs[0].StaticQueries[0].Name)
+	assert.Equal(t, "2024-01-01", verbs[0].StaticQueries[0].Value)
+
+	require.Len(t, verbs[0].StaticHeaders, 1, "the verb's static headers were dropped by the shim")
+	assert.Equal(t, "Accept", verbs[0].StaticHeaders[0].Name)
+	assert.Equal(t, "application/json", verbs[0].StaticHeaders[0].Value)
 }

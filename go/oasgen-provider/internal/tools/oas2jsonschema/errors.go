@@ -59,6 +59,11 @@ const (
 	CodeNoStatusSchema GenerationCode = "NoStatusSchema"
 	// CodeFieldNotFound indicates that a field was not found in the schema.
 	CodeFieldNotFound GenerationCode = "FieldNotFound"
+
+	// CodeStatusFieldShadowsParameter: a DOTTED status field whose first segment names a request
+	// parameter, so the status renders an object where the request needs a scalar. See
+	// status_field_parameter_shadow.go.
+	CodeStatusFieldShadowsParameter GenerationCode = "StatusFieldShadowsParameter"
 	// CodeIdentifierNotResolvable indicates that a declared identifier names no field the controller can
 	// ever read: it is absent from the generated spec AND from the response schema that populates status.
 	// findby compares each listed item against the CR, so an identifier that exists in neither place can

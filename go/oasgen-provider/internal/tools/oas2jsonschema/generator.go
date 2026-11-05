@@ -94,6 +94,11 @@ func (g *OASSchemaGenerator) Generate() (*GenerationResult, error) {
 	// for most kinds (#445).
 	generationWarnings = append(generationWarnings, g.warnIdentifiersMissingFromFindByResponse()...)
 
+	// A dotted status field whose first segment names a request parameter (#463). Reported here rather
+	// than from the spec builder because it is a property of the STATUS declaration against the verbs,
+	// and neither builder owns both.
+	generationWarnings = append(generationWarnings, g.warnDottedStatusFieldShadowsParameter(specSchema)...)
+
 	// Validate Status Schema
 	validationWarnings := ValidateSchemas(g.docs, g.resourceConfig.Verbs, g.generatorConfig)
 

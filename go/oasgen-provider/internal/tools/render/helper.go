@@ -64,6 +64,31 @@ func toDomainFieldMapping(v definitionv1alpha1.VerbsDescription) []oas2jsonschem
 // path skipped it. TestEveryVerbFieldIsCarriedByTheShim asserts by reflection that this function leaves
 // no exported field of Verb zero, so adding one to the domain type and forgetting it here fails loudly
 // instead of degrading quietly.
+// toDomainStaticQueries and toDomainStaticHeaders carry the verb's static injections. Separate
+// functions despite identical bodies, because the SOURCE types differ (QueryParam vs HeaderItem) and
+// collapsing them would need a type parameter for no gain.
+func toDomainStaticQueries(in []definitionv1alpha1.QueryParam) []oas2jsonschema.StaticValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]oas2jsonschema.StaticValue, len(in))
+	for i, q := range in {
+		out[i] = oas2jsonschema.StaticValue{Name: q.Name, Value: q.Value}
+	}
+	return out
+}
+
+func toDomainStaticHeaders(in []definitionv1alpha1.HeaderItem) []oas2jsonschema.StaticValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]oas2jsonschema.StaticValue, len(in))
+	for i, h := range in {
+		out[i] = oas2jsonschema.StaticValue{Name: h.Name, Value: h.Value}
+	}
+	return out
+}
+
 func toDomainVerbs(verbs []definitionv1alpha1.VerbsDescription) []oas2jsonschema.Verb {
 	out := make([]oas2jsonschema.Verb, len(verbs))
 	for i, v := range verbs {
@@ -76,6 +101,8 @@ func toDomainVerbs(verbs []definitionv1alpha1.VerbsDescription) []oas2jsonschema
 			// client for findby alone -- but converting it for every verb keeps this a faithful copy
 			// rather than a filter whose rule has to be kept in step with the consumer's (#444).
 			IdentifiersMatchPolicy: v.IdentifiersMatchPolicy,
+			StaticQueries:          toDomainStaticQueries(v.Queries),
+			StaticHeaders:          toDomainStaticHeaders(v.Headers),
 			FieldMapping:           toDomainFieldMapping(v),
 			Correlation:            toDomainCorrelation(v.Correlation),
 			Async:                  toDomainAsync(v.Async),
