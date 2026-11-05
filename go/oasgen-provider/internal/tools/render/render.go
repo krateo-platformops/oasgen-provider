@@ -177,7 +177,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 		AuthenticationGenerated: len(result.ConfigurationSchema) > 0 && bytes.Contains(result.ConfigurationSchema, []byte(`"authentication"`)),
 	}
 
-	res, err := crdgen.Generate(crdgen.Options{
+	res, crdWarnings, err := crdgen.GenerateWithWarnings(crdgen.Options{
 		Group:        gvk.Group,
 		Version:      gvk.Version,
 		Kind:         gvk.Kind,
@@ -189,6 +189,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 	if err != nil {
 		return nil, fmt.Errorf("generating CRD: %w", err)
 	}
+	out.GenerationWarnings = append(out.GenerationWarnings, crdgenWarnings("the generated CRD", crdWarnings)...)
 	out.CRD, err = crd.Unmarshal(res)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshalling CRD: %w", err)
@@ -200,7 +201,7 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 			Version: DefaultVersion,
 			Kind:    text.CapitaliseFirstLetter(cr.Spec.Resource.Kind) + "Configuration",
 		}
-		cfgRes, cerr := crdgen.Generate(crdgen.Options{
+		cfgRes, cfgWarnings, cerr := crdgen.GenerateWithWarnings(crdgen.Options{
 			Group:      cfgGVK.Group,
 			Version:    cfgGVK.Version,
 			Kind:       cfgGVK.Kind,
@@ -211,10 +212,34 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 		if cerr != nil {
 			return nil, fmt.Errorf("generating configuration CRD: %w", cerr)
 		}
+		out.GenerationWarnings = append(out.GenerationWarnings, crdgenWarnings("the generated Configuration CRD", cfgWarnings)...)
 		out.ConfigurationCRD, cerr = crd.Unmarshal(cfgRes)
 		if cerr != nil {
 			return nil, fmt.Errorf("unmarshalling configuration CRD: %w", cerr)
 		}
 	}
 	return out, nil
+}
+
+// crdgenWarnings adapts crdgen's []string warnings onto this package's []error channel, which is what
+// reaches the log and the RestDefinition's event (see the controller's logWarnings call).
+//
+// WHY THIS EXISTS AT ALL (#452): until plumbing v1.26.1 the only entry point was crdgen.Generate, which
+// computed the transpiler's warnings and then dropped them -- nothing read, returned or logged them, so
+// "crdgen will warn about it" meant nothing. GenerateWithWarnings gives them back, but a channel is not a
+// signal until a consumer puts them somewhere durable, so they are appended to GenerationWarnings here
+// rather than returned in a new field no caller reads.
+//
+// THE SUBJECT IS PREFIXED because the two call sites in this file generate DIFFERENT CRDs from different
+// schemas. An unprefixed `spec.properties: given default {}` cannot be attributed to the managed CRD or
+// the Configuration CRD, and the Configuration CRD is the one a user cannot see in spec.resource.
+func crdgenWarnings(subject string, warnings []string) []error {
+	if len(warnings) == 0 {
+		return nil
+	}
+	out := make([]error, 0, len(warnings))
+	for _, w := range warnings {
+		out = append(out, fmt.Errorf("%s: %s", subject, w))
+	}
+	return out
 }

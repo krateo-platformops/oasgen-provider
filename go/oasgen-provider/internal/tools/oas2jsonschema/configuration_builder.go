@@ -223,7 +223,7 @@ func authMethodKey(info SecuritySchemeInfo) (string, bool) {
 // openIdConnect; all of them are reported by the caller rather than dropped.
 //
 // defaultHeader is applied to the apiKey shape's `header` field when non-empty. The caller leaves it empty
-// when the document declares SEVERAL apiKey schemes, so the field stays required and the author says which
+// when the document declares SEVERAL apiKey schemes, so no default satisfies it and the author says which
 // one they mean, instead of the generator picking one arbitrarily.
 func createSchemaForSecurityScheme(info SecuritySchemeInfo, defaultHeader string) (*Schema, error) {
 	if info.Type == SchemeTypeHTTP && info.Scheme == "basic" {
@@ -249,6 +249,16 @@ func createSchemaForSecurityScheme(info SecuritySchemeInfo, defaultHeader string
 // applyAPIKeyHeaderDefault sets the generated `header` property's default and description. With a single
 // apiKey scheme the default makes the field zero-config; with several the caller passes an empty
 // defaultHeader, leaving the author to choose.
+//
+// `header` IS REQUIRED IN BOTH CASES -- required is not what changes between the two branches, and an
+// earlier version of the comment below implied it was. What changes is whether a default satisfies it.
+// Kubernetes applies structural defaults BEFORE validation, so with a single scheme a Configuration that
+// omits `header` is defaulted to the scheme's declared name and then passes the required check; with
+// several, omitting it is rejected. The default turns a required field into an effectively optional one.
+//
+// Pinned by TestApiKeyHeaderIsBothRequiredAndDefaulted, and cross-checked against a real fleet: the
+// openstack-ironic-operator-kog session's Ironic documents declare apiKey exclusively (7 of 7, 0 bearer),
+// and their served Configuration CRDs carry the same `required: [header, tokenRef]` this renders.
 func applyAPIKeyHeaderDefault(sch *Schema, defaultHeader string, info SecuritySchemeInfo) {
 	for i := range sch.Properties {
 		if sch.Properties[i].Name != "header" || sch.Properties[i].Schema == nil {
