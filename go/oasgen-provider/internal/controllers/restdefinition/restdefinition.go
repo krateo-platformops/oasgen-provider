@@ -591,6 +591,31 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 			e.log.Debug("Auth secret references changed", "status", cr.Status.AuthSecretDigest, "current", h)
 			return e.observeDrift(cr, "the Configuration's authentication secret references changed; redeploying the controller")
 		}
+
+		// AND THE OBJECTS THEMSELVES, not only the digest of what they were built from (#473).
+		//
+		// The digest above answers "did the references change". It cannot express "does the Role exist", so
+		// a Role deleted by hand, lost to a namespace rebuild, or removed by the pre-#440 legacy sweep of a
+		// RestDefinition that collided on the old group-less name left this check satisfied and Update
+		// unreachable -- and syncAuthSecretRBAC runs only from Create and Update. The repair arrived only
+		// through an unrelated change to the spec, the OAS or the references, which may be never.
+		//
+		// Scoped to the namespaces the status says are provisioned, because that is exactly the set Sync
+		// wrote and the only set whose absence is a regression rather than a namespace that never had RBAC.
+		//
+		// A FAILED EVALUATION IS NOT DRIFT, matching every other check in this function: a transient API
+		// error must not flap a healthy resource into Creating.
+		if len(cr.Status.AuthSecretRBACNamespaces) > 0 {
+			roleName := deploy.AuthSecretRoleName(gvr)
+			if missing, merr := deploy.MissingAuthSecretRBAC(ctx, e.kube, roleName, cr.Status.AuthSecretRBACNamespaces); merr != nil {
+				e.log.Debug("Could not check auth secret RBAC for drift; skipping", "error", merr)
+			} else if len(missing) > 0 {
+				e.log.Debug("Auth secret RBAC is missing", "role", roleName, "namespaces", missing)
+				return e.observeDrift(cr, fmt.Sprintf(
+					"the auth-secret RBAC %q is missing in namespace(s) %s, so the controller cannot read its credential; reprovisioning",
+					roleName, strings.Join(missing, ", ")))
+			}
+		}
 	}
 
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
@@ -789,13 +814,22 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	// working resource over a migration concern, and the next pass retries.
 	e.backfillVersionLabelsReporting(ctx, cr, gvk, hasSecuritySchemes)
 
+	// BEFORE Deploy, not after (#473). The auth-secret Role is the ONLY grant that lets the generated
+	// controller read its credential, now that the blanket cluster-wide `secrets` grant is gone from the
+	// RDC ClusterRole. Deploying the Deployment first would start a pod whose very first credential read
+	// races the Role that authorises it -- a 403 on every fresh install, inside one reconcile but real.
+	//
+	// Safe in this order: the sync lists Configuration instances and RENDERS the ServiceAccount name from
+	// the same template Deploy uses (SelfServiceAccountName does not fetch it), so nothing here requires
+	// Deploy to have run. A RoleBinding may name a ServiceAccount that does not exist yet; it simply
+	// grants nothing until it does, which is the window Deploy then closes.
+	if err := e.syncAuthSecretRBAC(ctx, cr, gvr); err != nil {
+		return fmt.Errorf("syncing auth secret RBAC: %w", err)
+	}
+
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
 		return fmt.Errorf("installing controller: %w", err)
-	}
-
-	if err := e.syncAuthSecretRBAC(ctx, cr, gvr); err != nil {
-		return fmt.Errorf("syncing auth secret RBAC: %w", err)
 	}
 	if configurationGVR != (schema.GroupVersionResource{}) {
 		e.ensureConfigurationWatch(cr)
@@ -1224,13 +1258,22 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	// working resource over a migration concern, and the next pass retries.
 	e.backfillVersionLabelsReporting(ctx, cr, gvk, hasSecuritySchemes)
 
+	// BEFORE Deploy, not after (#473). The auth-secret Role is the ONLY grant that lets the generated
+	// controller read its credential, now that the blanket cluster-wide `secrets` grant is gone from the
+	// RDC ClusterRole. Deploying the Deployment first would start a pod whose very first credential read
+	// races the Role that authorises it -- a 403 on every fresh install, inside one reconcile but real.
+	//
+	// Safe in this order: the sync lists Configuration instances and RENDERS the ServiceAccount name from
+	// the same template Deploy uses (SelfServiceAccountName does not fetch it), so nothing here requires
+	// Deploy to have run. A RoleBinding may name a ServiceAccount that does not exist yet; it simply
+	// grants nothing until it does, which is the window Deploy then closes.
+	if err := e.syncAuthSecretRBAC(ctx, cr, gvr); err != nil {
+		return fmt.Errorf("syncing auth secret RBAC: %w", err)
+	}
+
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
 		return fmt.Errorf("installing controller: %w", err)
-	}
-
-	if err := e.syncAuthSecretRBAC(ctx, cr, gvr); err != nil {
-		return fmt.Errorf("syncing auth secret RBAC: %w", err)
 	}
 	if configurationGVR != (schema.GroupVersionResource{}) {
 		e.ensureConfigurationWatch(cr)

@@ -11,6 +11,7 @@ import (
 	kubecli "github.com/krateo-platformops/oasgen-provider/internal/tools/kube"
 	"github.com/krateo-platformops/plumbing/kubeutil/rbacgen"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -75,11 +76,19 @@ func legacyAuthSecretRoleName(gvr schema.GroupVersionResource) string {
 // be removed must not stop the others, and the caller logs rather than failing the reconcile, because an
 // orphaned legacy Role grants access to a ServiceAccount that no longer exists.
 //
-// ONE HAZARD WORTH NAMING: where two RestDefinitions previously collided on the legacy name, the first to
-// reconcile deletes the shared object. That is correct -- both then create their own group-qualified name
-// on the same pass -- but between those two events the second RestDefinition's RDC has no read access to
-// its credential. It is one reconcile of degradation to end a permanent flap, and there is no ordering
-// that avoids it without leaving the collision in place.
+// ONE HAZARD WORTH NAMING, and the earlier version of this comment described it wrongly: where two
+// RestDefinitions previously collided on the legacy name, the first to reconcile deletes the shared
+// object. The first then creates its own group-qualified name on the SAME pass -- but the second does not.
+// They are separate RestDefinitions with separate reconciles, so the second's Role arrives on ITS next
+// Create or Update, and until then its RDC has no read access to its credential.
+//
+// That window used to be unbounded: Observe's auth-secret check compared a digest of the secret
+// REFERENCES, which had not changed, so Observe reported up-to-date and Update -- the only caller of the
+// sync -- never ran. #473 closes it by giving Observe an existence check on the Role itself
+// (MissingAuthSecretRBAC above), so the second RestDefinition's next reconcile sees the absence and
+// reprovisions. The window is now one reconcile, which is what this comment originally claimed.
+//
+// There is still no ordering that avoids the window entirely without leaving the collision in place.
 func DeleteLegacyAuthSecretRBAC(ctx context.Context, kube client.Client, gvr schema.GroupVersionResource, namespaces []string) error {
 	legacy := legacyAuthSecretRoleName(gvr)
 	if legacy == AuthSecretRoleName(gvr) {
@@ -256,4 +265,48 @@ func DeleteAllAuthSecretRBAC(ctx context.Context, kube client.Client, roleName s
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// MissingAuthSecretRBAC returns the namespaces, among those given, where the auth-secret Role or its
+// RoleBinding is absent. Both are checked because SyncAuthSecretRBAC applies both and either one missing
+// is enough to break the grant.
+//
+// WHY THIS EXISTS (#473). Observe's auth-secret drift check compares a digest of the collected secret
+// REFERENCES. That channel answers "did the references change" and cannot express "does the Role exist", so
+// a Role deleted or never provisioned left Observe reporting ResourceUpToDate and Update never running --
+// and syncAuthSecretRBAC is reachable only from Create and Update. The repair was unreachable except
+// through an unrelated change to the spec, the OAS or the references.
+//
+// That was unobservable rather than harmful only because the shipped RDC ClusterRole granted `secrets`
+// cluster-wide, so the narrow Role restricted nothing. #473 removes that grant, which is exactly what makes
+// this check load-bearing: with the blanket grant gone, a missing Role IS a credential outage.
+//
+// NOT IsNotFound-TOLERANT IN THE WAY THE DELETERS ARE. A NotFound here is the signal, not a condition to
+// swallow; any OTHER error is returned, because reporting "missing" on a transient API failure would flap a
+// healthy resource into Creating -- the same reason Observe's other checks treat a failed evaluation as
+// "not drift" rather than as drift.
+func MissingAuthSecretRBAC(ctx context.Context, kube client.Client, roleName string, namespaces []string) ([]string, error) {
+	var missing []string
+	for _, ns := range namespaces {
+		key := types.NamespacedName{Name: roleName, Namespace: ns}
+
+		var role rbacv1.Role
+		switch err := kube.Get(ctx, key, &role); {
+		case apierrors.IsNotFound(err):
+			missing = append(missing, ns)
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("getting auth-secret Role in namespace %s: %w", ns, err)
+		}
+
+		var binding rbacv1.RoleBinding
+		switch err := kube.Get(ctx, key, &binding); {
+		case apierrors.IsNotFound(err):
+			missing = append(missing, ns)
+		case err != nil:
+			return nil, fmt.Errorf("getting auth-secret RoleBinding in namespace %s: %w", ns, err)
+		}
+	}
+	sort.Strings(missing)
+	return missing, nil
 }
