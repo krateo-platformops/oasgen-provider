@@ -357,6 +357,11 @@
                     },
                     "name": {
                       "type": "string"
+                    },
+                    "observedGeneration": {
+                      "description": "ObservedGeneration is the metadata.generation the controller last reconciled.",
+                      "type": "integer",
+                      "format": "int64"
                     }
                   }
                 }
