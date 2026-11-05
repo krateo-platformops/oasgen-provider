@@ -65,6 +65,34 @@ type StatusError struct {
 }
 
 func (e *StatusError) Error() string {
+	// A SYNTHESISED STATUS MUST NOT READ LIKE A VENDOR RESPONSE (#461).
+	//
+	// This type already knows the difference -- Synthesised is set only on the findby no-match paths --
+	// and callers branch on it (exists.go consults IsSynthesisedNotFound BEFORE IsNotFoundError, because
+	// the latter is true for both). The rendering threw that distinction away: an invented 404 came out
+	// as `unexpected status: 404: item not found`, which is exactly what a vendor 404 looks like.
+	//
+	// That is not a cosmetic problem. The message is the only thing an operator has when deciding
+	// whether to clear krateo.io/external-create-pending, and clearing it wrongly lets the reconciler
+	// create a resource that already exists. A reader who trusts the most concrete-looking token --
+	// a 404 saying "item not found" -- reaches precisely the conclusion the calling branch exists to
+	// prevent.
+	//
+	// Measured by the openstack-ironic session on a live fleet: the resource this message called
+	// "item not found" was `provision_state=active`, `power_state=power on`, `last_error=None`, and no
+	// request had reached the endpoint at all. The token was not merely unproven, it was FALSE about the
+	// world.
+	//
+	// Only this branch is new. A real vendor status still renders exactly as before, byte for byte,
+	// because every existing caller and test reads that form and none of them is wrong.
+	if e.Synthesised {
+		if e.Inner != nil {
+			return fmt.Sprintf("no item matched: status %d was synthesised by this controller and NOT "+
+				"received from the vendor (%v)", e.StatusCode, e.Inner)
+		}
+		return fmt.Sprintf("no item matched: status %d was synthesised by this controller and NOT "+
+			"received from the vendor", e.StatusCode)
+	}
 	if e.Inner != nil {
 		return fmt.Sprintf("unexpected status: %d: %v", e.StatusCode, e.Inner)
 	}

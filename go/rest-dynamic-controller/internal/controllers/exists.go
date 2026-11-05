@@ -170,8 +170,16 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 		// Returning false here is what duplicates a live vendor resource (#371). The comment below was
 		// right that a wrong false recreates one; a synthesised 404 slipped past it because it is
 		// indistinguishable from the vendor's own on the wire.
+		// The CONSEQUENCE is stated, not just the uncertainty. This error is what an operator reads when
+		// deciding whether to clear krateo.io/external-create-pending, and "not proof of absence" does not
+		// tell them what goes wrong if they get it wrong. The outer create-recovery message already names
+		// the annotation, so this half says why clearing it may be unsafe rather than naming it twice.
 		return false, fmt.Errorf("existence check: %s listed successfully but no item matched the "+
-			"resource's identifiers, which is not proof of absence: %w", action, callErr)
+			"resource's identifiers, which is not proof of absence -- the matching can fail for reasons "+
+			"unrelated to existence (identifiers absent from the list response, an envelope resolving to "+
+			"the wrong collection, a findby query that cannot be evaluated against the items returned), so "+
+			"proceeding as though the resource is absent may CREATE A DUPLICATE of one that already "+
+			"exists: %w", action, callErr)
 	case restclient.IsNotFoundError(callErr):
 		// A definite negative: the API answered, and answered that it is not there. This is the ONLY path
 		// that may return false.
