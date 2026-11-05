@@ -23,7 +23,15 @@ The per-Configuration auth-secret `Role` exists to scope a generated controller'
 
 That grant is gone (#473, #475).
 
-**This is self-healing on upgrade, not breaking.** Your installs already have the narrow Roles — they were provisioned all along, merely redundant — so narrowing changes nothing for a healthy RestDefinition. One thing had to ship with it: `Observe` now checks the Role **exists**, because its old auth-secret check compared a digest of the secret *references* and that channel cannot express "the Role is missing". A Role deleted by hand, lost to a namespace rebuild, or removed by the pre-#440 legacy sweep used to leave `Observe` reporting up-to-date, with the repair reachable only from `Create`/`Update` — so never. A RestDefinition in that state is now **repaired on its next reconcile**.
+**It is self-healing on upgrade, and for most installs it changes nothing** — the narrow Roles were provisioned all along, merely redundant.
+
+**But not for every install, and this is the part to read.** A pair of RestDefinitions that collided on the pre-#440 group-less name can be in a state where one of them has *no* Role naming its Secret and no RoleBinding for its ServiceAccount, while still recording the namespace as provisioned. Its credential was reachable **only** through the blanket grant this release removes. Measured on a live cluster, on two `Form` kinds in different API groups sharing one `forms-v1alpha1-authsecrets` Role that named only the first one's Secret.
+
+That is why the second change here is not optional: **`Observe` now checks the Role exists.** The old auth-secret check compared a digest of the secret *references*, and that channel cannot express "the Role is missing" — so the state above left `Observe` reporting up-to-date, with the repair reachable only from `Create`/`Update`, which the runtime calls only on drift. Nothing ever called it.
+
+At 0.53.0 the name `Observe` looks up is group-qualified, so **both** colliding RestDefinitions report their Role missing, drift once, and are reprovisioned with their own Role naming their own Secret — the sync now running ahead of the deployment. The heal is pinned by a test built from that live starting state, including a mutation showing that a check made "tolerant" of the legacy name would silently restore the outage (#477).
+
+**If you run a pair of RestDefinitions whose kinds share a resource plural across different API groups, and you are upgrading from below 0.52.0** (where #440's group-qualified name landed), expect one drift-and-reprovision per affected resource on the first reconcile after upgrade. If instead you have disabled the upgrade re-render, see the note under `status.observedGeneration` — the same flag gates this.
 
 `syncAuthSecretRBAC` also moved ahead of the deployment, so the pod no longer starts before the Role authorising its first credential read.
 
