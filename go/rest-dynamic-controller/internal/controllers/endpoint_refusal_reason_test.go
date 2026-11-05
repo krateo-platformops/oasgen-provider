@@ -42,8 +42,9 @@ func TestARefusedCreateIsRecordedAsCreateFailedAndPersisted(t *testing.T) {
 	mg := driftMG(1, nil)
 	h, dyn := observeAuthzHandler(t, mg)
 
-	stopped := h.stopOnEndpointRefusal(context.Background(), mg, "create", realRefusal(t), h.logger)
+	stopped, cerr := h.stopOnEndpointRefusal(context.Background(), mg, "create", realRefusal(t), h.logger)
 
+	require.NoError(t, cerr, "the write succeeded here, so the deferral channel must be empty (#468)")
 	require.True(t, stopped,
 		"the caller must be told to STOP: retrying a configuration decision cannot change it, and #313 "+
 			"settled that for the 403 case")
@@ -56,8 +57,9 @@ func TestARefusedUpdateIsRecordedAsUpdateFailed(t *testing.T) {
 	mg := driftMG(1, nil)
 	h, dyn := observeAuthzHandler(t, mg)
 
-	stopped := h.stopOnEndpointRefusal(context.Background(), mg, "update", realRefusal(t), h.logger)
+	stopped, cerr := h.stopOnEndpointRefusal(context.Background(), mg, "update", realRefusal(t), h.logger)
 
+	require.NoError(t, cerr, "the write succeeded here, so the deferral channel must be empty (#468)")
 	require.True(t, stopped)
 	assert.Equal(t, condition.ReasonUpdateFailed, persistedReadyReason(t, dyn, mg.GetName()),
 		"an update must not be reported as a failed create: the verb is the one distinction a consumer "+
@@ -71,8 +73,11 @@ func TestAVendorFailureIsNotAnEndpointRefusal(t *testing.T) {
 	h, dyn := observeAuthzHandler(t, mg)
 
 	boom := &restclient.StatusError{StatusCode: http.StatusInternalServerError}
-	stopped := h.stopOnEndpointRefusal(context.Background(), mg, "create", boom, h.logger)
+	stopped, cerr := h.stopOnEndpointRefusal(context.Background(), mg, "create", boom, h.logger)
 
+	assert.NoError(t, cerr,
+		"a 500 is not this helper's business, so it must not be reported as a deferred write either: "+
+			"(false, nil) is 'not mine' and (false, conflict) is 'mine but unwritten' (#468)")
 	assert.False(t, stopped,
 		"a 500 is the vendor having a bad minute, not a configuration decision: stopping here would "+
 			"abandon a create that the next reconcile would have completed")

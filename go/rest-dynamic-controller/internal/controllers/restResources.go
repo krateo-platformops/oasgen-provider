@@ -24,6 +24,7 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
@@ -839,9 +840,28 @@ func logVendorBody(log logging.Logger, verb string, mg *unstructured.Unstructure
 // NOT CALLED BY Delete, for the same reason stopOnAuthorizationDenied is not: stopping a delete lets the
 // finalizer be removed while the external resource still exists. Asserted at the source level, for both
 // guards, by TestDeleteDoesNotReachTheGuardINDIRECTLY.
-func (h *handler) stopOnEndpointRefusal(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) bool {
+// THE CONTRACT, because bool alone could not express the third case (#468):
+//
+//	(true,  nil)                      condition PERSISTED -- caller returns nil and stops retrying
+//	(false, nil)                      not this classification -- caller returns the original error
+//	(false, apierrors.IsConflict)     classification correct, the write DEFERRED -- caller returns the
+//	                                  conflict, which the runtime treats as a quiet requeue
+//	(true,  non-nil)                  never. TestStopHelpersNeverReportHandledWithAnError asserts it.
+//
+// The invariant that matters is the last line: reporting `true` with the condition unwritten makes the
+// caller stop retrying a resource that carries no condition at all -- silently inert. Before this change
+// the helpers protected that invariant by returning `false` on ANY write failure, which was the safe half
+// of a two-way choice and cost the classification: the caller fell through and returned the original
+// permanent error, so a benign conflict turned a precise permanent-failure condition into a retried
+// generic one -- the shape unstructured-runtime#30 set out to remove, arriving by another door.
+//
+// Keyed on apierrors.IsConflict rather than on unstructured-runtime's ErrStatusConflict sentinel, so this
+// is correct on the version pinned today AND after core-provider#359 lands, with no second change. Both
+// match: that session commits to keeping the API error wrapped and their test asserts both matchers on
+// the same error.
+func (h *handler) stopOnEndpointRefusal(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) (bool, error) {
 	if !errors.Is(err, hostpolicy.ErrEndpointNotPermitted) {
-		return false
+		return false, nil
 	}
 	cond := customcondition.CreateFailed(err.Error())
 	if verb == "update" {
@@ -849,7 +869,7 @@ func (h *handler) stopOnEndpointRefusal(ctx context.Context, mg *unstructured.Un
 	}
 	if serr := unstructuredtools.SetConditions(mg, cond); serr != nil {
 		log.Error(serr, "Setting condition")
-		return false
+		return false, nil
 	}
 	h.eventRecorder.Event(mg, event.Warning(reasonUpdated, event.Action(verb), fmt.Errorf(
 		"the %s request for %s was refused before it was sent; it will not be retried until the endpoint "+
@@ -863,10 +883,18 @@ func (h *handler) stopOnEndpointRefusal(ctx context.Context, mg *unstructured.Un
 		Pluralizer:    h.pluralizer,
 		DynamicClient: h.dynamicClient,
 	}); uerr != nil {
+		// A CONFLICT IS NOT A CLASSIFICATION FAILURE. The condition is right; the write lost a race with
+		// a concurrent pass. Reporting it lets the caller requeue instead of falling back to the original
+		// permanent error -- and the next pass re-derives the identical condition, because the errors
+		// these helpers classify (a 403, a host-policy refusal) recur.
+		if apierrors.IsConflict(uerr) {
+			log.Debug("Status write conflicted; deferring", "verb", verb)
+			return false, uerr
+		}
 		log.Error(uerr, "Updating status")
-		return false
+		return false, nil
 	}
-	return true
+	return true, nil
 }
 
 // observeAuthorizationDenied classifies a failed OBSERVE call, so a permanent refusal does not reach the
@@ -889,7 +917,13 @@ func (h *handler) stopOnEndpointRefusal(ctx context.Context, mg *unstructured.Un
 // the bare error goes back and the runtime's generic reason is correct, because we did not establish a
 // specific one.
 func (h *handler) observeAuthorizationDenied(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) error {
-	if !h.stopOnAuthorizationDenied(ctx, mg, verb, err, log) {
+	handled, cerr := h.stopOnAuthorizationDenied(ctx, mg, verb, err, log)
+	if cerr != nil {
+		// The classification stands and only the write deferred, so do NOT fall back to the original
+		// error: that is what would make a benign conflict read as a generic reconcile failure.
+		return cerr
+	}
+	if !handled {
 		return err
 	}
 	// The wrap is only meaningful because stopOnAuthorizationDenied PERSISTED the condition above: the
@@ -920,13 +954,13 @@ func (h *handler) observeAuthorizationDenied(ctx context.Context, mg *unstructur
 //
 // A 401 is not in scope here either: see restclient.IsAuthorizationDenied. Credential rotation is delegated
 // to a secret manager, and retrying a 401 is the mechanism by which a rotation mid-reconcile is survived.
-func (h *handler) stopOnAuthorizationDenied(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) bool {
+func (h *handler) stopOnAuthorizationDenied(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) (bool, error) {
 	if !restclient.IsAuthorizationDenied(err) {
-		return false
+		return false, nil
 	}
 	if serr := unstructuredtools.SetConditions(mg, customcondition.AuthorizationDenied(verb)); serr != nil {
 		log.Error(serr, "Setting condition")
-		return false
+		return false, nil
 	}
 	h.eventRecorder.Event(mg, event.Warning(reasonUpdated, event.Action(verb), fmt.Errorf(
 		"the API refused the %s request for %s; the credential is not permitted to perform it, so it will not be retried",
@@ -939,10 +973,18 @@ func (h *handler) stopOnAuthorizationDenied(ctx context.Context, mg *unstructure
 		Pluralizer:    h.pluralizer,
 		DynamicClient: h.dynamicClient,
 	}); uerr != nil {
+		// A CONFLICT IS NOT A CLASSIFICATION FAILURE. The condition is right; the write lost a race with
+		// a concurrent pass. Reporting it lets the caller requeue instead of falling back to the original
+		// permanent error -- and the next pass re-derives the identical condition, because the errors
+		// these helpers classify (a 403, a host-policy refusal) recur.
+		if apierrors.IsConflict(uerr) {
+			log.Debug("Status write conflicted; deferring", "verb", verb)
+			return false, uerr
+		}
 		log.Error(uerr, "Updating status")
-		return false
+		return false, nil
 	}
-	return true
+	return true, nil
 }
 
 func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) error {
@@ -1114,11 +1156,14 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	// the Response. Either way this is the real external status code, not a stand-in (#253).
 	h.emitAudit(ctx, mg, cli.ServerURL(), callInfo.Method, externalStatusCode(&response, err), err)
 	if err != nil {
-		if h.stopOnAuthorizationDenied(ctx, mg, "create", err, log) {
-			return nil
+		// `handled || cerr != nil` reads the contract directly: cerr is nil when the condition
+		// persisted (so this returns nil and stops retrying) and carries the conflict when the write
+		// deferred (so the runtime requeues). Falling through means neither applied.
+		if handled, cerr := h.stopOnAuthorizationDenied(ctx, mg, "create", err, log); handled || cerr != nil {
+			return cerr
 		}
-		if h.stopOnEndpointRefusal(ctx, mg, "create", err, log) {
-			return nil
+		if handled, cerr := h.stopOnEndpointRefusal(ctx, mg, "create", err, log); handled || cerr != nil {
+			return cerr
 		}
 		log.Error(err, "Performing REST call")
 		logVendorBody(log, "create", mg, err)
@@ -1315,11 +1360,14 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 	// the Response. Either way this is the real external status code, not a stand-in (#253).
 	h.emitAudit(ctx, mg, cli.ServerURL(), callInfo.Method, externalStatusCode(&response, err), err)
 	if err != nil {
-		if h.stopOnAuthorizationDenied(ctx, mg, "update", err, log) {
-			return nil
+		// `handled || cerr != nil` reads the contract directly: cerr is nil when the condition
+		// persisted (so this returns nil and stops retrying) and carries the conflict when the write
+		// deferred (so the runtime requeues). Falling through means neither applied.
+		if handled, cerr := h.stopOnAuthorizationDenied(ctx, mg, "update", err, log); handled || cerr != nil {
+			return cerr
 		}
-		if h.stopOnEndpointRefusal(ctx, mg, "update", err, log) {
-			return nil
+		if handled, cerr := h.stopOnEndpointRefusal(ctx, mg, "update", err, log); handled || cerr != nil {
+			return cerr
 		}
 		log.Error(err, "Performing REST call")
 		logVendorBody(log, "update", mg, err)
