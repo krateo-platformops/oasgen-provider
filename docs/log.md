@@ -13,6 +13,80 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-05 — 0.53.0
+
+Eight changes. **One narrows a privilege, one makes a generator upgrade re-render your CRDs, and one adds a field to every generated CRD's status.** The rest are correctness fixes and documentation.
+
+### The RDC ClusterRole no longer grants every Secret in the cluster
+
+The per-Configuration auth-secret `Role` exists to scope a generated controller's credential access to exactly the Secrets its Configuration instances reference. **It scoped nothing.** The shipped ClusterRole granted `resources: ["secrets"]` cluster-wide, with no `resourceNames`, bound to the same ServiceAccount — so the narrow Role was a strict subset of a grant its subject already held.
+
+That grant is gone (#473, #475).
+
+**It is self-healing on upgrade, and for most installs it changes nothing** — the narrow Roles were provisioned all along, merely redundant.
+
+**But not for every install, and this is the part to read.** A pair of RestDefinitions that collided on the pre-#440 group-less name can be in a state where one of them has *no* Role naming its Secret and no RoleBinding for its ServiceAccount, while still recording the namespace as provisioned. Its credential was reachable **only** through the blanket grant this release removes. Measured on a live cluster, on two `Form` kinds in different API groups sharing one `forms-v1alpha1-authsecrets` Role that named only the first one's Secret.
+
+That is why the second change here is not optional: **`Observe` now checks the Role exists.** The old auth-secret check compared a digest of the secret *references*, and that channel cannot express "the Role is missing" — so the state above left `Observe` reporting up-to-date, with the repair reachable only from `Create`/`Update`, which the runtime calls only on drift. Nothing ever called it.
+
+At 0.53.0 the name `Observe` looks up is group-qualified, so **both** colliding RestDefinitions report their Role missing, drift once, and are reprovisioned with their own Role naming their own Secret — the sync now running ahead of the deployment. The heal is pinned by a test built from that live starting state, including a mutation showing that a check made "tolerant" of the legacy name would silently restore the outage (#477).
+
+**If you run a pair of RestDefinitions whose kinds share a resource plural across different API groups, and you are upgrading from below 0.52.0** (where #440's group-qualified name landed), expect one drift-and-reprovision per affected resource on the first reconcile after upgrade. If instead you have disabled the upgrade re-render, see the note under `status.observedGeneration` — the same flag gates this.
+
+`syncAuthSecretRBAC` also moved ahead of the deployment, so the pod no longer starts before the Role authorising its first credential read.
+
+### An upgrade now re-renders your existing kinds, once
+
+`status.generatorBuild` records the provider build that last generated each CRD, and a higher build triggers one re-render (#453, #460). This is what makes a release's generation fixes reach kinds that already exist — previously they applied only to kinds generated after the upgrade.
+
+**The trigger is directional.** It compares release triples only, so a *rollback* does not re-render: a downgrade re-rendering would prune fields from live CRs that the newer generator had added.
+
+Default on. Set `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false` to stage a large fleet and re-render deliberately — but note that generation fixes then do not apply until something else changes the OAS or `spec.resource`.
+
+### Every generated CRD gains `status.observedGeneration`
+
+Via plumbing v1.27.0 (#452, #474). Five additive lines on a subresource:
+
+```yaml
+observedGeneration:
+  description: ObservedGeneration is the metadata.generation the controller last reconciled.
+  type: integer
+  format: int64
+```
+
+It cannot prune a spec value and cannot be materialised onto spec. **Measured across 12 plumbing minors, this is the only change to a generated CRD**, confirmed independently on 32 kinds by a consumer: 32/32 differing by exactly three leaf values, 0 changed paths under `spec`, and Configuration CRDs 32/32 identical.
+
+**Nothing writes the field yet.** The declaration ships first by design. If you run with `REGENERATE_ON_UPGRADE=false`, your CRDs will not declare it, and when a future release starts writing it the value will be pruned silently — harmless until something reads it, at which point absent is indistinguishable from "never reconciled" (#466).
+
+### crdgen's warnings now reach you
+
+Since the generator was adopted, crdgen computed warnings about the CRD it was producing and `Generate` dropped them: nothing read, returned or logged them. `GenerateWithWarnings` exists as of plumbing v1.26.1, and they now land in the same channel as oasgen's own generation warnings — the controller's log and the RestDefinition's event (#452, #474).
+
+The first one you are likely to see concerns a vendor `default` on a nested optional object:
+
+```
+the generated CRD: spec.opts: given default {} so its nested defaults apply when it is
+omitted; the apiserver stores the defaulted values in every object that omits it
+```
+
+### A composite parameter value is refused instead of dropped
+
+A request-direction `fieldMapping` whose value is an object or array was silently discarded for path, query, header and cookie destinations — the request went to the vendor without it. It is now refused with the destination and field named (#463, #464).
+
+### A synthesised 404 says so
+
+When a listing succeeds and nothing matches, rest-dynamic-controller invents a 404 to signal absence. Its message was indistinguishable from a 404 the vendor actually sent, which sent at least two investigations looking for a vendor response that never existed. The synthesised case now says so explicitly (#461, #465).
+
+### A status conflict no longer discards a permanent-failure classification
+
+A benign 409 while writing status overwrote the verdict that a failure was permanent, so a resource that should have stopped kept retrying (#468, #469). Adopting unstructured-runtime v1.9.0 is what makes this the common path rather than a rare one: at v1.7.6 `tools.UpdateStatus` retried a conflict by re-submitting the caller's stale status onto a fresh resourceVersion — **a lost update that was live for this component with none of its own code involved.** Measured: one `UpdateStatus` cost five apiserver writes on a persistent conflict at v1.7.6, and one at v1.9.0.
+
+### Documentation
+
+- **A vendor `default` becomes a real structural CRD default** — what the cluster stores for a field you never set, and why that matters when the vendor's own default later changes (#471, #472). The behaviour is deliberate and unchanged; it was simply undocumented.
+- **Neither image has a shell**, so `kubectl exec` cannot work; the section says what to do instead (#311, #467). Both images are `gcr.io/distroless/static:nonroot` — rest-dynamic-controller was first and 0.41.0 brought the provider into line — so this applies to both, and `kubectl debug --target` is the escape hatch.
+- **The resource CRD's api version is derived from the OAS document, and that derivation changed in 0.28.1** (#315, #467). The rule itself was already documented; that it *changed* was recorded only here in the log, and a changelog entry is not documentation. **An example, runbook or CI manifest written before 0.28.1 was correct when written and becomes silently wrong on upgrade** — the document did not change, the CR did not change, and the kind the cluster serves did. The `*Configuration` half is unaffected: it was `v1alpha1` then and is `v1alpha1` now.
+
 ## 2026-11-05 — 0.52.0
 
 Eighteen changes, and two of them are upgrade consequences rather than improvements. **Read the
