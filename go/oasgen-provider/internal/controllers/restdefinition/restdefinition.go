@@ -80,7 +80,7 @@ var (
 	RDCrbacConfigFolder       = path.Join(os.TempDir(), "assets/rdc-rbac/")
 )
 
-func Setup(mgr ctrl.Manager, o controller.Options, metrics reconciler.MetricsRecorder) error {
+func Setup(mgr ctrl.Manager, o controller.Options, metrics reconciler.MetricsRecorder, genCfg GeneratorConfig) error {
 	name := reconciler.ControllerName(definitionv1alpha1.RestDefinitionGroupKind)
 
 	log := o.Logger.WithValues("controller", name)
@@ -117,6 +117,7 @@ func Setup(mgr ctrl.Manager, o controller.Options, metrics reconciler.MetricsRec
 		disc:     discovery,
 		parser:   oas2jsonschema.NewLibOASParser(),
 		cfgWatch: dynamicwatch.NewRegistry(mgr.GetCache()),
+		genCfg:   genCfg,
 	}
 
 	r := reconciler.NewReconciler(mgr,
@@ -146,6 +147,32 @@ func Setup(mgr ctrl.Manager, o controller.Options, metrics reconciler.MetricsRec
 	return nil
 }
 
+// GeneratorConfig carries the process-level settings the controller cannot derive from the CR it is
+// reconciling. Passed explicitly from main rather than read out of the environment here: main already
+// exports Build as SERVICE_VERSION, and depending on a variable main happens to set would be a hidden
+// coupling that no signature declares.
+type GeneratorConfig struct {
+	// Build identifies this binary (main.Build). See status.generatorBuild for why an empty value is
+	// deliberately inert rather than treated as drift.
+	Build string
+
+	// RegenerateOnUpgrade re-renders every RestDefinition's CRD exactly once after an upgrade, which is
+	// what carries a release's generation fixes to kinds that already exist. Default true. An operator
+	// staging a large fleet sets OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false and accepts the trade the
+	// default exists to avoid: generation fixes then do not apply until something else re-renders.
+	RegenerateOnUpgrade bool
+}
+
+// generatorChanged reports whether a build OTHER than this one generated the CRD recorded by stored.
+// False whenever the trigger is disabled or this build carries no identity, so the only thing that can
+// provoke a regeneration is a genuine, known difference between two named builds.
+func (c GeneratorConfig) generatorChanged(stored string) bool {
+	if !c.RegenerateOnUpgrade || c.Build == "" {
+		return false
+	}
+	return stored != c.Build
+}
+
 type connector struct {
 	kube     client.Client
 	log      logging.Logger
@@ -158,6 +185,7 @@ type connector struct {
 	// Build in Setup once the controller exists.
 	cfgWatch *dynamicwatch.Registry
 	ctrl     crcontroller.Controller
+	genCfg   GeneratorConfig
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -179,6 +207,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		parser:   c.parser,
 		cfgWatch: c.cfgWatch,
 		ctrl:     c.ctrl,
+		genCfg:   c.genCfg,
 	}, nil
 }
 
@@ -192,6 +221,7 @@ type external struct {
 	parser   oas2jsonschema.Parser
 	cfgWatch *dynamicwatch.Registry
 	ctrl     crcontroller.Controller
+	genCfg   GeneratorConfig
 }
 
 // ensureConfigurationWatch registers a watch on cr's generated Configuration Kind the first time it is
@@ -494,6 +524,15 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		return e.observeDrift(cr, "spec.resource changed; regenerating the CRD")
 	}
 
+	// The generator is the fifth input and the only one nothing hashed. The three checks above compare
+	// what goes IN; this one compares what transforms it. Without it an upgrade that fixes the schema
+	// generator left every existing CRD on the old schema while reporting Ready, and the operator's only
+	// signal was the absence of the fix they had just upgraded for (#453).
+	if e.genCfg.generatorChanged(cr.Status.GeneratorBuild) {
+		e.log.Debug("Generator build changed", "status", cr.Status.GeneratorBuild, "current", e.genCfg.Build)
+		return e.observeDrift(cr, "the provider that generated this CRD has been upgraded; regenerating the CRD")
+	}
+
 	// A Configuration instance's usernameRef/passwordRef/tokenRef can change (or an instance can appear/
 	// disappear) independently of the RestDefinition's own spec, so re-collect and re-hash on every
 	// reconcile and treat a change as drift, same pattern as the OAS-content check above. Gated on
@@ -752,6 +791,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
 	cr.Status.OASHash = oasHash
 	cr.Status.ResourceHash = resourceHash(cr)
+	cr.Status.GeneratorBuild = e.genCfg.Build
 
 	// Taken AFTER every in-place step above and immediately before the write. A field set after this
 	// line is not in the snapshot and so is never persisted -- that is the one ordering rule this shape
@@ -1102,14 +1142,21 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	// only redeployed the RDC. Gated on the OAS content hash so a drift triggered by anything else (e.g. the
 	// deployment digest) does not needlessly re-run the crd generator.
 	resHash := resourceHash(cr)
-	if oasHash != cr.Status.OASHash || resHash != cr.Status.ResourceHash {
+	generatorChanged := e.genCfg.generatorChanged(cr.Status.GeneratorBuild)
+	if oasHash != cr.Status.OASHash || resHash != cr.Status.ResourceHash || generatorChanged {
 		e.log.Debug("Regenerating CRD",
 			"oasChanged", oasHash != cr.Status.OASHash,
-			"resourceChanged", resHash != cr.Status.ResourceHash)
+			"resourceChanged", resHash != cr.Status.ResourceHash,
+			"generatorChanged", generatorChanged)
 		if gerr := e.generateAndApplyCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); gerr != nil {
 			return fmt.Errorf("regenerating CRD: %w", gerr)
 		}
 		cr.Status.ResourceHash = resHash
+		// Stamped unconditionally, not only when generatorChanged: the CRD was just rendered by THIS
+		// build whatever provoked the render, so recording a different build would be false. It also
+		// means an operator who has opted out still gets the stamp advanced by any real regeneration,
+		// and so does not collect a spurious one later if they opt back in.
+		cr.Status.GeneratorBuild = e.genCfg.Build
 	}
 
 	// Retire served versions nothing is using any more. OUTSIDE the regeneration gate above, because a
