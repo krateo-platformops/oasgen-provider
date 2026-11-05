@@ -59,9 +59,11 @@ at the end, but existing entries cannot be removed, renamed, reordered or change
 So **five strict and two append-only**, seven rules in total. The authority is the marker on each field in
 `apis/restdefinitions/v1alpha1/types.go`; counting them by grepping the rendered CRD for `oldSelf`
 over-counts, because two of the matches are inside a `description` rather than a `rule`.
-widening the allowlist only adds fields to the CRD, while narrowing it would remove fields
-live CRs may be setting — which is what immutability actually protects against. Existing
-entries cannot be removed, renamed or reordered.
+
+`includedSpecFields` is append-only rather than strictly immutable for a reason worth knowing before
+you plan a change: widening the allowlist only **adds** fields to the generated CRD, while narrowing it
+would **remove** fields live CRs may already be setting — which is the thing immutability exists to
+protect against.
 
 ## Actions
 
@@ -326,6 +328,13 @@ non-alphanumerics replaced by `-`, a leading digit prefixed with `v` — so `1.1
 version CRs must be written against: `kubectl get restdefinition <name> -o wide` prints the
 one in force (the `API VERSION` column), and writing a CR against `v1alpha1` out of habit
 fails with `no matches for kind`.
+
+> **This derivation arrived in 0.28.1. Before it, both halves were hardcoded `v1alpha1`.** So an
+> example written against an older oasgen was *correct when written* and becomes silently wrong on
+> upgrade — the document did not change, the CR did not change, and the kind the cluster serves did.
+> If you are carrying examples, runbooks or CI manifests written before 0.28.1, the `apiVersion` on
+> every generated resource is the thing to re-check; the `*Configuration` half is unaffected, because
+> it was `v1alpha1` then and is `v1alpha1` now.
 
 Every generated CR carries a `configurationRef` (name/namespace) pointing at its
 Configuration instance. The Configuration spec holds:
