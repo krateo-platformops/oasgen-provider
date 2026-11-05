@@ -25,6 +25,7 @@ import (
 	"github.com/krateo-platformops/plumbing/kubeutil/eventrecorder"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 
+	"github.com/Masterminds/semver/v3"
 	definitionv1alpha1 "github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
 	"github.com/krateo-platformops/provider-runtime/pkg/controller"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
@@ -163,14 +164,56 @@ type GeneratorConfig struct {
 	RegenerateOnUpgrade bool
 }
 
-// generatorChanged reports whether a build OTHER than this one generated the CRD recorded by stored.
-// False whenever the trigger is disabled or this build carries no identity, so the only thing that can
-// provoke a regeneration is a genuine, known difference between two named builds.
+// generatorChanged reports whether this build is NEWER than the one that generated the CRD recorded by
+// stored. Directional, deliberately, and that is the whole subtlety of this function.
+//
+// WHY NOT A PLAIN INEQUALITY, which is what this did first. A mismatch is symmetric: a DOWNGRADE looks
+// exactly like an upgrade. Rolling the provider back would then re-render every CRD with the OLDER
+// generator and silently revert the very fixes the newer one had applied -- and reverting a schema is not
+// a cosmetic loss. A field that disappears from a CRD is PRUNED FROM EVERY LIVE CR at the next write, so
+// a ten-minute rollback of a bad deploy would strip values the resources need, which is #419's failure
+// mode arriving as a consequence of this feature.
+//
+// Raised by the openstack-ironic session from a real rollback: they went back to 0.50.0 while their CRDs
+// had been written by a newer generator, leaving a cluster running an older generator against newer
+// schemas. Benign as it stands -- nothing regenerates until something nudges it -- but with a symmetric
+// trigger it would have reverted `spec.node_id`, which is the exact field whose absence had wedged a CR
+// and cost them a day. Their words: "it is exactly the case nobody writes a test for."
+//
+// So a rollback leaves the newer schema in place. That is a stale-FORWARD schema, which is the safe
+// direction: the generator is behind the artifact, no data is lost, and the next genuine upgrade
+// re-renders it.
+//
+// ONLY MAJOR.MINOR.PATCH IS COMPARED. The stamp is `0.52.0-<sha>`, where the sha is a semver prerelease
+// -- and prereleases sort BEFORE their release, so a literal comparison would make `0.52.0-abc` older
+// than `0.52.0`, and two builds of one version would order by sha, which means nothing. Two stamps of
+// the same release are the same source, so equal triples are no change.
+//
+// UNPARSEABLE FAILS CLOSED. If either side is not semver the direction cannot be established, so nothing
+// is regenerated. That risks a silently inert feature if the stamp format ever changes, which is the
+// lesser of the two risks: the other one reverts schemas.
 func (c GeneratorConfig) generatorChanged(stored string) bool {
 	if !c.RegenerateOnUpgrade || c.Build == "" {
 		return false
 	}
-	return stored != c.Build
+	if stored == "" {
+		// Never recorded: the activation path every existing cluster takes when this ships. One
+		// re-render, and such a CRD may genuinely be stale.
+		return true
+	}
+
+	current, cerr := semver.NewVersion(c.Build)
+	previous, perr := semver.NewVersion(stored)
+	if cerr != nil || perr != nil {
+		return false
+	}
+	return releaseTriple(current).GreaterThan(releaseTriple(previous))
+}
+
+// releaseTriple drops the prerelease and build metadata, leaving MAJOR.MINOR.PATCH. See
+// generatorChanged for why the sha must not participate in the ordering.
+func releaseTriple(v *semver.Version) *semver.Version {
+	return semver.New(v.Major(), v.Minor(), v.Patch(), "", "")
 }
 
 type connector struct {
