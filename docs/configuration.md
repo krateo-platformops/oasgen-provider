@@ -139,6 +139,56 @@ through the chart's `rdc.env`, which restarts every RDC instance.
 > the result it restarts each generated Deployment so the new environment is actually
 > picked up.
 
+## Checking a RestDefinition's declarations — `status.schemaWarnings`
+
+A RestDefinition can be `Ready=True` and `Synced=True` while its own declarations contain errors. Naming a
+field that the OpenAPI document does not have is **deliberately non-fatal** — failing generation over it
+would break working installs — so the generator records the problem and carries on.
+
+`status.schemaWarnings` lists what the **current** render found:
+
+```console
+$ kubectl get restdefinition baremetalhost -n krateo-system \
+    -o jsonpath='{range .status.schemaWarnings[*]}{@}{"\n"}{end}'
+generation error at identifiers.node_id: status field 'node_id' not found in response, defaulting to string
+generation error: field 'uuid' set in excludedSpecFields not found in schema
+```
+
+**Absent means clean.** The field is rewritten on every render, including to nothing, so a fixed
+declaration clears it rather than leaving a stale complaint.
+
+### Sweeping a fleet
+
+One command, no tooling:
+
+```console
+$ kubectl get restdefinition -A \
+    -o jsonpath='{range .items[?(@.status.schemaWarnings)]}{.metadata.namespace}{"/"}{.metadata.name}{"\t"}{.status.schemaWarnings}{"\n"}{end}'
+```
+
+That matters because the alternative was rendering every definition by hand. On one fleet, four
+definitions carried eight generation errors between them and all eight were found that way.
+
+### Why the Event is not enough
+
+The same warnings are also emitted as a `SchemaWarnings` **Warning Event**, which is still the right
+channel for "this just happened" — but it is not a record. The apiserver's default `--event-ttl` is **one
+hour**, while a declaration naming a missing field stays wrong until someone edits it. A definition
+installed yesterday was therefore indistinguishable from a correct one through every cluster-visible
+channel.
+
+```console
+$ kubectl describe restdefinition baremetalhost -n krateo-system | grep -A3 SchemaWarnings   # only if recent
+$ kubectl get restdefinition baremetalhost -n krateo-system -o jsonpath='{.status.schemaWarnings}'  # always
+```
+
+### When it refreshes
+
+On create, and whenever the OAS document or `spec.resource` changes — which is exactly when the answer can
+have changed. From 0.53.0 a provider **upgrade** also re-renders every definition once
+(`status.generatorBuild`), so an upgrade refreshes this field across the fleet. If you have set
+`OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false`, it refreshes only when a definition itself changes.
+
 ## Inspecting a running controller — there is no shell in either image
 
 Both images run on `gcr.io/distroless/static:nonroot`: `rest-dynamic-controller` since **0.20.0**, and

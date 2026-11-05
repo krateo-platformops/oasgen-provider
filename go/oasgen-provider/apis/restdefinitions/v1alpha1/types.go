@@ -1212,6 +1212,22 @@ type RestDefinitionStatus struct {
 	// that cannot be identified.
 	// +optional
 	GeneratorBuild string `json:"generatorBuild,omitempty"`
+
+	// SchemaWarnings: the generation and validation warnings produced by the CURRENT render of this
+	// RestDefinition, as rendered messages.
+	//
+	// These are deliberately non-fatal -- a RestDefinition carrying them is still Ready and still Synced,
+	// because failing generation over a declaration that names a missing field would break working
+	// installs. They are recorded here because the FACT is permanent while the channel that used to carry
+	// it was not: they also go to a Warning Event, and the apiserver's default --event-ttl is one hour,
+	// so a definition installed yesterday with broken declarations was indistinguishable from a correct
+	// one through every cluster-visible channel (#462).
+	//
+	// REWRITTEN ON EVERY RENDER, including to empty. A fixed declaration clears this rather than leaving a
+	// stale complaint, which is the property that makes it worth reading at all.
+	//
+	// +optional
+	SchemaWarnings []string `json:"schemaWarnings,omitempty"`
 }
 
 // Why the printer columns below are arranged as they are.

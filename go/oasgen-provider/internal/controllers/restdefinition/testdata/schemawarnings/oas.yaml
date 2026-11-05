@@ -1,0 +1,20 @@
+openapi: 3.0.0
+info: {title: warnprobe, version: "1.0"}
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        name: {type: string}
+        size: {type: string}
+      required: [name]
+paths:
+  /widgets/{name}:
+    get:
+      operationId: getWidget
+      parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: '#/components/schemas/Widget'}}}}}
+    post:
+      operationId: createWidget
+      requestBody: {content: {application/json: {schema: {$ref: '#/components/schemas/Widget'}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: '#/components/schemas/Widget'}}}}}
