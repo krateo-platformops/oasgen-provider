@@ -88,6 +88,12 @@ func (g *OASSchemaGenerator) Generate() (*GenerationResult, error) {
 		generationWarnings = append(generationWarnings, w)
 	}
 
+	// An identifier the findby response does not carry. Unlike the policy warning above this one is
+	// emitted for EVERY kind declaring findby, because matching is not conditional on the absence of a
+	// create verb -- which is exactly the guard that made the existing resolvability warning unreachable
+	// for most kinds (#445).
+	generationWarnings = append(generationWarnings, g.warnIdentifiersMissingFromFindByResponse()...)
+
 	// Validate Status Schema
 	validationWarnings := ValidateSchemas(g.docs, g.resourceConfig.Verbs, g.generatorConfig)
 

@@ -81,6 +81,12 @@ const (
 	// the FIRST item matching ANY ONE identifier is adopted -- possibly a different object than the
 	// resource names (#444).
 	CodeIdentifiersMatchPolicyOmitted GenerationCode = "IdentifiersMatchPolicyOmitted"
+	// CodeIdentifierNotInFindByResponse indicates that a declared identifier is absent from the ITEMS the
+	// findby response carries, so findby can never compare against it. Distinct from
+	// CodeIdentifierNotResolvable, which asks whether the user can EXPRESS the identifier and only runs
+	// for a resource with no create verb, resolving against the get-preferred response. Matchability is a
+	// question for every kind declaring findby, and only the findby response can answer it (#445).
+	CodeIdentifierNotInFindByResponse GenerationCode = "IdentifierNotInFindByResponse"
 )
 
 // SchemaGenerationError defines a structured error for schema generation warnings.
