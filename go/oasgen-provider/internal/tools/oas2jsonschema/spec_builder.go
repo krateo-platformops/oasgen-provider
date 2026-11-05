@@ -699,6 +699,26 @@ func (g *OASSchemaGenerator) removeConfiguredFields(schema *Schema) []error {
 // warning would be a note attached to something already broken. Generation failing loudly is what gives
 // the author a chance to fix the definition.
 func (g *OASSchemaGenerator) removeExcludedSpecFields(schema *Schema, requiredParameters map[string]bool) []error {
+	// A required parameter the STATUS schema carries is satisfiable without a spec field, so excluding it
+	// does not leave a kind that cannot build its URL -- and the guard below must not refuse it.
+	//
+	// This is the same exemption, for the same reason, that mappingSuppliedParams already gets: the guard's
+	// premise is "dropping a required parameter leaves a kind that cannot build its own request URL", and
+	// that premise is FALSE once something else supplies the value. addParametersToSpec states it for the
+	// mapping case -- "false once a mapping supplies it, so the protection would be guarding nothing" --
+	// and the argument was not carried across to status.
+	//
+	// It holds because rest-dynamic-controller fills request parameters from BOTH, spec first then status
+	// (builder.go:170-174, "Apply values from the main resource's status"). So a vendor-assigned id placed
+	// in status by additionalStatusFields reaches the URL after create or findby populates it.
+	//
+	// Asked of statusFieldsFor rather than re-derived: it is the function that decides what the status
+	// schema is built from, so this cannot drift from the thing it is reasoning about.
+	statusSatisfiable := make(map[string]bool)
+	for _, f := range statusFieldsFor(g.resourceConfig) {
+		statusSatisfiable[f] = true
+	}
+
 	if len(g.resourceConfig.ExcludedSpecFields) == 0 {
 		return nil
 	}
@@ -716,7 +736,7 @@ func (g *OASSchemaGenerator) removeExcludedSpecFields(schema *Schema, requiredPa
 		// name, and a parameter is always a top-level spec property. An exclusion of `a.b.c` cannot be
 		// naming a parameter, so consulting the set for it would be comparing values from two different
 		// namespaces -- and a false match there would refuse a legitimate nested exclusion.
-		if len(pathSegments) == 1 && requiredParameters[pathSegments[0]] {
+		if len(pathSegments) == 1 && requiredParameters[pathSegments[0]] && !statusSatisfiable[pathSegments[0]] {
 			warnings = append(warnings, SchemaGenerationError{
 				Code: CodeFieldNotFound,
 				Message: fmt.Sprintf("field '%s' set in excludedSpecFields is a REQUIRED parameter of this "+
