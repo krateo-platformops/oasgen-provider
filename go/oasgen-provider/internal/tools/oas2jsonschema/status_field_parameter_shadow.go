@@ -158,10 +158,22 @@ func (g *OASSchemaGenerator) warnDottedStatusFieldShadowsParameter(specSchemaJSO
 	return warnings
 }
 
-// verbSuppliedParams returns the parameter names THIS verb's own request-direction fieldMapping entries
-// supply. Deliberately per-verb; see the comment above for why mappingSuppliedParams cannot be used.
+// verbSuppliedParams returns the parameter names THIS verb supplies by any means other than the spec or
+// status: a request-direction fieldMapping, or a STATIC query or header. Deliberately per-verb; see the
+// comment above for why mappingSuppliedParams cannot be used.
+//
+// The static injections belong here for the same reason a mapping does, and they are even stronger: they
+// are set BEFORE auto-population and auto-population does not overwrite, so the parameter is always
+// supplied and the composite can never reach the wire. Omitting them made this warning fire on a
+// parameter that is in fact never at risk.
 func verbSuppliedParams(verb Verb) map[string]bool {
 	supplied := map[string]bool{}
+	for _, q := range verb.StaticQueries {
+		supplied[q.Name] = true
+	}
+	for _, h := range verb.StaticHeaders {
+		supplied[h.Name] = true
+	}
 	for _, m := range verb.FieldMapping {
 		// An entry with no source in the CR is a response-direction mapping or malformed; neither
 		// supplies a request parameter. Same test mappingSuppliedParams makes.

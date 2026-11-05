@@ -304,3 +304,49 @@ func rawKeysOf(m map[string]json.RawMessage) []string {
 	}
 	return out
 }
+
+// A STATIC query or header supplies the parameter before auto-population runs, and auto-population does
+// not overwrite ("Avoid overwriting existing values"). So the parameter always has a value and the
+// composite can never reach the wire -- the same exemption a mapping gets, and strictly stronger.
+//
+// These arms exist because the domain Verb did not carry the static injections at all: VerbsDescription
+// has Queries and Headers, the shim dropped them, and the shim's anti-drift test iterates the DOMAIN
+// type's fields so it could not notice. Found when the github-provider-kog session measured that a
+// static query beats a spec value -- while retracting a different claim built on the same precedence.
+func TestAStaticInjectionSuppressesTheWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		verb Verb
+	}{
+		{
+			name: "a static QUERY supplying the parameter",
+			verb: Verb{
+				Action: ActionGet, Method: "GET", Path: "/repos/read",
+				StaticQueries: []StaticValue{{Name: "owner", Value: "octocat"}},
+			},
+		},
+		{
+			name: "a static query for a DIFFERENT parameter does not suppress it",
+			verb: Verb{
+				Action: ActionGet, Method: "GET", Path: "/repos/read",
+				StaticQueries: []StaticValue{{Name: "unrelated", Value: "x"}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shadowWarnings(t, shadowSpec, &ResourceConfig{
+				Identifiers:            []string{"name"},
+				AdditionalStatusFields: []string{"owner.login"},
+				Verbs:                  append(shadowBaseVerbs(), tc.verb),
+			})
+			if strings.Contains(tc.name, "DIFFERENT") {
+				require.Len(t, got, 1,
+					"a static injection for an unrelated name must not exempt 'owner' -- otherwise the "+
+						"exemption is 'this verb has any static query', which is not a reason")
+			} else {
+				require.Empty(t, got,
+					"a static query named for the parameter always supplies it, so nothing composite can reach the wire")
+			}
+		})
+	}
+}

@@ -96,6 +96,19 @@ type Verb struct {
 	// so the author is not asked for a field the controller never reads from them (#325, #409, #419).
 	// This comment previously said request-direction entries were "carried for completeness but are not
 	// used during generation", which stopped being true when that suppression landed.
+	// Queries and Headers are the STATIC values injected on every request for this verb. They are
+	// carried because they SUPPLY a parameter, which makes them indistinguishable from a fieldMapping
+	// for any check asking "will this parameter have a value?" -- and they win over both spec and
+	// status, because rest-dynamic-controller sets them before auto-population and auto-population
+	// does not overwrite ("Avoid overwriting existing values").
+	//
+	// Their absence here was a blind spot rather than a decision: the shim's anti-drift test iterates
+	// the DOMAIN type's fields, so a field present on VerbsDescription and missing from this struct is
+	// invisible to it. Found when the github-provider-kog session measured that a static query beats a
+	// spec value, which made a check of mine fire on a parameter that is in fact always supplied.
+	StaticQueries []StaticValue
+	StaticHeaders []StaticValue
+
 	FieldMapping []FieldMappingEntry
 	// Correlation is set only on a dispatch verb, and is what makes one observable (#199). Generation
 	// needs it for two things a dispatch resource has no other source for: the STATUS base schema, which
@@ -319,6 +332,13 @@ type SecuritySchemeInfo struct {
 }
 
 // ParameterInfo is a library-agnostic representation of an API parameter.
+// StaticValue is a name/value pair injected on every request for a verb -- a static query parameter or
+// header. Only the NAME matters to generation: the value is sent verbatim and never shapes a schema.
+type StaticValue struct {
+	Name  string
+	Value string
+}
+
 type ParameterInfo struct {
 	Name        string
 	In          string
