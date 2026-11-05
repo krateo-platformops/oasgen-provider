@@ -506,6 +506,56 @@ func IsResourceKnown(ctx context.Context, cli restclient.UnstructuredClientInter
 	return cli.ValidateRequest(callInfo.Method, callInfo.Path, reqConfiguration.Parameters, reqConfiguration.Query, reqConfiguration.Headers, reqConfiguration.Cookies) == nil, nil
 }
 
+// scalarParamValue renders value for use in a URL path segment, query string, header or cookie, and
+// reports whether it can be rendered at all.
+//
+// Applied to FOUR of the five destinations processFields writes, and deliberately NOT to the fifth:
+// ReqParams.Body takes the value as-is into the JSON request body, where a map or a slice is exactly
+// what an author means. The other four are string-valued (Parameters, Query, Headers and Cookies are
+// all map[string]string), so something has to render a composite as text and there is no rendering
+// that is correct.
+//
+// Parameters and Query are map[string]string, so SOMETHING has to turn an arbitrary unstructured value
+// into text. `fmt.Sprintf("%v", value)` did it unconditionally, which is fine for every scalar and
+// silently wrong for a composite: a map renders as `map[login:octocat]` and a slice as `[a b]`. Those are
+// not malformed URLs -- they are syntactically valid ones addressing something that does not exist, so
+// the vendor answers 404 and the reconciler acts on not-found by CREATING, which is the #117 shape.
+//
+// The reachable route is a dotted additionalStatusFields entry (#463): `owner.login` renders status as a
+// NESTED object, so the top-level status key is `owner`, which matches a parameter named `owner` -- and
+// the value handed over is the whole map. A requestFieldMapping on that verb overwrites it afterwards and
+// hides this, which is why it has not been seen in the field.
+//
+// Only the types unstructured data can actually hold are accepted; k8s decodes JSON numbers as int64 or
+// float64, never int, so listing the other numeric kinds would be dead code. An explicit allowlist rather
+// than "anything that is not a map or slice", so a type nobody considered fails closed.
+func scalarParamValue(value any) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		return v, true
+	case bool, int64, float64:
+		return fmt.Sprintf("%v", v), true
+	case nil:
+		// An explicitly null field supplies no value. Empty string rather than "<nil>", which would
+		// address a literal "<nil>" segment.
+		return "", true
+	default:
+		return "", false
+	}
+}
+
+// nonScalarParamErr explains the collision in the author's own vocabulary, because the value in the
+// message is not something they wrote anywhere -- it is a rendering of a status object they declared one
+// leaf of. Naming additionalStatusFields is what makes the message actionable.
+func nonScalarParamErr(kind, field string, value any) error {
+	return fmt.Errorf("%s %q would be set from a non-scalar value of type %T (rendered: %q): a composite "+
+		"cannot address a URL. This happens when additionalStatusFields declares a DOTTED entry such as "+
+		"%q, which renders status.%s as an object rather than a leaf, and %q also names a request "+
+		"parameter. Either declare a request-direction fieldMapping that supplies %q from the leaf, or "+
+		"rename the status field so it does not collide with the parameter",
+		kind, field, value, fmt.Sprintf("%v", value), field+".<leaf>", field, field, field)
+}
+
 // processFields processes the given fields map (spec or status fields) and populates the request configuration accordingly.
 func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfiguration *restclient.RequestConfiguration, mapBody map[string]interface{}) {
 	for field, value := range fields {
@@ -515,14 +565,23 @@ func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfigu
 
 		if callInfo.ReqParams.Parameters.Contains(field) {
 			if _, ok := reqConfiguration.Parameters[field]; !ok { // Avoid overwriting existing values
-				reqConfiguration.Parameters[field] = fmt.Sprintf("%v", value)
-				//log.Printf("Setting path parameter field %s to value %v from resource\n", field, value)
+				if rendered, ok := scalarParamValue(value); ok {
+					reqConfiguration.Parameters[field] = rendered
+				} else {
+					reqConfiguration.BuildErr = nonScalarParamErr("path parameter", field, value)
+					return
+				}
 			}
 		}
 
 		if callInfo.ReqParams.Query.Contains(field) {
 			if _, ok := reqConfiguration.Query[field]; !ok { // Avoid overwriting existing values
-				reqConfiguration.Query[field] = fmt.Sprintf("%v", value)
+				if rendered, ok := scalarParamValue(value); ok {
+					reqConfiguration.Query[field] = rendered
+				} else {
+					reqConfiguration.BuildErr = nonScalarParamErr("query parameter", field, value)
+					return
+				}
 			}
 		}
 
@@ -562,13 +621,23 @@ func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfigu
 		// spec-beats-status work with no extra code -- status is processed second and finds the key taken.
 		if callInfo.ReqParams.Headers.Contains(field) && !restclient.IsCredentialHeader(field) {
 			if _, ok := reqConfiguration.Headers[field]; !ok {
-				reqConfiguration.Headers[field] = fmt.Sprintf("%v", value)
+				rendered, ok := scalarParamValue(value)
+				if !ok {
+					reqConfiguration.BuildErr = nonScalarParamErr("header", field, value)
+					return
+				}
+				reqConfiguration.Headers[field] = rendered
 			}
 		}
 
 		if callInfo.ReqParams.Cookies.Contains(field) {
 			if _, ok := reqConfiguration.Cookies[field]; !ok {
-				reqConfiguration.Cookies[field] = fmt.Sprintf("%v", value)
+				rendered, ok := scalarParamValue(value)
+				if !ok {
+					reqConfiguration.BuildErr = nonScalarParamErr("cookie", field, value)
+					return
+				}
+				reqConfiguration.Cookies[field] = rendered
 			}
 		}
 
