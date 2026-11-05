@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,155 @@ timestamp: 2026-11-04T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-05 — 0.52.0
+
+Eighteen changes, and two of them are upgrade consequences rather than improvements. **Read the
+first two sections before upgrading**; the rest is a long run of silent-failure fixes.
+
+### 0.51.0 broke a CR that 0.50.0 accepted, on a FRESH install. This release reverses it.
+
+0.51.0 wired #410's guard, which refuses an `excludedSpecFields` entry naming a **required** OAS
+parameter — so the field stayed in the spec and stayed in `required`. Measured on kind with 0.50.0
+as the control, fresh installs both sides, teardown between:
+
+```
+0.50.0 clean install : CR applies, write reaches the vendor
+0.51.0 clean install : The Sample "sample-1" is invalid: spec.id: Required value
+0.51.0 via upgrade   : UNAFFECTED
+```
+
+The guard's premise is *"dropping a required parameter leaves a kind that cannot build its own
+request URL"*, and that premise is **false when the status schema carries the value**:
+rest-dynamic-controller fills request parameters from spec and then status, so a vendor-assigned id
+placed in status by `additionalStatusFields` reaches the URL once create or findby populates it. The
+guard already granted exactly this exemption to a request-direction `fieldMapping`; it was never
+carried across to status. 0.52.0 carries it across (#455, #456).
+
+This broke `examples/rdc-sample-resource`, which ships that configuration, whose README hands the
+user the commands, and whose `resource.yaml` is the CR 0.51.0 rejects. A migration note would have
+asked the author of a correct definition to change it.
+
+**Why the upgrade path was unaffected, and why that is not reassurance.** Nothing regenerated:
+oasgen does not regenerate an existing CRD on upgrade, because no stored hash covers the generator's
+version (#453). **So a clean upgrade is not evidence a version is safe** — the same artifact on a
+fresh cluster behaves differently, and the place that surfaces is disaster recovery, rebuilding from
+manifests, which is the worst moment to discover a schema change. If you validated 0.51.0 by
+upgrading, you did not test this.
+
+### Generation fixes in this release do NOT reach your existing kinds
+
+A consequence of #453 that applies to most of what follows. Upgrading changes the binary; it changes
+nothing any reconcile compares, so generation never re-runs and an already-generated CRD keeps the
+schema the old binary produced.
+
+What DOES follow a chart upgrade: the per-RestDefinition rest-dynamic-controller **Deployment and
+its image**, because that is rendered from a mounted asset whose content changes with the chart. So
+this release's runtime fixes arrive and its generation fixes do not.
+
+To adopt a generation fix on an existing kind, edit the referenced **OAS document** (a comment
+suffices) and re-apply the ConfigMap, then wait — the poll interval is 3 minutes by default
+(`OASGEN_PROVIDER_POLL_INTERVAL`, settable via the chart's `env`), and a shorter window looks exactly
+like the mechanism being broken. **Do not** delete and recreate the RestDefinition to force it: that
+fires the external DELETE on every live CR of the kind.
+
+### A findby could adopt the wrong object, and then delete it
+
+`identifiersMatchPolicy` defaults to `OR`, and `OR` adopts the first item matching **any one**
+identifier. On a live fleet a resource naming one child adopted its **parent**, reported
+`Synced=True`, and the parent was deleted.
+
+The default is **not** changed — flipping it would silently re-point every resource currently
+matching on a subset, and where a vendor's collection response is abridged (Ironic's node list
+carries 7 of ~40 fields) `AND` over identifiers the collection does not carry can never match,
+turning a wrong adoption into a permanent not-found and then a duplicate create. Instead:
+
+- generation warns when a findby **that actually runs** declares 2+ identifiers and omits the policy
+  (#444). It fires only where the policy can choose something: the response must be able to carry
+  more than one item, and observation must not be delegated to a RESTAction — a findby under
+  `observeApiRef` is declared and never executed. Across 2652 definitions, an ungated rule would
+  have been wrong about every one of its hits;
+- generation warns when a declared identifier is absent from the items findby returns, resolved
+  against **findby's own** response rather than the get-preferred one, and for every kind rather than
+  only create-less ones (#445);
+- at runtime, an `OR` match decided on a subset now reports which identifier matched and which were
+  never consulted (#444). Diagnostic only: control flow is unchanged.
+
+### A fieldMapping no longer deletes the spec property it reads from
+
+`inCustomResource: spec.node_id` for path parameter `{node_id}` named the very property the
+suppression removed, so the rule deleted its own source and the verb could not build its URL (#419,
+#421). Took five days to diagnose from a vendor's 406.
+
+### spec.serverURL
+
+A RestDefinition can now override the document's `servers[0]` (#374, #437). The override is applied
+before the host policy is parsed, so the declared URL is what the allowlist sees, and a document
+carrying per-operation `servers` is refused rather than silently honoured in part.
+
+### Readiness now means something on every answer
+
+`Ready` is set on every Observe answer rather than only some (#417, provider-runtime 1.8.2), and
+rest-dynamic-controller claims `Ready` where the handler knows better than the runtime (#436, #438,
+unstructured-runtime 1.7.6). The narrowness is deliberate and worth stating: a `CreateFailed` /
+`UpdateFailed` terminal claim covers a **policy refusal** — an explicit authorization denial from the
+vendor — with no invented status-code permanence rule. A 500 stays transient.
+
+### Six silent failures that reported success
+
+Each of these returned a zero value, an empty result or nothing at all, and every layer above read it
+as success:
+
+- `Lookup` reported a failed lookup as a successful empty one (#427, #428);
+- a failed oas-version backfill was hidden at Debug (#425, #426);
+- `findItemInList` discarded a structural comparison error, and "nothing matched" is the one answer a
+  caller may act on by **creating** (#439, #442);
+- auth-secret RBAC teardown failures were unreported, and the loop stopped at the first namespace
+  rather than cleaning the rest — with `status.AuthSecretRBACNamespaces`, the only record of what
+  needed cleaning, disappearing with the object (#430, #432);
+- a permanent API error was retried for ~50 seconds before being surfaced (#429, #431);
+- the auth-secret RBAC name omitted the API group while claiming to follow the convention that
+  includes it, so two resources with the same name in different groups collided. Carries a migration
+  off the old name (#440, #443).
+
+### Schema fidelity and CI
+
+`nullable` and `minProperties` now reach the generated CRD instead of being discarded at the
+boundary (#420, #423, #424). The unselectored MutatingAdmissionPolicy is now a guarantee rather than
+a default (#422). `fmt_check` and `tidy_check` are enabled for both modules — they exist in the
+org-shared reusable, default **off**, and had never run here; enabling them found and fixed a
+`go.sum` carrying two versions of one module, and `golang.org/x/net` declared `// indirect` while
+being imported directly by the host-allowlist's IDNA normalisation (#449).
+
+### A runbook for the 0.41.0 to 0.50.0 pin decision
+
+`docs/upgrade-0.41-to-0.50.md` (#434) carries the evidence a consumer needs to decide that jump: the
+security floor per version, what the host allowlist and DNS pinning did and did not cover between
+0.41.0 and 0.49.0, and a vendor probe with its date and the reason its staleness runs one way rather
+than both. It records "unprotected is not exploited" explicitly, because the opposite reading is the
+one a reader supplies for free.
+
+### What this release is, and is not, verified against
+
+**Verified on 0.52.0 itself:** both modules pass `gofmt`, `go vet -tags=unit,integration` and the
+full `-race` suite — checked on the combined post-merge tree rather than per-branch, because every
+branch's own CI had run against a base two commits behind; and both modules are `go mod tidy`-clean
+under the gate this release enables.
+
+**Verified on 0.50.0 and 0.51.0, NOT on 0.52.0:** that both charts install on kind (k8s 1.36.1) with
+the controller pod reaching Ready and zero restarts, that a RestDefinition reconciles to `Ready` end
+to end, and that all five GHCR artifacts publish. Those runs are what found the 0.51.0 breakage
+above. They say nothing about this tag's artifacts.
+
+**Not verified:** no pod has been started from a 0.52.0 image — the kind validation ran against
+0.50.0 and 0.51.0. The `excludedSpecFields` reversal is covered by unit arms and by the shipped
+example's configuration, **not** by a fresh-install run on 0.52.0 itself. Fleet exposure to the
+0.51.0 breakage is unmeasured beyond two consumer audits (one fleet of 36 entries clear, one fleet of
+four clear only because a mapping on one verb exempts the parameter on all of them — see #457).
+
+**And the release page is a fallback, not real notes.** The org's generated-notes credential hit its
+usage limit (resets Nov 9); `release-notes` reports success while emitting boilerplate. **This file
+is the record.**
 
 ## 2026-11-04 — 0.51.0
 
