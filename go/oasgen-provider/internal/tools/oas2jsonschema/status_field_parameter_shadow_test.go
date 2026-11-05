@@ -3,6 +3,7 @@
 package oas2jsonschema
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -252,4 +253,54 @@ func TestTheWarningNamesTheStanzaItCameFrom(t *testing.T) {
 		}
 	}
 	require.True(t, found, "no warning was produced, so this assertion covered nothing")
+}
+
+// THE ARM THAT SETTLES WHY A PATH PARAMETER IS SILENT, rather than asserting that it is.
+//
+// Two explanations were on the table for a generated spec having no `owner` key. The
+// github-provider-kog session proposed that the spec is built from the CREATE verb alone, which would
+// make every path parameter on a non-create verb absent from the spec and therefore reachable. The other
+// is that a MAPPED parameter is omitted from the spec entirely by mappingSuppliedParams.
+//
+// This asserts the generated artifact directly: `owner` is a required path parameter on `get` ONLY --
+// it appears on no create operation -- and nothing maps it. If the spec is create-only it will be absent;
+// if addParametersToSpec collects across all verbs it will be present AND required, which is what makes
+// the collision unreachable and the silence correct.
+//
+// Asserting the mechanism rather than the outcome is the point. TestARequiredPathParameterIsNotWarnedAbout
+// already observes the silence, and a silence is consistent with both stories.
+func TestAnUnmappedPathParameterOnANonCreateVerbIsRequiredInTheGeneratedSpec(t *testing.T) {
+	doc, err := NewLibOASParser().Parse([]byte(requiredPathParamSpec))
+	require.NoError(t, err)
+	g := NewOASSchemaGenerator(doc, DefaultGeneratorConfig(), &ResourceConfig{
+		Identifiers:            []string{"name"},
+		AdditionalStatusFields: []string{"owner.login"},
+		Verbs: append(shadowBaseVerbs(), Verb{
+			Action: ActionGet, Method: "GET", Path: "/repos/{owner}/read",
+		}),
+	})
+	specJSON, _, err := g.BuildSpecSchema()
+	require.NoError(t, err)
+
+	var parsed struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	require.NoError(t, json.Unmarshal(specJSON, &parsed))
+
+	require.Contains(t, parsed.Properties, "owner",
+		"the generated spec has no 'owner' property, so the spec IS create-only and an unmapped path "+
+			"parameter on a non-create verb is reachable -- the comment in status_field_parameter_shadow.go "+
+			"needs correcting again. Properties: %v", rawKeysOf(parsed.Properties))
+	require.Contains(t, parsed.Required, "owner",
+		"'owner' is a spec property but not required, so the apiserver does not guarantee it and the "+
+			"collision IS reachable. Required: %v", parsed.Required)
+}
+
+func rawKeysOf(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

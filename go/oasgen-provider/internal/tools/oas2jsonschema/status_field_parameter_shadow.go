@@ -30,17 +30,44 @@ import (
 // deliberately; the alternative is to make that function verb-aware, which is #457's job and a
 // behaviour change for its existing callers.
 //
-// WHY A REQUIRED SPEC PROPERTY IS SKIPPED, which bounds this to a narrower surface than the issue first
-// described. Spec wins over status -- processFields writes only where the key is absent ("Avoid
-// overwriting existing values") -- so a parameter the spec is GUARANTEED to carry can never take the
-// status value. A required property of the generated spec is exactly that guarantee: the apiserver
-// rejects a CR without it.
+// WHY A REQUIRED SPEC PROPERTY IS SKIPPED. Spec wins over status -- processFields writes only where the
+// key is absent ("Avoid overwriting existing values") -- so a parameter the spec is GUARANTEED to carry
+// can never take the status value. A required property of the generated spec is exactly that guarantee:
+// the apiserver rejects a CR without it.
 //
-// The consequence is worth stating because it is not obvious and it inverts the expected shape: an OAS
-// PATH parameter must declare `required: true`, so it always becomes a required spec property, so the
-// collision is unreachable through a path parameter. Warning on one would be a guaranteed false
-// positive. What remains reachable is an OPTIONAL query, header or cookie parameter, where the author
-// may simply not set the field and status then fills it.
+// AN EARLIER VERSION OF THIS COMMENT CLAIMED MORE THAN THAT AND WAS WRONG. It said an OAS path parameter
+// must declare `required: true`, therefore always becomes a required spec property, therefore cannot
+// reach this at all. The github-provider-kog session falsified it with a generated CRD: their
+// UserRepository has `owner` as a required path parameter on get and update, and the spec has no `owner`
+// key whatsoever. A parameter a request-direction fieldMapping supplies is omitted from the spec
+// ENTIRELY ("rather than merely un-required"), so it is not in `required` and the guarantee does not
+// apply.
+//
+// The behaviour is still right, by a different route, and it is worth naming both branches because only
+// one of them is this check's own:
+//
+//   - an UNMAPPED parameter is added to the spec by addParametersToSpec, carrying its OAS requiredness,
+//     so a required one lands in `required` and the guarantee above applies;
+//   - a MAPPED parameter is absent from the spec, so this guard does not catch it -- the per-verb
+//     mapping check below does.
+//
+// The distinction that makes both true at once, in the words of the session that measured it: the base
+// body does come from create, but PARAMETERS MERGE FROM EVERY VERB. So a path parameter declared only on
+// `get` is still a required spec property, which is why
+// TestAnUnmappedPathParameterOnANonCreateVerbIsRequiredInTheGeneratedSpec passes.
+//
+// TWO SHAPES ARE THEREFORE REACHABLE, and the second is the reason this check is per-verb:
+//
+//  1. an OPTIONAL query, header or cookie parameter with a dotted status field and no mapping on that
+//     verb -- the author simply leaves the field unset and status fills it;
+//  2. a parameter mapped on SOME verb, hence absent from the spec entirely, but NOT on the verb being
+//     built. A path parameter included. A kind that maps `owner` on `get` and omits it on `update` has
+//     `owner` missing from the spec globally and unsupplied on `update`.
+//
+// Shape 2 is a per-verb asymmetry rather than a per-kind property, which is exactly what a per-kind
+// screen reports as clean. No claim is made here beyond those two; an earlier version of this comment
+// reasoned from requiredness to a boundary and got it wrong, so the arms in the test file carry the
+// claim instead.
 //
 // The GENERATED spec JSON is the input rather than a re-derivation, and rather than the intermediate
 // *Schema: it is the artifact that ships in the CRD and the thing the apiserver will actually enforce,
@@ -141,6 +168,10 @@ func verbSuppliedParams(verb Verb) map[string]bool {
 		if m.InCustomResource == "" {
 			continue
 		}
+		// InPath and InQuery are the only request destinations a mapping can write -- the entry type
+		// offers inPath, inQuery and inBody and nothing else. So a HEADER or COOKIE collision can never
+		// be exempted by a mapping, and will always be reported here. That is correct rather than
+		// unfortunate: nothing downstream can rescue it either.
 		if m.InPath != "" {
 			supplied[m.InPath] = true
 		}

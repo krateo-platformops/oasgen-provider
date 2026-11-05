@@ -168,10 +168,10 @@ func BuildCallConfig(ctx context.Context, callInfo *CallInfo, mg *unstructured.U
 	}
 
 	// 3. Apply values from the main resource's spec (spec takes precedence over status in case of duplicates).
-	processFields(callInfo, specFields, reqConfiguration, mapBody)
+	skipped := processFields(callInfo, specFields, reqConfiguration, mapBody)
 
 	// 4. Apply values from the main resource's status
-	processFields(callInfo, statusFields, reqConfiguration, mapBody)
+	skipped = append(skipped, processFields(callInfo, statusFields, reqConfiguration, mapBody)...)
 
 	// 5. Apply explicit field mappings LAST, so they win by write order.
 	//
@@ -183,6 +183,25 @@ func BuildCallConfig(ctx context.Context, callInfo *CallInfo, mg *unstructured.U
 	// leaves every sibling that processFields put there untouched.
 	applyRequestFieldMapping(callInfo, mg, reqConfiguration, mapBody) // deprecated RequestFieldMapping
 	applyFieldMapping(ctx, callInfo, mg, reqConfiguration, mapBody, resolved)
+
+	// 5b. THE VERDICT ON A COMPOSITE, taken here and not where it was found.
+	//
+	// A composite value cannot address a URL, a query string, a header or a cookie, so processFields
+	// declines to write one. But declining is not yet a failure: the mappings above run AFTER
+	// auto-population, by design and for stated reasons, and a request-direction mapping writes the
+	// parameter unconditionally. So a kind whose mapped parameter reads from a nested status field --
+	// `owner` from `status.owner.login` -- ends up with exactly the right value.
+	//
+	// Deciding at the point of discovery refused those requests. Their parameters were CORRECT and
+	// BuildErr was set from a value that no longer existed, and the message told the author to add the
+	// mapping they already had. Measured on a real definition by the github-provider-kog session:
+	// Parameters=map[name:my-repo owner:octocat] with BuildErr non-nil, against a clean parent.
+	//
+	// So the verdict belongs to the ASSEMBLED configuration, after every writer. A skipped field that is
+	// still absent is a real failure; one some later writer supplied is not. This also means a future
+	// writer added below is covered automatically, where a check at the discovery site would have to be
+	// taught about it.
+	refuseUnwrittenComposites(reqConfiguration, skipped)
 
 	// 6. Drop the CR-side source of every Resolver entry from the body. A resolver's
 	// inCustomResource is a POINTER the controller dereferences (a secretRef's {name,key}, an
@@ -506,6 +525,59 @@ func IsResourceKnown(ctx context.Context, cli restclient.UnstructuredClientInter
 	return cli.ValidateRequest(callInfo.Method, callInfo.Path, reqConfiguration.Parameters, reqConfiguration.Query, reqConfiguration.Headers, reqConfiguration.Cookies) == nil, nil
 }
 
+// The four string-valued destinations processFields writes. Named rather than passed as strings so a
+// typo cannot silently create a destination that refuseUnwrittenComposites never checks.
+const (
+	destPath   = "path parameter"
+	destQuery  = "query parameter"
+	destHeader = "header"
+	destCookie = "cookie"
+)
+
+// skippedComposite records a field processFields declined to write because its value was a composite.
+// It carries the value so the eventual message can show what arrived, and the destination so the final
+// check looks in the right map.
+type skippedComposite struct {
+	dest  string
+	field string
+	value any
+}
+
+// refuseUnwrittenComposites sets BuildErr for any declined field that NO later writer supplied.
+//
+// Called once, after every writer in BuildCallConfig. See the call site for why the verdict cannot be
+// taken where the composite is found. Leaves an existing BuildErr alone: the first failure to assemble
+// a request is the one worth reporting, and the later ones are usually its consequences.
+func refuseUnwrittenComposites(cfg *restclient.RequestConfiguration, skipped []skippedComposite) {
+	if cfg == nil || cfg.BuildErr != nil {
+		return
+	}
+	for _, s := range skipped {
+		var present bool
+		switch s.dest {
+		case destPath:
+			_, present = cfg.Parameters[s.field]
+		case destQuery:
+			_, present = cfg.Query[s.field]
+		case destHeader:
+			_, present = cfg.Headers[s.field]
+		case destCookie:
+			_, present = cfg.Cookies[s.field]
+		default:
+			// An unrecognised destination cannot be checked, so it cannot be cleared either. Refuse
+			// rather than pass: a destination added without teaching this function about it must not
+			// become a silent hole.
+			cfg.BuildErr = fmt.Errorf("internal: a composite value was declined for %q with unknown "+
+				"destination %q, so it cannot be confirmed resolved", s.field, s.dest)
+			return
+		}
+		if !present {
+			cfg.BuildErr = nonScalarParamErr(s.dest, s.field, s.value)
+			return
+		}
+	}
+}
+
 // scalarParamValue renders value for use in a URL path segment, query string, header or cookie, and
 // reports whether it can be rendered at all.
 //
@@ -547,6 +619,10 @@ func scalarParamValue(value any) (string, bool) {
 // nonScalarParamErr explains the collision in the author's own vocabulary, because the value in the
 // message is not something they wrote anywhere -- it is a rendering of a status object they declared one
 // leaf of. Naming additionalStatusFields is what makes the message actionable.
+//
+// Only ever reached for a field NOTHING supplied, so the suggestion to add a mapping is always live
+// advice. An earlier version could fire on a field a mapping had already supplied, which told the author
+// to add the mapping they had.
 func nonScalarParamErr(kind, field string, value any) error {
 	return fmt.Errorf("%s %q would be set from a non-scalar value of type %T (rendered: %q): a composite "+
 		"cannot address a URL. This happens when additionalStatusFields declares a DOTTED entry such as "+
@@ -557,7 +633,8 @@ func nonScalarParamErr(kind, field string, value any) error {
 }
 
 // processFields processes the given fields map (spec or status fields) and populates the request configuration accordingly.
-func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfiguration *restclient.RequestConfiguration, mapBody map[string]interface{}) {
+func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfiguration *restclient.RequestConfiguration, mapBody map[string]interface{}) []skippedComposite {
+	var skipped []skippedComposite
 	for field, value := range fields {
 		if field == "" {
 			continue
@@ -568,8 +645,7 @@ func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfigu
 				if rendered, ok := scalarParamValue(value); ok {
 					reqConfiguration.Parameters[field] = rendered
 				} else {
-					reqConfiguration.BuildErr = nonScalarParamErr("path parameter", field, value)
-					return
+					skipped = append(skipped, skippedComposite{dest: destPath, field: field, value: value})
 				}
 			}
 		}
@@ -579,8 +655,7 @@ func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfigu
 				if rendered, ok := scalarParamValue(value); ok {
 					reqConfiguration.Query[field] = rendered
 				} else {
-					reqConfiguration.BuildErr = nonScalarParamErr("query parameter", field, value)
-					return
+					skipped = append(skipped, skippedComposite{dest: destQuery, field: field, value: value})
 				}
 			}
 		}
@@ -623,10 +698,10 @@ func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfigu
 			if _, ok := reqConfiguration.Headers[field]; !ok {
 				rendered, ok := scalarParamValue(value)
 				if !ok {
-					reqConfiguration.BuildErr = nonScalarParamErr("header", field, value)
-					return
+					skipped = append(skipped, skippedComposite{dest: destHeader, field: field, value: value})
+				} else {
+					reqConfiguration.Headers[field] = rendered
 				}
-				reqConfiguration.Headers[field] = rendered
 			}
 		}
 
@@ -634,10 +709,10 @@ func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfigu
 			if _, ok := reqConfiguration.Cookies[field]; !ok {
 				rendered, ok := scalarParamValue(value)
 				if !ok {
-					reqConfiguration.BuildErr = nonScalarParamErr("cookie", field, value)
-					return
+					skipped = append(skipped, skippedComposite{dest: destCookie, field: field, value: value})
+				} else {
+					reqConfiguration.Cookies[field] = rendered
 				}
-				reqConfiguration.Cookies[field] = rendered
 			}
 		}
 
@@ -649,6 +724,8 @@ func processFields(callInfo *CallInfo, fields map[string]interface{}, reqConfigu
 			}
 		}
 	}
+
+	return skipped
 }
 
 // stripResolverSources removes, from the request body, the CR-side path that each Resolver entry reads

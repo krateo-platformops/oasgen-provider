@@ -189,3 +189,162 @@ func TestAScalarStatusValueStillPopulates(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------------------------------
+// THE REGRESSION ARMS. The first version of this fix decided at the point of discovery and shipped a
+// refusal of every `get` on a working kind.
+//
+// processFields runs BEFORE the mapping writers, by design and for stated reasons. A request-direction
+// mapping then writes the parameter unconditionally -- so a kind whose mapped parameter reads from a
+// NESTED status field ends up with exactly the right value, and an immediate BuildErr condemned it from
+// a value that no longer existed. The message even told the author to add the mapping they already had.
+//
+// Measured on a real definition by the github-provider-kog session, whose UserRepository shape is
+// reproduced below: Parameters=map[name:my-repo owner:octocat] with BuildErr non-nil, against a clean
+// parent commit. These arms are theirs in substance.
+//
+// The suite was green because it had no mapping arm at all: it asserted that the branch fires and never
+// asked what ran next.
+
+const userRepositoryShapeDoc = `
+openapi: 3.0.0
+info: {title: t, version: "1"}
+paths:
+  /repos/{owner}/{name}:
+    get:
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema: {type: string}
+        - name: name
+          in: path
+          required: true
+          schema: {type: string}
+        - name: scope
+          in: query
+          schema: {type: string}
+        - name: X-Owner
+          in: header
+          schema: {type: string}
+      responses:
+        "200": {description: ok}
+`
+
+func userRepoCallInfo(t *testing.T, mappings []getter.RequestFieldMappingItem) *CallInfo {
+	t.Helper()
+	d, err := libopenapi.NewDocument([]byte(userRepositoryShapeDoc))
+	if err != nil {
+		t.Fatalf("fixture is not a document: %v", err)
+	}
+	v3Doc, errs := d.BuildV3Model()
+	if len(errs) > 0 {
+		t.Fatalf("fixture did not build: %v", errs)
+	}
+	cli := &restclient.UnstructuredClient{DocScheme: v3Doc}
+	info := &getter.Info{
+		Resource: getter.Resource{
+			Kind:        "UserRepository",
+			Identifiers: []string{"name"},
+			VerbsDescription: []getter.VerbsDescription{{
+				Action: string(apiaction.Get), Method: "GET", Path: "/repos/{owner}/{name}",
+				RequestFieldMapping: mappings,
+			}},
+		},
+	}
+	_, callInfo, err := APICallBuilder(cli, info, apiaction.Get)
+	if err != nil {
+		t.Fatalf("APICallBuilder: %v", err)
+	}
+	if callInfo == nil {
+		t.Fatal("no CallInfo")
+	}
+	if !callInfo.ReqParams.Parameters.Contains("owner") {
+		t.Fatal("ReqParams.Parameters does not contain owner, so these arms cannot exercise the branch")
+	}
+	return callInfo
+}
+
+// The UserRepository shape, after create has populated status. This FAILED on the first version of the
+// fix and passes on its parent, which is what makes it a regression arm rather than a feature arm.
+func TestAMappedPathParameterSurvivesACompositeStatusValue(t *testing.T) {
+	ci := userRepoCallInfo(t, []getter.RequestFieldMappingItem{
+		{InPath: "owner", InCustomResource: "status.owner.login"},
+		{InPath: "name", InCustomResource: "status.name"},
+	})
+	cfg := BuildCallConfig(context.Background(), ci, crWithStatus(map[string]interface{}{
+		"owner": map[string]interface{}{"login": "octocat"},
+		"name":  "my-repo",
+	}), nil, nil)
+	if cfg == nil {
+		t.Fatal("no RequestConfiguration")
+	}
+	if cfg.BuildErr != nil {
+		t.Fatalf("BuildErr = %v.\nThe mapping supplied owner=%q, so the request is correct and must not be "+
+			"refused. Deciding at the point of discovery refuses every get on this kind.",
+			cfg.BuildErr, cfg.Parameters["owner"])
+	}
+	if got := cfg.Parameters["owner"]; got != "octocat" {
+		t.Errorf("Parameters[owner] = %q, want %q", got, "octocat")
+	}
+	if got := cfg.Parameters["name"]; got != "my-repo" {
+		t.Errorf("Parameters[name] = %q, want %q", got, "my-repo")
+	}
+}
+
+// Pre-create, with an empty status: nothing to decline, and it passed on both versions. Kept so the arm
+// above cannot be "fixed" by making the whole path unreachable.
+func TestTheMappedShapePassesBeforeCreateToo(t *testing.T) {
+	ci := userRepoCallInfo(t, []getter.RequestFieldMappingItem{
+		{InPath: "owner", InCustomResource: "status.owner.login"},
+	})
+	cfg := BuildCallConfig(context.Background(), ci, crWithStatus(map[string]interface{}{}), nil, nil)
+	if cfg == nil {
+		t.Fatal("no RequestConfiguration")
+	}
+	if cfg.BuildErr != nil {
+		t.Fatalf("BuildErr = %v on an empty status", cfg.BuildErr)
+	}
+}
+
+// A mapping can target inPath, inQuery or inBody -- there is no inHeader. So a composite header value
+// can never be rescued, and the refusal must still arrive even with mappings present.
+func TestACompositeHeaderIsRefusedEvenWithMappingsPresent(t *testing.T) {
+	ci := userRepoCallInfo(t, []getter.RequestFieldMappingItem{
+		{InPath: "owner", InCustomResource: "status.owner.login"},
+		{InPath: "name", InCustomResource: "status.name"},
+	})
+	cfg := BuildCallConfig(context.Background(), ci, crWithStatus(map[string]interface{}{
+		"owner":   map[string]interface{}{"login": "octocat"},
+		"name":    "my-repo",
+		"X-Owner": map[string]interface{}{"login": "octocat"},
+	}), nil, nil)
+	if cfg == nil {
+		t.Fatal("no RequestConfiguration")
+	}
+	if cfg.BuildErr == nil {
+		t.Fatal("BuildErr is nil: no mapping can supply a header, so a composite there is unrescuable " +
+			"and must be refused")
+	}
+	if _, ok := cfg.Headers["X-Owner"]; ok {
+		t.Errorf("Headers[X-Owner] = %q was written despite the refusal", cfg.Headers["X-Owner"])
+	}
+}
+
+// And the other direction: a mapping for a DIFFERENT parameter must not clear the verdict on this one.
+// Without this, "some writer supplied something" could be mistaken for "this field was supplied".
+func TestAMappingForAnotherParameterDoesNotClearTheVerdict(t *testing.T) {
+	ci := userRepoCallInfo(t, []getter.RequestFieldMappingItem{
+		{InPath: "name", InCustomResource: "status.name"},
+	})
+	cfg := BuildCallConfig(context.Background(), ci, crWithStatus(map[string]interface{}{
+		"owner": map[string]interface{}{"login": "octocat"},
+		"name":  "my-repo",
+	}), nil, nil)
+	if cfg == nil {
+		t.Fatal("no RequestConfiguration")
+	}
+	if cfg.BuildErr == nil {
+		t.Fatalf("BuildErr is nil, but nothing supplied owner: Parameters=%v", cfg.Parameters)
+	}
+}
