@@ -42,10 +42,14 @@ import (
 
 // alwaysConflicting returns a handler whose every status write fails with a 409 -- which is what
 // RetryOnConflict exhausting its budget looks like from the caller's side.
+var updateAttempts int
+
 func alwaysConflicting(t *testing.T) *handler {
+	updateAttempts = 0
 	t.Helper()
 	h, dyn := observeAuthzHandler(t, driftMG(1, nil))
 	dyn.PrependReactor("update", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+		updateAttempts++
 		return true, nil, apierrors.NewConflict(
 			schema.GroupResource{Group: widgetGVR.Group, Resource: widgetGVR.Resource}, "widget-1",
 			errors.New("the object has been modified; please apply your changes to the latest version"))
@@ -131,4 +135,25 @@ func TestAnUnrelatedErrorIsStillACleanNotMine(t *testing.T) {
 	handled, cerr = h.stopOnEndpointRefusal(context.Background(), driftMG(1, nil), "create", unrelated, h.logger)
 	assert.False(t, handled)
 	assert.NoError(t, cerr)
+}
+
+// THE DORMANT-TO-LIVE TRANSITION, measurable by a version number and nothing else.
+//
+// At unstructured-runtime v1.7.6 tools.UpdateStatus wraps the write in retry.RetryOnConflict, so a
+// persistent 409 costs the FULL retry budget and -- worse -- a conflict that resolves on attempt 2
+// re-submits the caller's stale status stanza onto the fresh resourceVersion, which is the lost update.
+// At v1.9.0 it makes ONE write and returns the conflict.
+//
+// Both versions satisfy the arms above, because both end in a conflict. The observable difference is the
+// number of writes, which is why this arm counts them.
+func TestOneWriteAtV190NotAFullRetryBudget(t *testing.T) {
+	h := alwaysConflicting(t)
+	before := updateAttempts
+	_, cerr := h.stopOnAuthorizationDenied(context.Background(), driftMG(1, nil), "create", deniedErr(), h.logger)
+	require.Error(t, cerr)
+	n := updateAttempts - before
+	t.Logf("apiserver write attempts for ONE UpdateStatus on a persistent 409: %d", n)
+	require.Equal(t, 1, n,
+		"v1.9.0 must make exactly ONE write and return the conflict. More than one means the "+
+			"re-submitting retry is still in the dependency, and with it the lost update it causes")
 }
