@@ -48,6 +48,13 @@ fresh cluster behaves differently, and the place that surfaces is disaster recov
 manifests, which is the worst moment to discover a schema change. If you validated 0.51.0 by
 upgrading, you did not test this.
 
+**If you fresh-installed 0.51.0, this release alone does NOT fix your CRD.** The generator is fixed;
+your already-generated CRD is not, because nothing regenerates on upgrade (see the next section). The
+schema with `id` in `required` stays until something triggers a re-render. Force one by editing the
+referenced OAS document and waiting out the poll interval — the procedure is below — or your CRs stay
+rejected on a tag that fixed the bug. Upgrading from 0.50.0 or earlier is unaffected: those CRDs never
+had the overreach.
+
 ### Generation fixes in this release do NOT reach your existing kinds
 
 A consequence of #453 that applies to most of what follows. Upgrading changes the binary; it changes
