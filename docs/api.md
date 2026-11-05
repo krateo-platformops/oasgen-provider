@@ -336,6 +336,69 @@ fails with `no matches for kind`.
 > every generated resource is the thing to re-check; the `*Configuration` half is unaffected, because
 > it was `v1alpha1` then and is `v1alpha1` now.
 
+### A vendor `default` becomes a REAL default, so a field you never set can be sent
+
+A `default` in the OpenAPI document is carried into the generated CRD as a **structural default**. That
+is deliberate — a decision taken against the rendered before/after diff — and it is surprising enough to
+state outright, because Kubernetes applies a structural default **on create and on read**, not only when
+you write the field.
+
+So for GitHub's create-repository body, which declares `default: false` on `private`:
+
+```yaml
+# what you write
+spec:
+  name: my-repo          # and nothing else
+
+# what the cluster stores, and what `kubectl get repo -o yaml` shows
+spec:
+  name: my-repo
+  private: false         # you did not write this
+  has_issues: true       # nor this
+  has_wiki: false        # nor this
+```
+
+**And rest-dynamic-controller sends top-level spec values whole**, so the request to the vendor carries
+`"private": false` *explicitly*. That is usually harmless, because the vendor would have chosen the same
+value. It stops being harmless when the vendor's own default changes: an organisation policy that makes
+new repositories private is **overridden** by the `false` frozen into every existing CR, silently, and
+nothing in the cluster records that the value was ever the vendor's to choose.
+
+The sharper case is a field whose meaning is exclusivity. A consumer's `Vpc` document declares
+`default: true` on a property documented *"only one default vpc for region is admissible"*, with one
+sibling. An author who sets the sibling and holds no opinion about the other **claims the region-unique
+role** — measured on a live cluster, not hypothesised.
+
+**Two things make this worse than it first looks**, both measured:
+
+- the value **persists**. Once the apiserver has materialised it, one unrelated write — an annotation, a
+  label, any controller touch — writes it to etcd. Removing the default from the CRD afterwards does
+  **not** remove it from objects that lived through the window.
+- and it is **unowned**. The field never appears in `managedFields`, so no field-manager audit attributes
+  it and `kubectl apply` will not prune it — there is no owner to prune it on behalf of.
+
+#### What to do about it
+
+Two mechanisms, both already available:
+
+1. **Set the field explicitly** in the CR. An authored value is never replaced by a default, so the
+   author's intent becomes the author's, and a later change to the vendor's default is a decision you
+   make rather than one you inherit.
+2. **`excludedSpecFields`** to remove the property from the generated spec entirely. Nothing is
+   defaulted and nothing is sent. Note it is **immutable**, so it is a choice made when a kind is
+   defined rather than a patch applied to a live one.
+
+Prefer (1) for a field you want to control and (2) for one that should never be settable.
+
+#### One thing a `default` does legitimately
+
+On a **required** property, the default is what makes the requirement satisfiable: the apiserver fills
+it, so a CR that omits the field is still valid. A consumer relies on exactly that for an API-version
+header — `required: true` with `default: "1.109"`, so their charts set nothing and admission supplies
+it. Removing the default there would make every such CR fail admission for a missing required property.
+`default_survives_test.go` exists to prevent that, and it is why "stop carrying vendor defaults" is not
+a simple rule.
+
 Every generated CR carries a `configurationRef` (name/namespace) pointing at its
 Configuration instance. The Configuration spec holds:
 
