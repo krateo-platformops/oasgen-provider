@@ -17,12 +17,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -90,7 +92,10 @@ func restDefinitionForHashTest() *definitionv1alpha1.RestDefinition {
 // externalForHashTest builds an external whose fake cluster gets Observe as far as the drift checks:
 // the CRD exists and the generated Deployment exists and is ready, which are the two gates that would
 // otherwise return early.
-func externalForHashTest(t *testing.T, cr *definitionv1alpha1.RestDefinition, msgs, lines *[]string) *external {
+// extra lets a caller seed additional objects into the fake client -- added for #473, whose Observe-level
+// test needs the auth-secret Role and RoleBinding present in one arm and absent in the other. Variadic so
+// every existing caller is unchanged.
+func externalForHashTest(t *testing.T, cr *definitionv1alpha1.RestDefinition, msgs, lines *[]string, extra ...client.Object) *external {
 	t.Helper()
 
 	tmpl := filepath.Join(t.TempDir(), "deployment.yaml")
@@ -103,6 +108,9 @@ func externalForHashTest(t *testing.T, cr *definitionv1alpha1.RestDefinition, ms
 	require.NoError(t, apis.AddToScheme(s))
 	require.NoError(t, apiextensionsv1.AddToScheme(s))
 	require.NoError(t, appsv1.AddToScheme(s))
+	// #473's existence check Gets Roles and RoleBindings; without these registered the Get returns a
+	// scheme error, which that check correctly treats as "could not evaluate" rather than "missing".
+	require.NoError(t, rbacv1.AddToScheme(s))
 
 	// crd.Lookup requires the CRD to DECLARE the requested version in spec.versions, not merely to exist
 	// under that name -- a CRD without it reads as absent, which is correct (nothing serves that version)
@@ -135,9 +143,11 @@ func externalForHashTest(t *testing.T, cr *definitionv1alpha1.RestDefinition, ms
 	dep.Spec.Replicas = ptr(int32(1))
 	dep.Status = appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
 
+	objs := []client.Object{cr.DeepCopy(), crd, dep}
+	objs = append(objs, extra...)
 	kube := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(cr.DeepCopy(), crd, dep).
+		WithObjects(objs...).
 		Build()
 
 	return &external{

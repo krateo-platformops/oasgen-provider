@@ -1,7 +1,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ .resource }}-{{ .apiVersion }}
+  name: {{ .resource }}-{{ .apiGroup }}-{{ .apiVersion }}
 rules:
 - apiGroups: ["apiextensions.k8s.io"]
   resources: ["customresourcedefinitions"]
@@ -15,9 +15,27 @@ rules:
 - apiGroups: [""]
   resources: ["configmaps"]
   verbs: ["get", "list", "watch"]
+# NO BLANKET `secrets` GRANT (#473). Reading a credential is authorised by a NARROW, per-Configuration
+# Role that oasgen-provider provisions with `resourceNames` naming exactly the Secrets that
+# RestDefinition's Configuration instances reference, and by the per-CR Role rest-dynamic-controller
+# self-provisions for its secretRef resolvers (the rbac grant just below). A cluster-wide
+# `resources: ["secrets"]` rule here made both of those a strict subset of a grant this ServiceAccount
+# already held, so the scoping restricted nothing while reading as though it did.
+# Required by the secretRef field resolver (RDC >= 0.12.0): on Create/Update the controller
+# self-provisions a per-CR-instance Role + RoleBinding scoping access to exactly the Secrets
+# that CR's secretRef resolvers name, and tears them down on Delete. Without this grant the
+# controller cannot manage those objects and every secretRef-bearing resource fails to
+# reconcile with "cannot get resource \"roles\"". Mirrors the reference RBAC in the
+# oasgen-provider repo (manifests/rdc/rbac.yaml).
 - apiGroups: ["rbac.authorization.k8s.io"]
   resources: ["roles", "rolebindings"]
   verbs: ["create", "get", "update", "patch", "delete"]
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch", "update"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch", "update"]
 - apiGroups: [ {{ .apiGroup }}]
   resources: ["{{ .resource }}", "{{ .resource }}/status"]
   verbs: ["*"]
