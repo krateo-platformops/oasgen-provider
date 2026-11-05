@@ -26,6 +26,7 @@ func fullyPopulatedStatus() definitionv1alpha1.RestDefinitionStatus {
 		ResourceHash:             "sha256:resource",
 		AuthSecretDigest:         "sha256:authsecret",
 		AuthSecretRBACNamespaces: []string{"ns-a", "ns-b"},
+		GeneratorBuild:           "0.53.0-abc1234",
 	}
 }
 

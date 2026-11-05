@@ -25,6 +25,7 @@ import (
 	"github.com/krateo-platformops/plumbing/kubeutil/eventrecorder"
 	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 
+	"github.com/Masterminds/semver/v3"
 	definitionv1alpha1 "github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
 	"github.com/krateo-platformops/provider-runtime/pkg/controller"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
@@ -80,7 +81,7 @@ var (
 	RDCrbacConfigFolder       = path.Join(os.TempDir(), "assets/rdc-rbac/")
 )
 
-func Setup(mgr ctrl.Manager, o controller.Options, metrics reconciler.MetricsRecorder) error {
+func Setup(mgr ctrl.Manager, o controller.Options, metrics reconciler.MetricsRecorder, genCfg GeneratorConfig) error {
 	name := reconciler.ControllerName(definitionv1alpha1.RestDefinitionGroupKind)
 
 	log := o.Logger.WithValues("controller", name)
@@ -117,6 +118,7 @@ func Setup(mgr ctrl.Manager, o controller.Options, metrics reconciler.MetricsRec
 		disc:     discovery,
 		parser:   oas2jsonschema.NewLibOASParser(),
 		cfgWatch: dynamicwatch.NewRegistry(mgr.GetCache()),
+		genCfg:   genCfg,
 	}
 
 	r := reconciler.NewReconciler(mgr,
@@ -146,6 +148,74 @@ func Setup(mgr ctrl.Manager, o controller.Options, metrics reconciler.MetricsRec
 	return nil
 }
 
+// GeneratorConfig carries the process-level settings the controller cannot derive from the CR it is
+// reconciling. Passed explicitly from main rather than read out of the environment here: main already
+// exports Build as SERVICE_VERSION, and depending on a variable main happens to set would be a hidden
+// coupling that no signature declares.
+type GeneratorConfig struct {
+	// Build identifies this binary (main.Build). See status.generatorBuild for why an empty value is
+	// deliberately inert rather than treated as drift.
+	Build string
+
+	// RegenerateOnUpgrade re-renders every RestDefinition's CRD exactly once after an upgrade, which is
+	// what carries a release's generation fixes to kinds that already exist. Default true. An operator
+	// staging a large fleet sets OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false and accepts the trade the
+	// default exists to avoid: generation fixes then do not apply until something else re-renders.
+	RegenerateOnUpgrade bool
+}
+
+// generatorChanged reports whether this build is NEWER than the one that generated the CRD recorded by
+// stored. Directional, deliberately, and that is the whole subtlety of this function.
+//
+// WHY NOT A PLAIN INEQUALITY, which is what this did first. A mismatch is symmetric: a DOWNGRADE looks
+// exactly like an upgrade. Rolling the provider back would then re-render every CRD with the OLDER
+// generator and silently revert the very fixes the newer one had applied -- and reverting a schema is not
+// a cosmetic loss. A field that disappears from a CRD is PRUNED FROM EVERY LIVE CR at the next write, so
+// a ten-minute rollback of a bad deploy would strip values the resources need, which is #419's failure
+// mode arriving as a consequence of this feature.
+//
+// Raised by the openstack-ironic session from a real rollback: they went back to 0.50.0 while their CRDs
+// had been written by a newer generator, leaving a cluster running an older generator against newer
+// schemas. Benign as it stands -- nothing regenerates until something nudges it -- but with a symmetric
+// trigger it would have reverted `spec.node_id`, which is the exact field whose absence had wedged a CR
+// and cost them a day. Their words: "it is exactly the case nobody writes a test for."
+//
+// So a rollback leaves the newer schema in place. That is a stale-FORWARD schema, which is the safe
+// direction: the generator is behind the artifact, no data is lost, and the next genuine upgrade
+// re-renders it.
+//
+// ONLY MAJOR.MINOR.PATCH IS COMPARED. The stamp is `0.52.0-<sha>`, where the sha is a semver prerelease
+// -- and prereleases sort BEFORE their release, so a literal comparison would make `0.52.0-abc` older
+// than `0.52.0`, and two builds of one version would order by sha, which means nothing. Two stamps of
+// the same release are the same source, so equal triples are no change.
+//
+// UNPARSEABLE FAILS CLOSED. If either side is not semver the direction cannot be established, so nothing
+// is regenerated. That risks a silently inert feature if the stamp format ever changes, which is the
+// lesser of the two risks: the other one reverts schemas.
+func (c GeneratorConfig) generatorChanged(stored string) bool {
+	if !c.RegenerateOnUpgrade || c.Build == "" {
+		return false
+	}
+	if stored == "" {
+		// Never recorded: the activation path every existing cluster takes when this ships. One
+		// re-render, and such a CRD may genuinely be stale.
+		return true
+	}
+
+	current, cerr := semver.NewVersion(c.Build)
+	previous, perr := semver.NewVersion(stored)
+	if cerr != nil || perr != nil {
+		return false
+	}
+	return releaseTriple(current).GreaterThan(releaseTriple(previous))
+}
+
+// releaseTriple drops the prerelease and build metadata, leaving MAJOR.MINOR.PATCH. See
+// generatorChanged for why the sha must not participate in the ordering.
+func releaseTriple(v *semver.Version) *semver.Version {
+	return semver.New(v.Major(), v.Minor(), v.Patch(), "", "")
+}
+
 type connector struct {
 	kube     client.Client
 	log      logging.Logger
@@ -158,6 +228,7 @@ type connector struct {
 	// Build in Setup once the controller exists.
 	cfgWatch *dynamicwatch.Registry
 	ctrl     crcontroller.Controller
+	genCfg   GeneratorConfig
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -179,6 +250,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		parser:   c.parser,
 		cfgWatch: c.cfgWatch,
 		ctrl:     c.ctrl,
+		genCfg:   c.genCfg,
 	}, nil
 }
 
@@ -192,6 +264,7 @@ type external struct {
 	parser   oas2jsonschema.Parser
 	cfgWatch *dynamicwatch.Registry
 	ctrl     crcontroller.Controller
+	genCfg   GeneratorConfig
 }
 
 // ensureConfigurationWatch registers a watch on cr's generated Configuration Kind the first time it is
@@ -494,6 +567,15 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		return e.observeDrift(cr, "spec.resource changed; regenerating the CRD")
 	}
 
+	// The generator is the fifth input and the only one nothing hashed. The three checks above compare
+	// what goes IN; this one compares what transforms it. Without it an upgrade that fixes the schema
+	// generator left every existing CRD on the old schema while reporting Ready, and the operator's only
+	// signal was the absence of the fix they had just upgraded for (#453).
+	if e.genCfg.generatorChanged(cr.Status.GeneratorBuild) {
+		e.log.Debug("Generator build changed", "status", cr.Status.GeneratorBuild, "current", e.genCfg.Build)
+		return e.observeDrift(cr, "the provider that generated this CRD has been upgraded; regenerating the CRD")
+	}
+
 	// A Configuration instance's usernameRef/passwordRef/tokenRef can change (or an instance can appear/
 	// disappear) independently of the RestDefinition's own spec, so re-collect and re-hash on every
 	// reconcile and treat a change as drift, same pattern as the OAS-content check above. Gated on
@@ -752,6 +834,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
 	cr.Status.OASHash = oasHash
 	cr.Status.ResourceHash = resourceHash(cr)
+	cr.Status.GeneratorBuild = e.genCfg.Build
 
 	// Taken AFTER every in-place step above and immediately before the write. A field set after this
 	// line is not in the snapshot and so is never persisted -- that is the one ordering rule this shape
@@ -1102,14 +1185,21 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	// only redeployed the RDC. Gated on the OAS content hash so a drift triggered by anything else (e.g. the
 	// deployment digest) does not needlessly re-run the crd generator.
 	resHash := resourceHash(cr)
-	if oasHash != cr.Status.OASHash || resHash != cr.Status.ResourceHash {
+	generatorChanged := e.genCfg.generatorChanged(cr.Status.GeneratorBuild)
+	if oasHash != cr.Status.OASHash || resHash != cr.Status.ResourceHash || generatorChanged {
 		e.log.Debug("Regenerating CRD",
 			"oasChanged", oasHash != cr.Status.OASHash,
-			"resourceChanged", resHash != cr.Status.ResourceHash)
+			"resourceChanged", resHash != cr.Status.ResourceHash,
+			"generatorChanged", generatorChanged)
 		if gerr := e.generateAndApplyCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); gerr != nil {
 			return fmt.Errorf("regenerating CRD: %w", gerr)
 		}
 		cr.Status.ResourceHash = resHash
+		// Stamped unconditionally, not only when generatorChanged: the CRD was just rendered by THIS
+		// build whatever provoked the render, so recording a different build would be false. It also
+		// means an operator who has opted out still gets the stamp advanced by any real regeneration,
+		// and so does not collect a spurious one later if they opt back in.
+		cr.Status.GeneratorBuild = e.genCfg.Build
 	}
 
 	// Retire served versions nothing is using any more. OUTSIDE the regeneration gate above, because a

@@ -51,6 +51,7 @@ func main() {
 	metricsServiceName := flag.String("otel-service-name", fmt.Sprintf("%s-provider", strcase.KebabCase(providerName)), "The service name attached to exported OTLP metrics/traces.")
 	metricsExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	maxErrorRetryInterval := flag.Duration("max-error-retry-interval", env.Duration(fmt.Sprintf("%s_MAX_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Minute), "The maximum interval between retries when an error occurs. This should be less than the half of the poll interval.")
+	regenerateOnUpgrade := flag.Bool("regenerate-on-upgrade", env.Bool(fmt.Sprintf("%s_REGENERATE_ON_UPGRADE", envVarPrefix), true), "Re-render every RestDefinition's CRD once after a provider upgrade, so a release's generation fixes reach kinds that already exist. Set false to stage a large fleet and re-render deliberately instead -- generation fixes then do not apply until something else changes the OAS or spec.resource.")
 	minErrorRetryInterval := flag.Duration("min-error-retry-interval", env.Duration(fmt.Sprintf("%s_MIN_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Second), "The minimum interval between retries when an error occurs. This should be less than max-error-retry-interval.")
 
 	flag.Parse()
@@ -97,7 +98,9 @@ func main() {
 		"min-error-retry-interval", minErrorRetryInterval.String(),
 		"otel-enabled", *metricsEnabled,
 		"otel-service-name", *metricsServiceName,
-		"otel-export-interval", metricsExportInterval.String())
+		"otel-export-interval", metricsExportInterval.String(),
+		"regenerate-on-upgrade", *regenerateOnUpgrade,
+		"build", Build)
 
 	telemetryEnabled := *metricsEnabled
 	telemetryExportInterval := *metricsExportInterval
@@ -188,7 +191,10 @@ func main() {
 		logger.Error(err, "Cannot add APIs to scheme")
 		os.Exit(1)
 	}
-	if err := controllers.Setup(mgr, o, telemetryMetrics); err != nil {
+	if err := controllers.Setup(mgr, o, telemetryMetrics, controllers.Config{
+		Build:               Build,
+		RegenerateOnUpgrade: *regenerateOnUpgrade,
+	}); err != nil {
 		logger.Error(err, "Cannot setup controllers")
 		os.Exit(1)
 	}
