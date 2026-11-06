@@ -192,6 +192,13 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 	// optional string) when includeIdentifiersInSpec is on.
 	mappingSupplied := mappingSuppliedParams(g.resourceConfig.Verbs)
 
+	// Mapping-removal warnings are decided after the loop; see the deferral comment at the emission site.
+	type pendingRemoval struct {
+		name string
+		src  mappingSource
+	}
+	var pendingRemovalWarnings []pendingRemoval
+
 	// Names the author has explicitly declared are not theirs to set. Used only to suppress the
 	// mapping-removal warning (#409): the declaration IS the acknowledgement, and the field is immutable
 	// so the author could not withdraw it even if the warning convinced them to.
@@ -256,9 +263,19 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 				}
 			}
 
-			if src, mapped := mappingSupplied[param.Name]; mapped {
-				// Supplied by a fieldMapping: not the author's to provide, so neither required, nor
-				// present in spec, nor protected from excludedSpecFields pruning.
+			// PER-VERB, not resource-wide (#457). The exemption may only ask whether THIS verb supplies
+			// the parameter. A parameter supplied by some OTHER verb is still this verb's to take from
+			// spec, and omitting it left that verb with nothing to build its request URL from.
+			//
+			// The rule "omit only if every declaring verb supplies it" is not implemented as a pre-pass
+			// over the verbs, because the spec is ACCUMULATED here and that makes it emerge: a verb that
+			// supplies the parameter skips it, a verb that does not adds it, and the field therefore
+			// exists if and only if some declaring verb needs it. Order-independent in both directions,
+			// which a pre-pass computing the same answer separately would only be by construction --
+			// and would be a second place to keep in step with this loop's own parameter resolution.
+			if src, mapped := mappingSupplied.suppliesFor(verb.Action, param.Name); mapped {
+				// Supplied by a fieldMapping for THIS verb: not the author's to provide for it, so neither
+				// required, nor added to spec by this verb, nor protected from excludedSpecFields pruning.
 				//
 				// uniqueParams IS still recorded. The cross-document conflict check above reads it, and a
 				// mapped parameter is still SENT -- only its source changes -- so two verbs declaring it
@@ -310,12 +327,19 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 					// noise -- ExcludedSpecFields carries `self == oldSelf` (types.go:958), so an author
 					// CANNOT remove the entry. Warning about it is a permanent message they have no action
 					// for, which is the fastest way to teach people to ignore warnings.
-					if !propertyExists(param.Name) && !excludedSpecField[param.Name] {
-						warnings = append(warnings, SchemaGenerationError{
-							Code:    CodeFieldNotFound,
-							Message: mappingRemovalMessage(param.Name, src),
-						})
-					}
+					// DEFERRED TO AFTER THE LOOP (#457), because propertyExists reads the schema BEING
+					// BUILT and is therefore only final once building has finished.
+					//
+					// Testing it here was already acknowledged as residual risk in the safe direction --
+					// a body property present now could be pruned later. Per-verb supply makes the risk
+					// run the OTHER way too, and that direction is not safe: if the supplying verb is
+					// processed before a verb that needs the parameter from spec, the property does not
+					// exist yet, the warning fires, and the later verb then adds the field. The author
+					// would be told a property was removed that is sitting in the CRD.
+					//
+					// Order-dependent output is its own defect, so the decision moves to where the answer
+					// cannot still change.
+					pendingRemovalWarnings = append(pendingRemovalWarnings, pendingRemoval{name: param.Name, src: src})
 				}
 				continue
 			}
@@ -324,9 +348,22 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 				requiredParameters[param.Name] = true
 			}
 
-			// Add parameter to spec only if not already present in uniqueParams AND not in existing base schema
-			// Therefore we give precedence to base schema properties over parameters.
-			if _, exists := uniqueParams[param.Name]; !exists && !propertyExists(param.Name) {
+			// Add the parameter to spec unless the schema ALREADY has the property -- propertyExists is the
+			// authority, because it reads the schema being built: a property appended by an earlier verb,
+			// and a property contributed by the request body, both count.
+			//
+			// THE uniqueParams TERM WAS REMOVED HERE (#457), and that is load-bearing rather than tidying.
+			// There are two writers of uniqueParams and only one of them adds to the schema: the exemption
+			// above records a mapping-supplied parameter WITHOUT adding it, because the cross-document
+			// conflict check needs the origin. While the exemption was resource-wide that double duty was
+			// harmless -- nobody was going to add the property anyway. Per-verb it is not: a verb that does
+			// NOT supply the parameter must add it, and `!exists` blocked exactly that, so the field went
+			// missing whenever the supplying verb happened to be processed first.
+			//
+			// Found by the order-independence arm, which failed on "supplier first" while passing on
+			// "needer first" -- the accumulation argument for order independence is only sound once the
+			// two meanings of uniqueParams are separated.
+			if !propertyExists(param.Name) {
 				// Deep copy the schema to avoid modifying the original object, which might be shared.
 				schemaCopy := param.Schema.deepCopy()
 
@@ -363,6 +400,22 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 				warnings = append(warnings, reconcileParameterValidation(existing, param.Schema, param.Name, verb.Action)...)
 			}
 		}
+	}
+
+	// The mapping-removal warnings, now that the schema is final (#409, deferred by #457).
+	//
+	// A property that survived -- because another verb declares the parameter and does not supply it, or
+	// because a request body contributes it -- was not removed, so there is nothing to tell the author.
+	// An excludedSpecFields entry is the author's own acknowledgement and is immutable, so warning about
+	// it would be a permanent message they have no action for.
+	for _, pending := range pendingRemovalWarnings {
+		if propertyExists(pending.name) || excludedSpecField[pending.name] {
+			continue
+		}
+		warnings = append(warnings, SchemaGenerationError{
+			Code:    CodeFieldNotFound,
+			Message: mappingRemovalMessage(pending.name, pending.src),
+		})
 	}
 
 	return requiredParameters, warnings, nil
@@ -874,8 +927,44 @@ func (g *OASSchemaGenerator) removeFieldAtPathRec(ctx context.Context, schema *S
 // body's own `required` -- the two must not overlap, because that function's doc comment is explicit that
 // pruning a PARAMETER afterwards would silently unrequire one that merely shares a name with a
 // resolver-supplied body field.
-func mappingSuppliedParams(verbs []Verb) map[string]mappingSource {
+// suppliedParams answers two different questions that were previously conflated into one map keyed by
+// parameter name: WHETHER a parameter is mapping-supplied at all, and BY WHICH VERBS (#457).
+//
+// The old shape could only answer the first, so a fieldMapping on `update` exempted the parameter for
+// `get` as well -- and `get`, which has no mapping and now no spec field either, had nothing to build its
+// URL from. The map knew the declaring verb all along; it was used for the message and never for scoping.
+type suppliedParams struct {
+	// firstBy keeps the FIRST declaration per name, which is what the warning message names. Stable across
+	// renders by uniqueParams' own first-seen rule, so the message does not depend on verbsDescription order.
+	firstBy map[string]mappingSource
+	// byAction records every verb that supplies each name. This is what scoping reads.
+	byAction map[string]map[string]bool
+}
+
+// suppliesFor reports whether THIS verb supplies this parameter, which is the only question the exemption
+// may ask. A parameter supplied by some other verb is still this verb's to take from spec.
+func (sp suppliedParams) suppliesFor(action, name string) (mappingSource, bool) {
+	if sp.byAction[name] == nil || !sp.byAction[name][action] {
+		return mappingSource{}, false
+	}
+	return sp.firstBy[name], true
+}
+
+// anySupplier reports whether any verb supplies this parameter, regardless of which.
+func (sp suppliedParams) anySupplier(name string) (mappingSource, bool) {
+	src, ok := sp.firstBy[name]
+	return src, ok
+}
+
+func mappingSuppliedParams(verbs []Verb) suppliedParams {
 	supplied := map[string]mappingSource{}
+	byAction := map[string]map[string]bool{}
+	note := func(name, action string) {
+		if byAction[name] == nil {
+			byAction[name] = map[string]bool{}
+		}
+		byAction[name][action] = true
+	}
 	for _, verb := range verbs {
 		for _, m := range verb.FieldMapping {
 			// A request-direction entry names its source in the CR. An entry with no source is a
@@ -891,15 +980,17 @@ func mappingSuppliedParams(verbs []Verb) map[string]mappingSource {
 				if _, seen := supplied[m.InPath]; !seen {
 					supplied[m.InPath] = mappingSource{action: verb.Action, in: "path", from: m.InCustomResource}
 				}
+				note(m.InPath, verb.Action)
 			}
 			if m.InQuery != "" && !selfReferentialSpecSource(m.InCustomResource, m.InQuery) {
 				if _, seen := supplied[m.InQuery]; !seen {
 					supplied[m.InQuery] = mappingSource{action: verb.Action, in: "query", from: m.InCustomResource}
 				}
+				note(m.InQuery, verb.Action)
 			}
 		}
 	}
-	return supplied
+	return suppliedParams{firstBy: supplied, byAction: byAction}
 }
 
 // selfReferentialSpecSource reports whether a request-direction mapping reads from the exact top-level
