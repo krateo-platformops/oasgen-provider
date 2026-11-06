@@ -99,6 +99,11 @@ func (g *OASSchemaGenerator) Generate() (*GenerationResult, error) {
 	// and neither builder owns both.
 	generationWarnings = append(generationWarnings, g.warnDottedStatusFieldShadowsParameter(specSchema)...)
 
+	// A request-direction fieldMapping whose inCustomResource names nothing the CR will carry (#458).
+	// Reported here, after BOTH schemas exist, because the source may be rooted at spec or at status and
+	// neither builder owns both -- the same reason the shadow check above sits here.
+	generationWarnings = append(generationWarnings, g.warnUnresolvableMappingSource(specSchema, statusSchema)...)
+
 	// Validate Status Schema
 	validationWarnings := ValidateSchemas(g.docs, g.resourceConfig.Verbs, g.generatorConfig)
 
