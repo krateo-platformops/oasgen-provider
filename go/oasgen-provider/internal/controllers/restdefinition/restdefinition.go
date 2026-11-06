@@ -1103,8 +1103,27 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	logWarnings("generation", rendered.GenerationWarnings)
 	logWarnings("validation", rendered.ValidationWarnings)
 
-	if len(rendered.GenerationWarnings)+len(rendered.ValidationWarnings) > 0 {
-		all := append(append([]error{}, rendered.GenerationWarnings...), rendered.ValidationWarnings...)
+	// ONTO STATUS AS WELL AS THE EVENT (#462), and the assignment is UNCONDITIONAL.
+	//
+	// The Event is the right channel for "this just happened" and stays. It was wrong only as the SOLE
+	// record of a standing condition: the apiserver's default --event-ttl is one hour, while a declaration
+	// naming a field that does not exist stays wrong until someone edits it. Four definitions on a live
+	// fleet carried eight generation errors between them, all emitted at install time and garbage-collected
+	// long before anyone had a reason to look; they were found by rendering the definitions by hand.
+	//
+	// UNCONDITIONAL because the clearing case is the one that makes this readable. Assigning only when
+	// warnings exist would leave a fixed declaration still complaining, and a surface that cannot go quiet
+	// is one nobody trusts enough to check. This runs on create and whenever the OAS or spec.resource
+	// changes -- which is exactly when the answer can have changed.
+	//
+	// Status, not a condition: these are N independent facts rather than one binary state, and a list
+	// stays enumerable. `kubectl get restdefinition -A -o jsonpath=...{.status.schemaWarnings}` is a fleet
+	// sweep, which is what someone otherwise has to write a bespoke renderer to get.
+	//
+	// It does NOT touch Ready or Synced. See the field's own comment for why.
+	all := append(append([]error{}, rendered.GenerationWarnings...), rendered.ValidationWarnings...)
+	cr.Status.SchemaWarnings = renderWarnings(all)
+	if len(all) > 0 {
 		e.rec.Eventf(cr, corev1.EventTypeWarning, "SchemaWarnings", "%s", warningEventMessage(all))
 	}
 
@@ -1954,4 +1973,26 @@ func (e *external) generatedKindsServed(ctx context.Context, cr *definitionv1alp
 		}
 	}
 	return true, "", nil
+}
+
+// renderWarnings turns the render's warnings into the strings status carries, returning nil for none so
+// the field is omitted entirely rather than serialised as an empty array (#462).
+//
+// nil rather than []string{} is deliberate: `schemaWarnings: []` on every healthy RestDefinition is noise
+// in every `kubectl get -o yaml`, and omitempty only drops a nil slice.
+func renderWarnings(warnings []error) []string {
+	if len(warnings) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		if w == nil {
+			continue
+		}
+		out = append(out, w.Error())
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
