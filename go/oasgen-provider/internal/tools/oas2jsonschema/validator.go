@@ -2,6 +2,7 @@ package oas2jsonschema
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/safety"
@@ -94,8 +95,21 @@ func determineBaseAction(verbs []Verb) (string, error) {
 }
 
 func compareActionResponseSchemas(docs *DocumentSet, verbs []Verb, action1, action2 string, config *GeneratorConfig) []error {
+	// A SUCCESS RESPONSE WITH NO BODY IS NOT AN AUTHORING ERROR, so there is nothing to report and nothing
+	// to compare (#484's sibling). A documented 204 is the normal case: the vendor says success carries no
+	// body, the author cannot add one, and rewriting the asset to silence the warning would make the
+	// document false. Measured on a consumer's 32 kinds, 7 of their 12 validation warnings were this shape
+	// and every one of them was permanent and unactionable.
+	//
+	// errors.Is on a SENTINEL rather than a string match on the message, because the distinction is the
+	// extractor's to make: it alone knows whether a success response was declared with no content or with
+	// content it could not read. The second IS worth reporting -- something was returned and we could not
+	// use it -- and that path still warns.
 	schema2, err := ExtractSchemaForAction(docs, verbs, action2, config)
 	if err != nil {
+		if errors.Is(err, ErrSuccessResponseHasNoBody) {
+			return nil
+		}
 		return []error{SchemaValidationError{
 			Code:    CodeActionSchemaMissing,
 			Message: fmt.Sprintf("could not extract base schema for action '%s': %v", action2, err),
@@ -104,6 +118,9 @@ func compareActionResponseSchemas(docs *DocumentSet, verbs []Verb, action1, acti
 
 	schema1, err := ExtractSchemaForAction(docs, verbs, action1, config)
 	if err != nil {
+		if errors.Is(err, ErrSuccessResponseHasNoBody) {
+			return nil
+		}
 		return []error{SchemaValidationError{
 			Code:    CodeActionSchemaMissing,
 			Message: fmt.Sprintf("could not extract schema for action '%s' to compare: %v", action1, err),

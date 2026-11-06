@@ -801,6 +801,34 @@ func (g *OASSchemaGenerator) removeExcludedSpecFields(schema *Schema, requiredPa
 		}
 
 		if !g.removeFieldAtPath(schema, pathSegments) {
+			// NOT FOUND BECAUSE A MAPPING ALREADY REMOVED IT IS NOT AN AUTHORING ERROR (#484).
+			//
+			// A request-direction fieldMapping omits its parameter from the spec entirely. So an author who
+			// both maps a server-assigned identifier AND excludes it -- which is the documented way to keep
+			// one out of the spec, and the two declarations are meant to coexist -- gets this warning for a
+			// correct configuration. The exclusion IS inert; it is inert because the mapping did the job.
+			//
+			// AND THE AUTHOR CANNOT ACT ON IT. ExcludedSpecFields carries `self == oldSelf` (types.go), so
+			// the entry is immutable once the CRD exists. A permanent message with no action behind it is,
+			// in this file's own words about the mirror case, "the fastest way to teach people to ignore
+			// warnings".
+			//
+			// THE SUPPRESSION ALREADY EXISTED IN THE OTHER DIRECTION, which is what makes this a defect
+			// rather than a trade-off: the mapping-removal warning is suppressed when excludedSpecFields
+			// names the field, on the reasoning that the entry is the author's acknowledgement. The overlap
+			// was treated as acknowledgement when deciding whether to warn about the MAPPING and as an
+			// error when deciding whether to warn about the EXCLUSION.
+			//
+			// anySupplier, not suppliesFor: excludedSpecFields is a RESOURCE-level list, so the question is
+			// whether any verb supplies the field, not whether a particular one does.
+			//
+			// A SECOND CALL TO mappingSuppliedParams IS SAFE HERE. It is a pure function of
+			// g.resourceConfig.Verbs, the same input addParametersToSpec passes it, so the two cannot
+			// disagree -- unlike two implementations of the same rule, which is the drift this repo guards
+			// against elsewhere.
+			if _, supplied := mappingSuppliedParams(g.resourceConfig.Verbs).anySupplier(pathSegments[len(pathSegments)-1]); supplied && len(pathSegments) == 1 {
+				continue
+			}
 			warnings = append(warnings, SchemaGenerationError{Code: CodeFieldNotFound, Message: fmt.Sprintf("field '%s' set in excludedSpecFields not found in schema", excludedField)})
 		}
 	}

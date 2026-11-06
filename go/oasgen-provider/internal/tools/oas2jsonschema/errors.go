@@ -1,6 +1,9 @@
 package oas2jsonschema
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ParserErrorCode defines the type for parser-specific error codes.
 type ParserErrorCode string
@@ -138,6 +141,16 @@ const (
 	// CodeRecursionLimitExceeded indicates that the recursion limit was exceeded during validation.
 	CodeRecursionLimitExceeded ValidationCode = "RecursionLimitExceeded"
 )
+
+// ErrSuccessResponseHasNoBody reports that an action's declared success response carries no content at
+// all -- the shape of a documented 204.
+//
+// It exists so the VALIDATOR can distinguish "there is nothing to compare" from "something was returned
+// and we could not read it". The first is not an authoring error and the author cannot act on it: the
+// vendor documents success with no body, and rewriting the asset to add one would make the document
+// false. The second is worth reporting (#484's sibling: a permanent message with no action behind it is
+// the fastest way to teach people to ignore warnings).
+var ErrSuccessResponseHasNoBody = errors.New("the action's success response declares no body, so there is no schema to compare")
 
 // SchemaValidationError defines a structured error for schema validation.
 type SchemaValidationError struct {

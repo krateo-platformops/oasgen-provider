@@ -221,6 +221,8 @@ func ExtractSchemaForAction(docs *DocumentSet, verbs []Verb, targetAction string
 func extractRawResponseSchemaForAction(docs *DocumentSet, verbs []Verb, targetAction string, config *GeneratorConfig) (*Schema, string, error) {
 	doc := docs.For(targetAction)
 	var verbFound bool
+	// Set when a declared success response carries no content at all -- see the loop below.
+	var sawBodylessSuccess bool
 	for _, verb := range verbs {
 		if !strings.EqualFold(verb.Action, targetAction) {
 			continue
@@ -243,12 +245,32 @@ func extractRawResponseSchemaForAction(docs *DocumentSet, verbs []Verb, targetAc
 			continue // Or return an error if responses are expected
 		}
 
+		// A DOCUMENTED 2xx WITH NO CONTENT means the vendor says success carries no body, so there is
+		// nothing to compare and the author cannot act on it (#484's sibling).
+		//
+		// Detected OUTSIDE the SuccessCodes loop below, and that is the whole correction: SuccessCodes
+		// defaults to {200, 201}, so a 204 is never looked up there at all. My first version of this
+		// checked `len(resp.Content) == 0` inside that loop and therefore fired for nothing -- the test
+		// for it failed, which is how the mistake surfaced rather than shipping as a suppression that
+		// suppressed nothing.
+		//
+		// Narrow on purpose: only a 2xx, and only when it declares NO content. A success carrying content
+		// in a MIME type we do not accept is a different fact and still warns, because something was
+		// returned and the generator could not use it.
+		for code, resp := range responses {
+			if code < 200 || code >= 300 {
+				continue
+			}
+			if len(resp.Content) == 0 {
+				sawBodylessSuccess = true
+			}
+		}
+
 		for _, code := range config.SuccessCodes {
 			resp, ok := responses[code]
 			if !ok {
 				continue
 			}
-
 			for _, mimeType := range config.AcceptedMIMETypes {
 				schema, ok := resp.Content[mimeType]
 				if !ok || schema == nil {
@@ -263,5 +285,10 @@ func extractRawResponseSchemaForAction(docs *DocumentSet, verbs []Verb, targetAc
 		return nil, "", fmt.Errorf("action '%s' not defined in resource verbs", targetAction)
 	}
 
+	if sawBodylessSuccess {
+		// Wrapped so errors.Is reaches it, and the message still says what happened for anyone reading a
+		// log rather than branching on the error.
+		return nil, "", fmt.Errorf("%w: action '%s'", ErrSuccessResponseHasNoBody, targetAction)
+	}
 	return nil, "", fmt.Errorf("no suitable response schema found for action '%s'", targetAction)
 }
