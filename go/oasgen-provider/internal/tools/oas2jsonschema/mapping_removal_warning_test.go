@@ -100,7 +100,9 @@ func mappingSuppliedWarnings(t *testing.T, verbs []Verb, names ...string) []erro
 	supplied := mappingSuppliedParams(verbs)
 	var out []error
 	for _, name := range names {
-		src, mapped := supplied[name]
+		// anySupplier, not suppliesFor: this helper tests CLASSIFICATION and provenance, which is a
+		// question about the resource. Per-verb scoping is tested where it matters, at the exemption.
+		src, mapped := supplied.anySupplier(name)
 		if !mapped {
 			continue
 		}

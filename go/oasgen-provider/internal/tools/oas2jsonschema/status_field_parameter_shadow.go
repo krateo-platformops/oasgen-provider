@@ -22,13 +22,26 @@ import (
 // That is not a malformed URL. It is a syntactically valid one addressing something that does not exist,
 // so the vendor answers 404 and the reconciler acts on not-found by CREATING -- the #117 shape.
 //
-// WHY THE CHECK IS PER-VERB. mappingSuppliedParams exists and would be the obvious thing to consult, but
-// it is computed once across ALL verbs into one flat map (#457). Using it would exempt a verb that has no
-// mapping because a DIFFERENT verb has one -- and that is precisely the reachable case: a kind whose
-// `get` maps the parameter and whose `update` does not still sends the map on `update`. So each verb is
-// asked about its own mappings here. This duplicates a little of mappingSuppliedParams' logic
-// deliberately; the alternative is to make that function verb-aware, which is #457's job and a
-// behaviour change for its existing callers.
+// WHY THE CHECK IS PER-VERB. Using a resource-wide answer would exempt a verb that has no mapping because
+// a DIFFERENT verb has one -- precisely the reachable case: a kind whose `get` maps the parameter and whose
+// `update` does not still sends the map on `update`.
+//
+// #457 HAS SINCE MADE mappingSuppliedParams VERB-AWARE (suppliesFor), so the reason this function cannot
+// simply call it is no longer "that function is resource-wide". It is now two REAL differences, and this
+// comment previously predicted a deletion that turns out not to be available:
+//
+//  1. verbSuppliedParams also counts STATIC queries and headers, which mappingSuppliedParams does not and
+//     should not -- it answers a different question (which parameters to omit from spec).
+//  2. mappingSuppliedParams excludes a SELF-REFERENTIAL source (selfReferentialSpecSource: `spec.id`
+//     feeding parameter {id}) and this function does not.
+//
+// DIFFERENCE 2 IS A GAP HERE, not a deliberate choice, and it runs in the direction that loses a warning.
+// A self-referential mapping reads the author's OWN spec value, so if that value is a composite it still
+// reaches the wire -- which is exactly what this warning exists to report, and counting the parameter as
+// "supplied" suppresses it. Unusual in practice (a `spec.id` -> {id} mapping is no-op plumbing) and it
+// costs a missing warning rather than a broken request, so it is recorded rather than changed here:
+// altering #463's behaviour inside #457's change would be a silent scope increase with no measured
+// symptom behind it.
 //
 // WHY A REQUIRED SPEC PROPERTY IS SKIPPED. Spec wins over status -- processFields writes only where the
 // key is absent ("Avoid overwriting existing values") -- so a parameter the spec is GUARANTEED to carry
@@ -159,8 +172,9 @@ func (g *OASSchemaGenerator) warnDottedStatusFieldShadowsParameter(specSchemaJSO
 }
 
 // verbSuppliedParams returns the parameter names THIS verb supplies by any means other than the spec or
-// status: a request-direction fieldMapping, or a STATIC query or header. Deliberately per-verb; see the
-// comment above for why mappingSuppliedParams cannot be used.
+// status: a request-direction fieldMapping, or a STATIC query or header. Per-verb; see the comment above
+// for the two differences that keep this separate from mappingSuppliedParams now that #457 has made that
+// function verb-aware -- and for the self-referential gap recorded there.
 //
 // The static injections belong here for the same reason a mapping does, and they are even stronger: they
 // are set BEFORE auto-population and auto-population does not overwrite, so the parameter is always
