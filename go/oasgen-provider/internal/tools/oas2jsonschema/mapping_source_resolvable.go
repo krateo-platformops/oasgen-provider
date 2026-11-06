@@ -61,6 +61,45 @@ func (g *OASSchemaGenerator) warnUnresolvableMappingSource(specSchemaJSON, statu
 	}
 	seen := map[string]offence{}
 
+	// DEPENDENT-LOOKUP PARAMETERS TOO (found by running this screen over a consumer's 32 real
+	// RestDefinitions: 4 of their 53 mapping sources sit here, and nothing validated them).
+	//
+	// A lookup is a PRE-CALL read whose result feeds the main request, so an absent source fails earlier
+	// than a verb mapping and arguably worse: the lookup's own request is built without the value, and
+	// whatever the main request was going to take from it is missing too.
+	//
+	// ValidateDependentLookups does not cover this. It checks that a dependentLookup RESOLVER names a
+	// declared lookup -- the lookup's identity, not its parameters' sources.
+	//
+	// The destination is reported as "lookup path"/"lookup query" so a reader can tell these from a verb's
+	// own parameters; the action slot carries the lookup name, which is what an author edits.
+	for _, lookup := range g.resourceConfig.DependentLookups {
+		for _, prm := range lookup.Parameters {
+			dest := ""
+			name := ""
+			switch {
+			case prm.InPath != "":
+				dest, name = "lookup path", prm.InPath
+			case prm.InQuery != "":
+				dest, name = "lookup query", prm.InQuery
+			}
+			if dest == "" || prm.InCustomResource == "" {
+				// No request destination, or a value that comes from an EARLIER lookup (FromLookup)
+				// rather than from the CR. Neither reads the custom resource.
+				continue
+			}
+			_, _, reason := resolveCustomResourcePath(prm.InCustomResource, specProps, statusProps)
+			if reason == "" {
+				continue
+			}
+			key := "lookup:" + lookup.Name + "\x00" + dest + "\x00" + name + "\x00" + prm.InCustomResource
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = offence{action: lookup.Name, dest: dest, param: name, source: prm.InCustomResource, reason: reason}
+		}
+	}
+
 	for _, verb := range g.resourceConfig.Verbs {
 		for _, m := range verb.FieldMapping {
 			dest, param := requestDestination(m)

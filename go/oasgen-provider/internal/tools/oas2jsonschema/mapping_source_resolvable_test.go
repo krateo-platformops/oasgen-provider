@@ -348,3 +348,69 @@ func TestADuplicateMappingWithinOneVerbIsReportedOnce(t *testing.T) {
 	})
 	require.Len(t, got, 1, "one verb, one offending mapping declared twice: one warning. got: %v", got)
 }
+
+// DEPENDENT-LOOKUP PARAMETERS, the coverage gap a real corpus found.
+//
+// 4 of a consumer's 53 mapping sources sit in dependentLookups[].parameters, and nothing validated them:
+// ValidateDependentLookups checks that a dependentLookup RESOLVER names a declared lookup — the lookup's
+// identity, not its parameters' sources. The screen was blind to them by omission, not by design: the
+// domain model already carries LookupParameter.InCustomResource, converted at render/helper.go:147.
+func TestAnUnresolvableLookupParameterSourceIsReported(t *testing.T) {
+	got := warningsFor(t, &ResourceConfig{
+		Identifiers: []string{"name"},
+		Verbs:       baseVerbs(nil),
+		DependentLookups: []DependentLookup{{
+			Name:   "defaultBranch",
+			Method: "GET",
+			Path:   "/things/{id}",
+			Parameters: []LookupParameter{
+				{InPath: "id", InCustomResource: "spec.not_a_field"},
+			},
+			Select: ".default_branch",
+		}},
+	})
+
+	require.Len(t, got, 1)
+	for _, want := range []string{`"defaultBranch"`, "lookup path", `"id"`, `"spec.not_a_field"`, "generated spec"} {
+		require.Contains(t, got[0], want,
+			"the message must name the LOOKUP, the destination, the parameter and the source. got: %s", got[0])
+	}
+	require.Contains(t, got[0], "lookup path",
+		"a lookup's destination must be distinguishable from a verb's own parameter, or an author cannot "+
+			"tell which request is broken")
+}
+
+// A resolvable lookup source is silent — the pair that makes the arm above a measurement.
+func TestAResolvableLookupParameterSourceIsSilent(t *testing.T) {
+	require.Empty(t, warningsFor(t, &ResourceConfig{
+		Identifiers: []string{"name"},
+		Verbs:       baseVerbs(nil),
+		DependentLookups: []DependentLookup{{
+			Name:       "defaultBranch",
+			Method:     "GET",
+			Path:       "/things/{id}",
+			Parameters: []LookupParameter{{InPath: "id", InCustomResource: "spec.name"}},
+			Select:     ".default_branch",
+		}},
+	}), "spec.name is a body property of create and therefore a spec field")
+}
+
+// A PARAMETER FED BY AN EARLIER LOOKUP READS NO CUSTOM RESOURCE, so it must not be screened.
+//
+// fromLookup is how the second of two chained lookups takes its input: the corpus's own gitref kind does
+// exactly this (repo -> default_branch, then that branch's ref -> object.sha). Screening it would report
+// every chained lookup in existence, which is the over-reach #455 produced in a different place.
+func TestALookupParameterFedByAnotherLookupIsNotScreened(t *testing.T) {
+	require.Empty(t, warningsFor(t, &ResourceConfig{
+		Identifiers: []string{"name"},
+		Verbs:       baseVerbs(nil),
+		DependentLookups: []DependentLookup{{
+			Name:   "branchRef",
+			Method: "GET",
+			Path:   "/things/{id}",
+			// No InCustomResource at all: the value comes from the earlier lookup.
+			Parameters: []LookupParameter{{InPath: "id", FromLookup: "defaultBranch"}},
+			Select:     ".object.sha",
+		}},
+	}), "a fromLookup parameter takes its value from an earlier lookup, not from the CR")
+}
