@@ -1,10 +1,12 @@
 package restResources
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"testing"
 
+	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/stretchr/testify/require"
@@ -12,9 +14,12 @@ import (
 )
 
 func absenceReportCR() *unstructured.Unstructured {
+	// widgetGVK, not an ad-hoc group: reportInferredAbsence now persists a count, so the CR has to exist in
+	// the fake client and its GVK has to be one fakePluralizer can map. An unmappable GVK makes the patch
+	// fail, which falls back to the informational form -- so a harness mismatch would present as "the
+	// severity logic is broken" rather than as a missing object.
 	u := &unstructured.Unstructured{Object: map[string]interface{}{}}
-	u.SetAPIVersion("example.com/v1")
-	u.SetKind("Widget")
+	u.SetGroupVersionKind(widgetGVK)
 	u.SetName("w1")
 	u.SetNamespace("default")
 	return u
@@ -60,10 +65,10 @@ func TestOnlyASynthesised404IsReportedAsInferredAbsence(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			evs := &recordingEvents{}
-			h := &handler{eventRecorder: evs, logger: logging.NewNopLogger()}
+			cr := absenceReportCR()
+			h, evs := latchedHandler(t, cr)
 
-			got := h.reportInferredAbsence(absenceReportCR(), tc.err, logging.NewNopLogger())
+			got := h.reportInferredAbsence(context.Background(), cr, tc.err, logging.NewNopLogger())
 
 			require.Equal(t, tc.wantReport, got, tc.why)
 			require.Len(t, evs.all(), map[bool]int{true: 1, false: 0}[tc.wantReport],
@@ -78,6 +83,11 @@ func TestOnlyASynthesised404IsReportedAsInferredAbsence(t *testing.T) {
 						"seeing a create they did not expect needs the cause")
 				require.Contains(t, e.Message, "A create will be attempted",
 					"it must say what happens next, because nothing refuses: the create proceeds")
+				require.Equal(t, event.TypeNormal, e.Type,
+					"FIRST CONTACT IS NOT A WARNING. The first existence check of a findby-only resource "+
+						"must infer absence -- there is no id to GET and an empty listing is the only "+
+						"possible answer -- so a Warning here fires on every healthy create of every such "+
+						"kind. A consumer measured 5 of 5 emissions on healthy creates and 0 pathological")
 			}
 		})
 	}
@@ -100,4 +110,37 @@ func TestOnlyASynthesised404IsReportedAsInferredAbsence(t *testing.T) {
 // If (2) comes back negative, this test will still pass, and that is the limitation to remember.
 func TestTheCallSiteIsCoveredByInspectionNotByThisFile(t *testing.T) {
 	t.Skip("documentation of a known coverage gap; see the comment above")
+}
+
+// TestARepeatedInferenceIsAWarningWhileTheFirstIsNot is the pathological case, and the only one that earns
+// an interrupt.
+//
+// A second inference for the SAME spec generation means the create that followed the first one did not make
+// the resource findable. That is what a blinded or mis-scoped findby produces -- and it is what a consumer
+// could not reproduce on their cluster, because their generator excludes the parameters that would cause
+// it, so this is the only place the distinction is exercised at all.
+func TestARepeatedInferenceIsAWarningWhileTheFirstIsNot(t *testing.T) {
+	cr := absenceReportCR()
+	h, evs := latchedHandler(t, cr)
+	ctx := context.Background()
+	synth := &restclient.StatusError{StatusCode: http.StatusNotFound, Synthesised: true}
+
+	require.True(t, h.reportInferredAbsence(ctx, cr, synth, logging.NewNopLogger()))
+	require.Len(t, evs.all(), 1)
+	require.Equal(t, event.TypeNormal, evs.all()[0].Type, "first contact is informational")
+
+	require.True(t, h.reportInferredAbsence(ctx, cr, synth, logging.NewNopLogger()))
+	require.Len(t, evs.all(), 2)
+	second := evs.all()[1]
+	require.Equal(t, event.TypeWarning, second.Type,
+		"a repeat for the same generation is pathological: the previous create did not make it findable")
+	require.Contains(t, second.Message, "did not make it findable",
+		"the warning must say what the repeat MEANS, not merely that it repeated")
+
+	// And a converged observe clears the count, so a later inference is fresh first contact rather than an
+	// escalating series.
+	require.NoError(t, h.clearInferredAbsence(ctx, cr))
+	require.True(t, h.reportInferredAbsence(ctx, cr, synth, logging.NewNopLogger()))
+	require.Equal(t, event.TypeNormal, evs.all()[2].Type,
+		"after convergence clears the count, an inference is first contact again")
 }

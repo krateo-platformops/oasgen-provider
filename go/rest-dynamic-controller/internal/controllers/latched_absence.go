@@ -47,32 +47,94 @@ const (
 	// async create to complete and far short of the days a genuinely stuck latch will sit for -- the
 	// measured case held for 318 observes, so any threshold in this range catches it.
 	maxLatchedAbsenceRepeats = 5
+
+	// annotationInferredAbsenceSignature / Repeats count absence inferences on the MAIN path (the else-if,
+	// where a create does follow). They exist to separate first contact from a repeat, because those two
+	// deserve different severities -- see reportInferredAbsence.
+	annotationInferredAbsenceSignature = "krateo.io/inferred-absence-signature"
+	annotationInferredAbsenceRepeats   = "krateo.io/inferred-absence-repeats"
 )
 
-// latchedAbsenceSignature identifies the latched state for the purpose of "is this the same one again".
-func latchedAbsenceSignature(mg *unstructured.Unstructured) string {
+// absenceCounter is a consecutive-observe counter persisted in a pair of annotations. Two states need one
+// counted the same way -- a latched absence (here) and a repeated absence inference on the main path
+// (reasonAbsenceInferred) -- and a second hand-written copy would be a second thing to keep in step.
+type absenceCounter struct {
+	sigKey   string
+	countKey string
+	kind     string // goes in the signature, so the two counters can never read each other's value
+}
+
+var (
+	latchedCounter  = absenceCounter{annotationLatchedAbsenceSignature, annotationLatchedAbsenceRepeats, "latched-absence"}
+	inferredCounter = absenceCounter{annotationInferredAbsenceSignature, annotationInferredAbsenceRepeats, "inferred-absence"}
+)
+
+// signature identifies the state for the purpose of "is this the same one again". The generation is in it
+// so that editing the spec always re-enables a fresh count: an author who changes the CR in response to
+// the report must get a new budget, and generation is exactly the apiserver's record of "the spec changed".
+func (c absenceCounter) signature(mg *unstructured.Unstructured) string {
 	if mg == nil {
 		return ""
 	}
-	return fmt.Sprintf("gen=%d;latched-absence", mg.GetGeneration())
+	return fmt.Sprintf("gen=%d;%s", mg.GetGeneration(), c.kind)
+}
+
+// repeats reads the consecutive count for sig, returning 0 when the recorded signature is a different one
+// or when the value is unusable. Anything unparsable reads as 0 rather than failing a reconcile: these are
+// instruments, and a broken instrument must not wedge the controller.
+func (c absenceCounter) repeats(mg *unstructured.Unstructured, sig string) int {
+	if mg == nil || sig == "" {
+		return 0
+	}
+	ann := mg.GetAnnotations()
+	if ann[c.sigKey] != sig {
+		return 0
+	}
+	n, err := strconv.Atoi(ann[c.countKey])
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// record persists sig and the incremented count, returning the new count.
+func (c absenceCounter) record(ctx context.Context, h *handler, mg *unstructured.Unstructured, sig string) (int, error) {
+	n := c.repeats(mg, sig) + 1
+	if err := h.patchAnnotations(ctx, mg, map[string]interface{}{
+		c.sigKey:   sig,
+		c.countKey: strconv.Itoa(n),
+	}); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// clear removes the bookkeeping. A no-op when nothing is recorded, which keeps the path that never counted
+// free of a write per reconcile.
+func (c absenceCounter) clear(ctx context.Context, h *handler, mg *unstructured.Unstructured) error {
+	if mg == nil {
+		return nil
+	}
+	ann := mg.GetAnnotations()
+	if ann[c.sigKey] == "" && ann[c.countKey] == "" {
+		return nil
+	}
+	return h.patchAnnotations(ctx, mg, map[string]interface{}{
+		c.sigKey:   nil,
+		c.countKey: nil,
+	})
+}
+
+// latchedAbsenceSignature is kept as the latched counter's signature accessor.
+func latchedAbsenceSignature(mg *unstructured.Unstructured) string {
+	return latchedCounter.signature(mg)
 }
 
 // latchedAbsenceRepeats reads the consecutive-latch count for sig, returning 0 when the recorded signature
 // is a different one or when the value is unusable. Anything unparsable reads as 0 rather than failing a
 // reconcile: this is an instrument, and a broken instrument must not wedge the controller.
 func latchedAbsenceRepeats(mg *unstructured.Unstructured, sig string) int {
-	if mg == nil || sig == "" {
-		return 0
-	}
-	ann := mg.GetAnnotations()
-	if ann[annotationLatchedAbsenceSignature] != sig {
-		return 0
-	}
-	n, err := strconv.Atoi(ann[annotationLatchedAbsenceRepeats])
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n
+	return latchedCounter.repeats(mg, sig)
 }
 
 // reportLatchedInferredAbsence counts consecutive latched observes and emits ONE warning when the count
@@ -99,11 +161,8 @@ func (h *handler) reportLatchedInferredAbsence(ctx context.Context, mg *unstruct
 		// latch, not one per poll.
 		return false
 	}
-	n++
-	if perr := h.patchAnnotations(ctx, mg, map[string]interface{}{
-		annotationLatchedAbsenceSignature: sig,
-		annotationLatchedAbsenceRepeats:   strconv.Itoa(n),
-	}); perr != nil {
+	n, perr := latchedCounter.record(ctx, h, mg, sig)
+	if perr != nil {
 		// A failed count must not fail the reconcile: the latch's own verdict is unaffected, and losing
 		// the instrument is strictly better than wedging the resource it watches.
 		log.Debug("Could not record the latched-absence count", "error", perr)
@@ -130,15 +189,11 @@ func (h *handler) reportLatchedInferredAbsence(ctx context.Context, mg *unstruct
 // create completes normally starts from zero if it is ever latched again. A no-op when nothing is recorded,
 // which is the common case and must not cost a write per reconcile.
 func (h *handler) clearLatchedAbsence(ctx context.Context, mg *unstructured.Unstructured) error {
-	if mg == nil {
-		return nil
-	}
-	ann := mg.GetAnnotations()
-	if ann[annotationLatchedAbsenceSignature] == "" && ann[annotationLatchedAbsenceRepeats] == "" {
-		return nil
-	}
-	return h.patchAnnotations(ctx, mg, map[string]interface{}{
-		annotationLatchedAbsenceSignature: nil,
-		annotationLatchedAbsenceRepeats:   nil,
-	})
+	return latchedCounter.clear(ctx, h, mg)
+}
+
+// clearInferredAbsence drops the main-path count once an observe does NOT infer absence -- the resource is
+// findable, so the next inference (if there ever is one) is a fresh first contact rather than a repeat.
+func (h *handler) clearInferredAbsence(ctx context.Context, mg *unstructured.Unstructured) error {
+	return inferredCounter.clear(ctx, h, mg)
 }
