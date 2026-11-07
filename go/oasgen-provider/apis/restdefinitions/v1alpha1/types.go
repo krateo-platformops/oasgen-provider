@@ -1226,17 +1226,14 @@ type RestDefinitionStatus struct {
 	// REWRITTEN ON EVERY RENDER, including to empty. A fixed declaration clears this rather than leaving a
 	// stale complaint, which is the property that makes it worth reading at all.
 	//
-	// BUT "INCLUDING TO EMPTY" IS ABOUT THE FIELD, NOT THE WIRE, and the difference matters to anyone
-	// sweeping a fleet. renderWarnings returns nil for none and this field is `omitempty`, both
-	// deliberately -- `schemaWarnings: []` on every healthy RestDefinition is noise in every
-	// `kubectl get -o yaml`. The consequence is that ABSENT MEANS EITHER "this render produced none" OR
-	// "this definition has not been rendered by a version that writes the field". Those two are
-	// indistinguishable from the field alone.
+	// "INCLUDING TO EMPTY" IS ABOUT THE FIELD AND NOT THE WIRE. An empty result is omitted from the
+	// serialised object rather than written as `[]`, deliberately: `schemaWarnings: []` on every healthy
+	// RestDefinition is noise in every `kubectl get -o yaml`.
 	//
-	// So a sweep that needs to tell clean from not-yet-rendered must read status.generatorBuild alongside
-	// it. I told two consumers that an empty list means "this render produced none, not that nothing ran";
-	// that is true of the Go field and false of the serialised object, which is the kind of claim that
-	// stops the next person looking (#491).
+	// SO AN ABSENT FIELD MEANS EITHER "this render produced no warnings" OR "this RestDefinition has not
+	// been rendered by a version that writes the field", and the two cannot be told apart from this field
+	// alone. Read status.generatorBuild alongside it when that distinction matters -- for example when
+	// sweeping a fleet for definitions whose declarations need fixing (#492).
 	//
 	// +optional
 	SchemaWarnings []string `json:"schemaWarnings,omitempty"`

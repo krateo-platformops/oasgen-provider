@@ -161,7 +161,7 @@ func TestCreatePhaseStatusGivesUpOnPersistentConflict(t *testing.T) {
 	assert.Less(t, attempts, 20, "the retry must be bounded, not unbounded")
 }
 
-// TestCreatePhaseOnePersistsEveryFieldSetBeforeIt is the #491 regression. It is the THIRD version of
+// TestCreatePhaseOnePersistsEveryFieldSetBeforeIt is the #492 regression. It is the THIRD version of
 // this test; the first two were vacuous and a mutation caught both. That history is the useful part.
 //
 // V1 asserted snapshotStatus(cr).applyTo(target). The snapshot path was ALWAYS complete -- that is what
@@ -211,10 +211,10 @@ func TestCreatePhaseOnePersistsEveryFieldSetBeforeIt(t *testing.T) {
 		require.False(t, gv.Field(i).IsZero(),
 			"RestDefinitionStatus.%s was set on cr before Create's first phase and is ZERO ON THE "+
 				"PERSISTED OBJECT. The write targets a freshly READ object, so a field set in place and "+
-				"not carried by the write is never persisted -- that is #491, and before it #263. Do not "+
+				"not carried by the write is never persisted -- that is #492, and before it #263. Do not "+
 				"fix this by adding the field to a list: the write must carry the whole status.", name)
 	}
 
 	require.Equal(t, want.SchemaWarnings, got.Status.SchemaWarnings,
-		"schemaWarnings specifically: the field #491 lost on every fresh install")
+		"schemaWarnings specifically: the field #492 lost on every fresh install")
 }

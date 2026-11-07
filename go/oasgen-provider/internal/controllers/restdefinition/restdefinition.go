@@ -1814,7 +1814,7 @@ func crdExists(ctx context.Context, kube client.Client, name string) (bool, erro
 // Re-reads on every attempt rather than retrying a stale object, matching applyMergedWithRetry in
 // internal/tools/crd: a concurrent change to the status is merged on top instead of clobbered by a stale
 // write, which matters because the runtime writes annotations to this same object.
-// It USED TO HAND-LIST THE FIELDS IT CARRIED, and that is the third field dropped this way (#491).
+// It USED TO HAND-LIST THE FIELDS IT CARRIED, and that is the third field dropped this way (#492).
 //
 // The closure set exactly Creating, HasSecuritySchemes and Resource. generateAndApplyCRDs, called a few
 // lines above the call site, sets cr.Status.SchemaWarnings IN PLACE -- and because this write targets a
