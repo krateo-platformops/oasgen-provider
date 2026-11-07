@@ -65,13 +65,23 @@ func TestApiKeyAuthoredDefaultAndParentStamping(t *testing.T) {
 	}
 }
 
-// POSITIVE CONTROL. Without this, the `false` above is an unproven zero: an instrument that cannot
-// report a stamped parent reports none whether or not one exists.
+// THIS CONTROL WAS INVERTED WHEN oasgen SET crdgen's NoParentDefaults, and the rename is the point.
 //
-// `opts` is an optional object whose child `verbose` carries `default: false`, and it declares no required
-// properties -- the exact predicate crdgen's materializeDefaultedParents matches. This MUST stamp, and the
-// census warning MUST name the path. If it does not, the probe above proves nothing.
-func TestPositiveControl_AnOptionalObjectWithADefaultedChildMustStamp(t *testing.T) {
+// It used to assert that `render.CRDs` STAMPS this shape, as a positive control proving the apiKey probe's
+// `false` was not an unproven zero. oasgen now sets Options.NoParentDefaults, because a vendor's `default`
+// DESCRIBES what the server assumes rather than instructing us to send it -- so through our render path a
+// stamp must now never appear, and the old assertion asserted behaviour we deliberately turned off.
+//
+// ITS OLD NAME SAID "MUST STAMP", WHICH READS AS INTENT AND IS NOT. A consumer session read exactly this
+// test, took "MUST stamp" as evidence that the stamping was wanted product behaviour, and was about to
+// report it as such before opening the file -- and the probe it was reading was its own. A control's name
+// states what the INSTRUMENT must be able to see, never what the product should do; this one now says so.
+//
+// The instrument proof moved rather than vanished: TestControlTheSameShapeIsStampedWhenTheFlagIsUnset in
+// no_parent_defaults_test.go calls crdgen directly with the flag UNSET and requires both the stamp and the
+// plumbing#84 warning. That is where "the detector can see a stamp" belongs, because it must not depend on
+// a flag oasgen sets.
+func TestTheRenderPathNeverStampsAnOptionalParent(t *testing.T) {
 	oasText, err := os.ReadFile("testdata/parentdefault/stamped.yaml")
 	require.NoError(t, err)
 
@@ -102,16 +112,25 @@ func TestPositiveControl_AnOptionalObjectWithADefaultedChildMustStamp(t *testing
 		t.Logf("  WARNING: %v", w)
 	}
 
-	require.True(t, stamped,
-		"the control did not stamp -- so the apiKey probe's `false` is an unproven zero and must not be reported")
-	var named bool
+	require.False(t, stamped,
+		"render.CRDs must NOT stamp an optional parent: a vendor default describes what the server assumes, "+
+			"RDC sends top-level spec values whole, and a materialised value cannot afterwards be told apart "+
+			"from an authored one. Set crdgen.Options.NoParentDefaults at BOTH call sites in render.go.")
+
+	// AND NO STAMP WARNING EITHER, for the RESOURCE CRD that this arm renders.
+	//
+	// THIS ARM DOES NOT COVER THE SECOND CALL SITE, and the first version of this comment claimed it did.
+	// Measured: removing NoParentDefaults from the Configuration literal alone left this test PASSING.
+	// render.go builds two separate crdgen.Options literals and this fixture declares no configurationFields,
+	// so its Configuration CRD is never rendered here at all. The claim was plausible and false, which is
+	// the shape worth naming: a comment asserting a safety the test does not provide stops the next person
+	// looking. TestTheConfigurationCRDAlsoNeverStampsAnOptionalParent is what actually covers that site, and
+	// it was written only because the mutation survived.
 	for _, w := range res.GenerationWarnings {
-		if strings.Contains(w.Error(), "default {}") || strings.Contains(w.Error(), "given default") {
-			named = true
-		}
+		require.NotContains(t, w.Error(), "given default",
+			"a stamp warning survived with NoParentDefaults set, so at least one crdgen.Options literal in "+
+				"render.go still omits the flag")
 	}
-	require.True(t, named,
-		"crdgen stamped a parent but the wired warning channel did not report it -- the census would be blind")
 }
 
 // THE REQUIRED+DEFAULT INTERACTION, which is what makes oasgen's one authored default do real work.

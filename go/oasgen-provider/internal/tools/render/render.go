@@ -178,13 +178,30 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 	}
 
 	res, crdWarnings, err := crdgen.GenerateWithWarnings(crdgen.Options{
-		Group:        gvk.Group,
-		Version:      gvk.Version,
-		Kind:         gvk.Kind,
-		Categories:   []string{strings.ToLower(cr.Spec.Resource.Kind), "restresources", "rr"},
-		SpecSchema:   result.SpecSchema,
-		StatusSchema: result.StatusSchema,
-		Managed:      true,
+		// A VENDOR'S `default` DESCRIBES WHAT THE SERVER ASSUMES; it does not instruct us to send it.
+		// crdgen's stamping was designed for Helm values.schema.json, where a default IS an
+		// instruction. Here it converts documentation into a value RDC transmits: RDC sends top-level
+		// spec values whole, so a materialised parent puts fields the author never wrote on the wire.
+		//
+		// AND IT CANNOT BE UNDONE. Measured on a real apiserver by aruba-provider-kog: patching only
+		// the CRD makes an already-stored object read back with the defaulted children and NO etcd
+		// write (resourceVersion unchanged); one unrelated write then persists them; reverting the CRD
+		// does NOT remove them; and `f:properties` never enters managedFields, so the value is present
+		// and UNOWNED and `kubectl apply` will not prune it. `generation` never bumps either, because
+		// incoming and stored are both defaulted before comparison -- so nothing keyed on generation
+		// can see it. There is no artifact to diff.
+		//
+		// The worst measured payload is a property literally named `default`, documented "Only one
+		// default vpc for region is admissible": materialising its parent makes every Vpc CR whose
+		// author omitted `properties` assert a region-unique role.
+		NoParentDefaults: true,
+		Group:            gvk.Group,
+		Version:          gvk.Version,
+		Kind:             gvk.Kind,
+		Categories:       []string{strings.ToLower(cr.Spec.Resource.Kind), "restresources", "rr"},
+		SpecSchema:       result.SpecSchema,
+		StatusSchema:     result.StatusSchema,
+		Managed:          true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("generating CRD: %w", err)
@@ -202,12 +219,29 @@ func CRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema
 			Kind:    text.CapitaliseFirstLetter(cr.Spec.Resource.Kind) + "Configuration",
 		}
 		cfgRes, cfgWarnings, cerr := crdgen.GenerateWithWarnings(crdgen.Options{
-			Group:      cfgGVK.Group,
-			Version:    cfgGVK.Version,
-			Kind:       cfgGVK.Kind,
-			Categories: []string{strings.ToLower(cr.Spec.Resource.Kind), "restconfigs", "rc"},
-			SpecSchema: result.ConfigurationSchema,
-			Managed:    false,
+			// A VENDOR'S `default` DESCRIBES WHAT THE SERVER ASSUMES; it does not instruct us to send it.
+			// crdgen's stamping was designed for Helm values.schema.json, where a default IS an
+			// instruction. Here it converts documentation into a value RDC transmits: RDC sends top-level
+			// spec values whole, so a materialised parent puts fields the author never wrote on the wire.
+			//
+			// AND IT CANNOT BE UNDONE. Measured on a real apiserver by aruba-provider-kog: patching only
+			// the CRD makes an already-stored object read back with the defaulted children and NO etcd
+			// write (resourceVersion unchanged); one unrelated write then persists them; reverting the CRD
+			// does NOT remove them; and `f:properties` never enters managedFields, so the value is present
+			// and UNOWNED and `kubectl apply` will not prune it. `generation` never bumps either, because
+			// incoming and stored are both defaulted before comparison -- so nothing keyed on generation
+			// can see it. There is no artifact to diff.
+			//
+			// The worst measured payload is a property literally named `default`, documented "Only one
+			// default vpc for region is admissible": materialising its parent makes every Vpc CR whose
+			// author omitted `properties` assert a region-unique role.
+			NoParentDefaults: true,
+			Group:            cfgGVK.Group,
+			Version:          cfgGVK.Version,
+			Kind:             cfgGVK.Kind,
+			Categories:       []string{strings.ToLower(cr.Spec.Resource.Kind), "restconfigs", "rc"},
+			SpecSchema:       result.ConfigurationSchema,
+			Managed:          false,
 		})
 		if cerr != nil {
 			return nil, fmt.Errorf("generating configuration CRD: %w", cerr)
