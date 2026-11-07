@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,58 @@ timestamp: 2026-11-05T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-07 — 0.54.0
+
+Five changes. **One stops a generator upgrade from writing values into your CRs that nobody authored**, one puts the current render's schema warnings on status, and the rest make the generator's warnings mean something — two new ones that catch real mistakes, and two old ones silenced because no author could act on them.
+
+### A vendor's `default` is no longer materialised onto an optional parent
+
+0.53.0 took plumbing to v1.27.0, whose `crdgen` gives an optional object `default: {}` when something beneath it is defaulted, so the apiserver materialises the parent and the nested defaults apply. **That behaviour was designed for Helm `values.schema.json`, where a `default` is an instruction.** In a vendor's OpenAPI document a `default` *describes what the server assumes* — and materialising it turns documentation into a value the controller transmits, because rest-dynamic-controller sends top-level spec values whole.
+
+This release sets `crdgen`'s `NoParentDefaults`, which the library added for exactly this case (#488).
+
+**Why it matters more than a shape change.** Measured on a live apiserver by a consumer: patching **only the CRD** makes an already-stored object read back with the defaulted children and **no etcd write** — `resourceVersion` unchanged. One unrelated write then persists them. **Reverting the CRD does not remove them**, and `f:properties` never enters `managedFields`, so the value is present and unowned and `kubectl apply` will not prune it. `generation` never bumps either, because incoming and stored are both defaulted before comparison. **There is no artifact to diff and nothing keyed on generation can see it.**
+
+The worst measured payload is a property literally named `default`, documented *"Only one default vpc for region is admissible"* — so a CR whose author omitted the parent would assert a region-unique role.
+
+**If you are on 0.53.0 and your documents carry the shape, this release does not undo what is already stored.** The opt-out protects renders from here on; a value already persisted by an unrelated write is indistinguishable from an authored one. Consumers whose vendor documents have defaults under optional parents should check before upgrading rather than after.
+
+**One consumer's fleet measured 240 stamped paths across 36 definitions, and 238 of them were on the Configuration CRD** — the one you cannot see in `spec.resource`. Every definition, every verb, through the intermediate objects the generator builds itself with no `required` list, bottoming out in a query parameter whose vendor default is `api-version`. The remaining 2 were resource CRDs, and **exactly 1 of the 240 is a hazard today**: the region-unique `default` above. The other 239 materialise a benign value. The same measurement at this release reports **0**, with the 0.53.0 run as the baseline proving the instrument reports stamps when they exist. This repo's own 18 documents carry the shape **zero** times, which is why the golden CRD is byte-identical across the change — and why the test for it renders a purpose-built document instead of relying on the golden.
+
+**This fixes one path and not the defect behind it (#471), and the distinction is the part to read.** The flag stops the generator stamping an *omitted* parent. It does nothing to the vendor's child `default` keywords, which are still copied into the generated schema as structural defaults — so an author who writes the enclosing object **themselves** still gets the siblings filled in:
+
+| the CR says | reads back as | 0.54.0 |
+|---|---|---|
+| omits the parent entirely | would have materialised once stamped | **prevented** |
+| `parent: {}` | every defaulted sibling | **unchanged** |
+| `parent: {oneField: false}` | that field **plus** every defaulted sibling | **unchanged** |
+
+The third row is the live one, it needs no upgrade and no re-render to occur, and it is why **#471 stays open**. Do not read this release as "oasgen no longer materialises vendor defaults": it removes a path plumbing v1.27.0 added, and restores the pre-0.53.0 shape for the omitted-parent case only.
+
+### The current render's schema warnings are on status
+
+`status.schemaWarnings` carries the generation and validation warnings from the **current** render (#462, #478). Previously they reached only an event, whose lifetime is an hour and whose text is truncated — so a warning about a CRD that is still wrong was gone while the CRD was still wrong.
+
+It is written unconditionally, including to empty, so **an empty list means "this render produced none", not "nothing has run"**.
+
+### A `fieldMapping` on one verb no longer strips the parameter from every other verb
+
+A request-direction `fieldMapping` omits its parameter from the generated spec, because the mapping supplies the value. **That omission was resource-wide** (#457, #479): declaring it on `get` also removed the parameter from `create`, which still needed the author to supply it — so the CR had no field to carry it and creation failed on a parameter the document requires.
+
+The omission is now per-action. A parameter is dropped from the spec only when **every** verb that declares it supplies it by mapping.
+
+### Two new warnings that catch real mistakes
+
+- **A request-direction `fieldMapping` whose source names nothing the CR will carry** (#458, #482) — the mapping is declared, the value is never resolvable, and the request goes out without it. Screens both verb `fieldMapping` and `dependentLookups[].parameters`.
+- **A parameter the generated spec omits because a `fieldMapping` supplies it** is now reported when the mapping's own source is unresolvable (#409), so the two do not cancel into silence.
+
+### Two warnings removed because no author could act on them
+
+- **A field named in both `excludedSpecFields` and a `fieldMapping`** (#484). The mapping omits the parameter; the exclusion then finds nothing and reports itself inert — which is true, and true *because the mapping did the job*. Both declarations are correct, and `excludedSpecFields` is immutable, so there was no action behind the message. The suppression already existed in the other direction.
+- **A documented 2xx that declares no body.** The vendor says success carries no content, so there is nothing to compare. A success carrying content we *cannot read* still warns — that one means something was returned and the generator could not use it.
+
+Measured on a consumer's 32 definitions: **29 warnings → 5**. The 5 remaining are three "create response declares no properties" and two genuine type mismatches, all actionable.
 
 ## 2026-11-05 — 0.53.0
 
