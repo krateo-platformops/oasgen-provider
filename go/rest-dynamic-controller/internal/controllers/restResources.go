@@ -39,6 +39,11 @@ const (
 	reasonCreated event.Reason = "ResourceCreated"
 	reasonUpdated event.Reason = "ResourceUpdated"
 	reasonDeleted event.Reason = "ResourceDeleted"
+	// reasonAbsenceInferred reports that Observe concluded the external resource does not exist from a
+	// findby that listed SUCCESSFULLY and matched nothing -- a 404 this controller synthesised -- rather
+	// than from a 404 the vendor returned. The runtime creates on not-exists either way; this says which
+	// of the two it was (#485).
+	reasonAbsenceInferred event.Reason = "AbsenceInferredFromUnmatchedListing"
 )
 
 func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool, hostPolicyCfg hostpolicy.Config) controller.ExternalClient {
@@ -456,6 +461,30 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 				ResourceUpToDate: true,
 			}, nil
 		} else if notfound {
+			// REPORT, DO NOT REFUSE (#485).
+			//
+			// A synthesised 404 -- findby listed successfully and no item matched -- and a vendor 404 are
+			// both not-found here, and the runtime creates on either. That is DELIBERATE and documented at
+			// restclient.go's Exhausted branch: "For Observe the distinction does not matter -- not-exists
+			// is the right conclusion and creating is the intent." Refusing absence instead would stop the
+			// FIRST create of every findby-only kind; 37 such kinds were measured across two consumers.
+			//
+			// But the two are not equally trustworthy, and the difference is invisible today. A matching
+			// failure can come from a truncated listing, an envelope that resolves to the wrong collection,
+			// or identifiers absent from the item shape -- none of which is absence. Measured by
+			// aruba-provider-kog: a findby blinded by a bad offset produced reason=Creating and a create the
+			// vendor refused with 400. For a name-constrained kind the outcome is a resource stuck retrying;
+			// for an unconstrained one it is a duplicate. NOTHING APPEARS AT THE VENDOR TO SEE in the first
+			// case, which is why it needs a signal rather than a refusal.
+			//
+			// AN EVENT RATHER THAN A CONDITION, and that is not a preference. The runtime owns the
+			// conditions on this path -- worker.go sets Synced=ReconcileSuccess or ReconcileError after
+			// every create -- so a condition set here is overwritten on the very next step, every time. The
+			// comment above at the Creating branch says it plainly: a condition is an output of the previous
+			// reconcile, not evidence about the world. The event is what survives to `kubectl describe`, and
+			// it supplies the one thing the subsequent create's own condition cannot: why a create was
+			// attempted at all.
+			h.reportInferredAbsence(mg, err, log)
 			log.Debug("External resource not found", "kind", mg.GetKind())
 			return controller.ExternalObservation{
 				ResourceExists:   false,
@@ -774,6 +803,27 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		ResourceExists:   true,
 		ResourceUpToDate: true,
 	}, nil
+}
+
+// reportInferredAbsence emits a Warning Event when Observe's not-found verdict came from a 404 THIS
+// CONTROLLER SYNTHESISED -- a findby that listed successfully and matched nothing -- rather than from one
+// the vendor returned. It returns whether it reported, which is what makes the decision testable without
+// standing up the whole Observe path.
+//
+// It changes no control flow and no condition. See the call site in Observe's findby branch for why this
+// reports rather than refuses, and why an Event rather than a condition.
+func (h *handler) reportInferredAbsence(mg *unstructured.Unstructured, err error, log logging.Logger) bool {
+	if !restclient.IsSynthesisedNotFound(err) {
+		return false
+	}
+	h.eventRecorder.Event(mg, event.Warning(reasonAbsenceInferred, "Observe", fmt.Errorf(
+		"%s is being treated as absent because its findby listed successfully and no item matched -- not "+
+			"because the API reported it missing. If it does exist, the identifiers may be absent from the "+
+			"collection's item shape, the listing may be truncated, or the envelope may resolve to the "+
+			"wrong collection. A create will be attempted on this basis", mg.GetName())))
+	log.Info("Absence was inferred from an unmatched findby listing, not reported by the API; a create "+
+		"will be attempted", "kind", mg.GetKind(), "name", mg.GetName())
+	return true
 }
 
 // lastReconcileErrored reports whether the PREVIOUS reconcile of this object ended in an error, by reading
