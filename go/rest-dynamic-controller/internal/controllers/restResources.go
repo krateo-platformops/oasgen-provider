@@ -44,6 +44,9 @@ const (
 	// than from a 404 the vendor returned. The runtime creates on not-exists either way; this says which
 	// of the two it was (#485).
 	reasonAbsenceInferred event.Reason = "AbsenceInferredFromUnmatchedListing"
+	// reasonAbsenceLatched is the same inference, but on the path where NO create follows it and the
+	// resource is reported converged -- see latched_absence.go for why that needs its own signal.
+	reasonAbsenceLatched event.Reason = "AbsenceLatchedWhileCreatePending"
 )
 
 func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool, hostPolicyCfg hostpolicy.Config) controller.ExternalClient {
@@ -455,6 +458,13 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		notfound := restclient.IsNotFoundError(err)
 		if notfound && unstructuredtools.IsConditionSet(mg, customcondition.Pending()) {
 			log.Debug("External resource exist but is in pending state", "kind", mg.GetKind())
+			// REPORT, DO NOT REFUSE (#485) -- the latched half.
+			//
+			// The verdict below is unchanged: during a genuine async create this IS the right answer. But the
+			// same state held indefinitely is a resource reported converged that has never been observed, and
+			// returning here means reportInferredAbsence (in the else-if) can never see it. Counting
+			// consecutive latches separates a create in flight from one that will never land.
+			h.reportLatchedInferredAbsence(ctx, mg, err, log)
 			// We can stop here if the resource is not found and it is in pending state because it means that the resource is being created.
 			return controller.ExternalObservation{
 				ResourceExists:   true,
@@ -485,6 +495,11 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			// it supplies the one thing the subsequent create's own condition cannot: why a create was
 			// attempted at all.
 			h.reportInferredAbsence(mg, err, log)
+			// This observe did NOT take the latch, so any latched count belongs to a state that has ended.
+			// A no-op unless something is recorded.
+			if cerr := h.clearLatchedAbsence(ctx, mg); cerr != nil {
+				log.Debug("Could not clear the latched-absence count", "error", cerr)
+			}
 			log.Debug("External resource not found", "kind", mg.GetKind())
 			return controller.ExternalObservation{
 				ResourceExists:   false,
@@ -778,6 +793,9 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			}, nil
 		}
 		// The comparison agrees, so any recorded non-convergence is stale.
+		if cerr := h.clearLatchedAbsence(ctx, mg); cerr != nil {
+			log.Debug("Could not clear the latched-absence count", "error", cerr)
+		}
 		if cerr := h.clearDriftRepeats(ctx, mg); cerr != nil {
 			return controller.ExternalObservation{}, cerr
 		}
