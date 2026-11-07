@@ -13,6 +13,50 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-07 — 0.54.1
+
+**A patch release for two defects 0.54.0 introduced. If you are on 0.54.0 and any of your resources authenticate with an apiKey header scheme, upgrade: on 0.54.0 they cannot read their credential and do not reconcile at all.**
+
+### No apiKey-authenticated resource could read its Secret
+
+The per-resource `Role` that scopes a generated controller's Secret access is built from the Secret references collected off `Configuration` instances. **That collection covered `basic` and `bearer` only.** The generator produces a third shape — `apiKey` in a header, whose credential lives at `spec.authentication.apiKey.tokenRef` — and it was never collected, so no `Role` was provisioned in the Secret's namespace.
+
+**0.54.0 is where that became fatal.** Until then the shipped RDC `ClusterRole` granted `resources: ["secrets"]` cluster-wide, so an incomplete narrow `Role` cost nothing. 0.54.0 removed that blanket grant (#473, #475) on the stated reasoning that the narrow `Role` already covered the same ground — **true for `basic` and `bearer`, never true for `apiKey`.** The failure is at observe, so an affected resource never reaches `Ready`.
+
+That release note said removing the grant "is self-healing on upgrade, and for most installs it changes nothing". **Read it now as: for installs whose resources authenticate with `basic` or `bearer`.**
+
+Measured on released 0.54.0 images by a consumer whose fleet is **25 apiKey kinds and 11 bearer**:
+
+```
+can-i get secrets -n default        no
+can-i get secrets -n krateo-system  no    <- not a namespace-scoping problem
+can-i get the CR's own kind         yes   <- the ClusterRole was fine
+```
+
+**There is no consumer-side workaround.** No namespace holds a `Role` the ServiceAccount could use, so moving the Secret does not help.
+
+**The fix removes the possibility rather than the instance** (#500, #501). The reference paths are now *derived* by reflecting over the very types the authentication schemas are rendered from, so the collector and the generator can no longer disagree. Adding a fourth scheme without its credential path now fails a test that is written over the space of schemes rather than over a list of keys.
+
+**Why no fixture caught it:** that consumer's fleet carries both shapes against one vendor — 11 documents declare `http/bearer`, 25 declare `apiKey` in a header, several sending an identical `Authorization: Bearer ` value either way. A suite with one scheme per document passes while a collector handles a subset, however many documents it has.
+
+### `status.schemaWarnings` was never written on a fresh install
+
+The field added in 0.54.0 reached the log and a Warning Event but **not status**, on any newly created RestDefinition — so a new install showed a clean fleet while carrying broken declarations, which is the state the field exists to make visible. Create's first phase wrote a hand-listed set of fields onto a freshly re-read object, and the warnings were not in that list (#492, #493).
+
+**Upgrades were never affected.** Measured: on 0.48.0 → 0.54.0 the `generatorBuild` change re-renders every RestDefinition through the Update path, which writes the whole status. So:
+
+```
+upgraded fleet, status.generatorBuild reads 0.54.0 or later   schemaWarnings is trustworthy
+fresh 0.54.0 install                                         it is NOT -- read the provider log
+fresh 0.54.1 install                                         trustworthy
+```
+
+The field's documentation now also states what its serialised form cannot say: **absent means either "no warnings" or "not rendered by a version that writes the field"**, and `status.generatorBuild` is what separates them.
+
+### Not fixed here
+
+Both of these were found by consumers installing the release on real clusters, after it passed a five-artifact supply-chain sweep and two green CI suites. The open reports from the same exercise — a `Deploy` write that overwrites `spec.replicas` (#495), a generated `Configuration` CRD that is never uninstalled (#496), an informational notice labelled `generation error:` (#497), a findby's optional query parameters becoming spec fields (#498), Swagger 2.0 being generation-only in RDC (#499), and a resource that always exists being unable to model delete as a reset (#502) — are **not** in this release.
+
 ## 2026-11-07 — 0.54.0
 
 Five changes. **One stops a generator upgrade from writing values into your CRs that nobody authored**, one puts the current render's schema warnings on status, and the rest make the generator's warnings mean something — two new ones that catch real mistakes, and two old ones silenced because no author could act on them.
