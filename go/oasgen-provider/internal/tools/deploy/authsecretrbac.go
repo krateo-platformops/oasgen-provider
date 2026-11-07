@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/krateo-platformops/oasgen-provider/internal/tools/oas2jsonschema"
 	"sort"
 	"strings"
 
@@ -22,13 +23,22 @@ import (
 // authSecretVerbs are the only verbs granted: reading a Secret's value never requires create/update/delete.
 var authSecretVerbs = []string{"get", "list", "watch"}
 
-// authSecretRefPaths are the spec paths, on a Configuration CR instance, of every usernameRef/passwordRef/
-// tokenRef the oas2jsonschema security-scheme generator can produce (basic and bearer auth).
-var authSecretRefPaths = [][]string{
-	{"spec", "authentication", "basic", "usernameRef"},
-	{"spec", "authentication", "basic", "passwordRef"},
-	{"spec", "authentication", "bearer", "tokenRef"},
-}
+// authSecretRefPaths are the spec paths, on a Configuration CR instance, of every Secret reference the
+// oas2jsonschema security-scheme generator can produce.
+//
+// IT IS NO LONGER A LIST HERE, and that is the fix for #500. This was three hand-written paths covering
+// basic's two refs and bearer's one, with a comment that accurately said "(basic and bearer auth)" -- while
+// the generator produces a THIRD shape, apiKey in a header, whose tokenRef was never added. The comment
+// described the implementation correctly and neither described nor matched the generator.
+//
+// Latent until 0.54.0: the shipped RDC ClusterRole granted `resources: ["secrets"]` cluster-wide, so an
+// incomplete narrow Role cost nothing. #473/#475 removed that grant because the narrow Role "already
+// covered the same ground" -- which was true for basic and bearer and never true for apiKey. The release
+// could not reconcile any apiKey-authenticated resource.
+//
+// Deriving the paths from oas2jsonschema means the two can no longer disagree: see AuthSecretRefPaths for
+// why a derivation rather than another fixture.
+var authSecretRefPaths = oas2jsonschema.AuthSecretRefPaths()
 
 // AuthSecretRoleName is deterministic per target resource and INCLUDES THE API GROUP, matching the naming
 // convention the shipped RDC RBAC templates use -- `{{ .resource }}-{{ .apiGroup }}-{{ .apiVersion }}` in
