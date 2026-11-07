@@ -2,6 +2,7 @@ package restdefinition
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/krateo-platformops/oasgen-provider/apis"
@@ -158,4 +159,62 @@ func TestCreatePhaseStatusGivesUpOnPersistentConflict(t *testing.T) {
 
 	assert.Greater(t, attempts, 1, "it must have retried rather than failing on the first attempt")
 	assert.Less(t, attempts, 20, "the retry must be bounded, not unbounded")
+}
+
+// TestCreatePhaseOnePersistsEveryFieldSetBeforeIt is the #492 regression. It is the THIRD version of
+// this test; the first two were vacuous and a mutation caught both. That history is the useful part.
+//
+// V1 asserted snapshotStatus(cr).applyTo(target). The snapshot path was ALWAYS complete -- that is what
+// TestCreatedStatusSnapshotCarriesEveryField proves -- and the bug was that persistCreatePhaseStatus did
+// not USE it. Passed before the fix and after.
+//
+// V2 called the real function but seeded the fake apiserver from a cr that ALREADY carried the warnings,
+// because externalForStatusTest stores cr.DeepCopy(). The re-read object therefore had them whatever the
+// write did, so reverting to the shipped code still passed.
+//
+// V3 REPRODUCES THE FRESH-INSTALL SEQUENCE, which is the only shape that can fail: the STORED object has
+// an empty status, and the warnings exist ONLY on the in-memory cr -- exactly as generateAndApplyCRDs
+// leaves things, having set cr.Status.SchemaWarnings in place a few lines before the call. A write that
+// hand-lists fields onto a freshly read object then loses them, and nothing fails where the mistake is.
+//
+// Verified able to fail: reverting persistCreatePhaseStatus to the exact 0.54.0 closure makes this fail
+// and name SchemaWarnings.
+//
+// What it cost not to have this: status.schemaWarnings shipped in 0.54.0 and was never persisted on a
+// fresh install. Measured by github-provider-kog -- 32 definitions, 5 warnings in the oasgen log, 0 on
+// status -- with a comment-only ConfigMap edit as the control, which took the Update path and persisted
+// correctly 64 seconds later. FIVE existing tests covered this feature or this function and none could
+// fail on it.
+func TestCreatePhaseOnePersistsEveryFieldSetBeforeIt(t *testing.T) {
+	// The STORED object as a fresh install has it: no status yet.
+	stored := restDefinitionForStatusTest()
+	stored.Status = definitionv1alpha1.RestDefinitionStatus{}
+	e := externalForStatusTest(t, stored, interceptor.Funcs{})
+
+	// The IN-MEMORY cr, as generateAndApplyCRDs leaves it: warnings set in place, nothing persisted.
+	cr := restDefinitionForStatusTest()
+	cr.Status = fullyPopulatedStatus()
+
+	require.NoError(t, e.persistCreatePhaseStatus(context.Background(), cr, statusTestGVK, true))
+
+	got := &definitionv1alpha1.RestDefinition{}
+	require.NoError(t, e.kube.Get(context.Background(), client.ObjectKeyFromObject(cr), got))
+
+	want := fullyPopulatedStatus()
+	v := reflect.ValueOf(want)
+	gv := reflect.ValueOf(got.Status)
+	for i := 0; i < v.NumField(); i++ {
+		name := v.Type().Field(i).Name
+		if name == "ConditionedStatus" {
+			continue // the write sets Creating; conditions are asserted by the tests above
+		}
+		require.False(t, gv.Field(i).IsZero(),
+			"RestDefinitionStatus.%s was set on cr before Create's first phase and is ZERO ON THE "+
+				"PERSISTED OBJECT. The write targets a freshly READ object, so a field set in place and "+
+				"not carried by the write is never persisted -- that is #492, and before it #263. Do not "+
+				"fix this by adding the field to a list: the write must carry the whole status.", name)
+	}
+
+	require.Equal(t, want.SchemaWarnings, got.Status.SchemaWarnings,
+		"schemaWarnings specifically: the field #492 lost on every fresh install")
 }

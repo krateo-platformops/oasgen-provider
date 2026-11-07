@@ -1814,15 +1814,36 @@ func crdExists(ctx context.Context, kube client.Client, name string) (bool, erro
 // Re-reads on every attempt rather than retrying a stale object, matching applyMergedWithRetry in
 // internal/tools/crd: a concurrent change to the status is merged on top instead of clobbered by a stale
 // write, which matters because the runtime writes annotations to this same object.
+// It USED TO HAND-LIST THE FIELDS IT CARRIED, and that is the third field dropped this way (#492).
+//
+// The closure set exactly Creating, HasSecuritySchemes and Resource. generateAndApplyCRDs, called a few
+// lines above the call site, sets cr.Status.SchemaWarnings IN PLACE -- and because this write targets a
+// FRESHLY READ object, a field set on cr and absent from the closure is simply never persisted. Create's
+// second phase does not render, so the snapshot it takes never holds the warnings either: on a FRESH
+// INSTALL status.schemaWarnings was absent on every RestDefinition, including the ones with warnings.
+// Measured by github-provider-kog on a kind cluster, 32 definitions, 5 warnings in the log and 0 on
+// status; their control was a comment-only ConfigMap edit, which took the Update path and persisted the
+// warning 64s later. So the feature worked everywhere except where a user first meets it.
+//
+// The comment on statusSnapshot below already said why a hand-listed set is unsafe here, and said it had
+// already happened once (syncAuthSecretRBAC's two fields, #263). THREE TESTS COVERED THIS FEATURE --
+// renderWarnings' own arms, the snapshot arm, and a wiring test written specifically to fail if the
+// assignment at the render site were deleted -- and none of them exercised THIS function.
+//
+// So the fix is not to add SchemaWarnings to the list. It is to delete the list: the fields are set on cr
+// and the whole status is snapshotted, exactly as Create's second phase and Update do. A snapshot has no
+// collection site, which is the property that makes the class gone rather than patched, and it brings this
+// path under TestCreatedStatusSnapshotCarriesEveryField for free.
 func (e *external) persistCreatePhaseStatus(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, hasSecuritySchemes bool) error {
-	return e.persistStatusWithRetry(ctx, cr, func(target *definitionv1alpha1.RestDefinition) {
-		target.SetConditions(rtv1.Creating())
-		target.Status.HasSecuritySchemes = &hasSecuritySchemes
-		target.Status.Resource = definitionv1alpha1.KindApiVersion{
-			Kind:       gvk.Kind,
-			APIVersion: gvk.GroupVersion().String(),
-		}
-	})
+	cr.SetConditions(rtv1.Creating())
+	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
+	cr.Status.Resource = definitionv1alpha1.KindApiVersion{
+		Kind:       gvk.Kind,
+		APIVersion: gvk.GroupVersion().String(),
+	}
+
+	snap := snapshotStatus(cr)
+	return e.persistStatusWithRetry(ctx, cr, snap.applyTo)
 }
 
 // statusSnapshot is the COMPLETE status a write persists, captured in one go. Used by Create's second

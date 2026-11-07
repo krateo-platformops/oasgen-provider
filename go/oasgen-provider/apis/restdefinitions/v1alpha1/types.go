@@ -1226,6 +1226,15 @@ type RestDefinitionStatus struct {
 	// REWRITTEN ON EVERY RENDER, including to empty. A fixed declaration clears this rather than leaving a
 	// stale complaint, which is the property that makes it worth reading at all.
 	//
+	// "INCLUDING TO EMPTY" IS ABOUT THE FIELD AND NOT THE WIRE. An empty result is omitted from the
+	// serialised object rather than written as `[]`, deliberately: `schemaWarnings: []` on every healthy
+	// RestDefinition is noise in every `kubectl get -o yaml`.
+	//
+	// SO AN ABSENT FIELD MEANS EITHER "this render produced no warnings" OR "this RestDefinition has not
+	// been rendered by a version that writes the field", and the two cannot be told apart from this field
+	// alone. Read status.generatorBuild alongside it when that distinction matters -- for example when
+	// sweeping a fleet for definitions whose declarations need fixing (#492).
+	//
 	// +optional
 	SchemaWarnings []string `json:"schemaWarnings,omitempty"`
 }
