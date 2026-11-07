@@ -1,0 +1,43 @@
+# A document whose CONFIGURATION schema carries the stamping shape.
+#
+# render.go builds TWO crdgen.Options literals -- one for the resource CRD, one for the Configuration CRD --
+# and a flag set on only the first leaves the second stamping. Mutating the second call site alone broke no
+# test until this fixture existed.
+#
+# `api-version` is a query parameter WITH A DEFAULT, which is the commonest way this shape arises: oasgen
+# nests the configuration schema as {query: {get: {api-version: ...}}} and creates `query` and `get` itself
+# with NO required list, so both become optional objects with a defaulted descendant.
+openapi: 3.0.0
+info: {title: cfgprobe, version: "1.0"}
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+      required: [name]
+paths:
+  /widgets/{id}:
+    get:
+      operationId: getWidget
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - name: api-version
+          in: query
+          required: false
+          schema: {type: string, default: "1"}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: '#/components/schemas/Widget'}}}}
+    post:
+      operationId: createWidget
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - name: api-version
+          in: query
+          required: false
+          schema: {type: string, default: "1"}
+      requestBody:
+        content: {application/json: {schema: {$ref: '#/components/schemas/Widget'}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: '#/components/schemas/Widget'}}}}
