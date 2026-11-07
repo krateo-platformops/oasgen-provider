@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/stretchr/testify/assert"
@@ -201,4 +202,44 @@ func TestAConvergingCreatePatchesBoundedlyThenLeavesNothingBehind(t *testing.T) 
 // site would leave every one of them green.
 func TestTheCallSitesAreCoveredByInspectionNotByThisFile(t *testing.T) {
 	t.Skip("documents the coverage boundary; the call-site wiring is verified by inspection and by a live run")
+}
+
+// TestTheTwoCountersCannotReadEachOthersValue exists because a mutation SURVIVED.
+//
+// Making inferredCounter share the latched counter's annotation pair and kind string broke nothing that
+// any test could see. Every other test here drives ONE counter on one object, so the pair's independence
+// -- the whole reason each signature carries its own kind string -- was asserted nowhere.
+//
+// It matters because the two counters mean different things and have different consequences. A shared pair
+// would let latched observes push the main-path count past 1, turning a healthy first create into a
+// Warning, and let main-path inferences consume the latched budget so the latched report fires early or
+// not at all. Both are silent: the counts are plausible numbers either way.
+//
+// This is the same blindness as the call-site gap, one level down -- a property that holds only because
+// two literals differ, with nothing watching the literals.
+func TestTheTwoCountersCannotReadEachOthersValue(t *testing.T) {
+	mg := driftMG(1, nil)
+	h, evs := latchedHandler(t, mg)
+	ctx := context.Background()
+
+	// Two latched observes: the latched count is 2, below its budget, and nothing is emitted.
+	for i := 0; i < 2; i++ {
+		h.reportLatchedInferredAbsence(ctx, mg, synthesised404(), logging.NewNopLogger())
+	}
+	require.Equal(t, "2", mg.GetAnnotations()[annotationLatchedAbsenceRepeats])
+	require.Empty(t, evs.all(), "two latched observes are below the budget")
+
+	// Now ONE main-path inference on the same object. It must be first contact for ITS counter.
+	require.True(t, h.reportInferredAbsence(ctx, mg, synthesised404(), logging.NewNopLogger()))
+	require.Len(t, evs.all(), 1)
+	require.Equal(t, event.TypeNormal, evs.all()[0].Type,
+		"the main path must see FIRST CONTACT: if it read the latched count it would see 3 and warn, "+
+			"turning a healthy first create into a Warning")
+
+	// And each counter still holds its own value.
+	ann := mg.GetAnnotations()
+	assert.Equal(t, "2", ann[annotationLatchedAbsenceRepeats], "the latched count must be untouched")
+	assert.Equal(t, "1", ann[annotationInferredAbsenceRepeats], "the main-path count must be its own")
+	assert.NotEqual(t, ann[annotationLatchedAbsenceSignature], ann[annotationInferredAbsenceSignature],
+		"the signatures must differ even at the same generation -- that is what the kind string is for")
 }
