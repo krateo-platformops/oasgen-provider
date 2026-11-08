@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-08T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,80 @@ timestamp: 2026-11-07T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-08 — 0.55.0
+
+**One path parser instead of three, a new signal when a resource's absence was inferred rather than reported, and a generator fix that removes a workaround our own documentation was carrying.** Nothing here changes the behaviour of a working RestDefinition; two of the three are about making a silent failure visible.
+
+### Three implementations of one path dialect became one
+
+A field path — `spec.auth.secretRef.name`, `a['key.with.dots']`, `items[0].id` — was parsed by **three separate implementations** across the two modules and a shared library, with **three different accepted grammars and no test comparing them**. Measured, 20 inputs through two of them: **8 disagree.**
+
+That divergence is why a provider-side resolver and the controller could disagree about what a path addresses, which is the root of a release-blocking RBAC regression (#510) and of the generator defect below. The parser now lives once, in `plumbing/fieldpath`, written from this repo's specification and its disagreement table (#513, #515, #516, #520).
+
+**For rest-dynamic-controller this is a refactor with five stated changes**, none of which affects a path in any shipped example:
+
+```
+""              was ([""], nil) -- a usable-looking value that passed every length guard and then
+                addressed a property named "". Now an error.
+".id"           the leading dot was KEPT, so the path addressed a property literally called ".id".
+                No document has one, so it resolved to nothing, silently, on every reconcile.
+                Now stripped. This is a FIX, not a compatibility break.
+a['my key']     a space anywhere used to reject the whole path. Whitespace is now allowed where it
+                is delimited -- inside quotes or a selector -- and still refused in a bare name.
+a.['b']['c']    adjacent bracket groups were refused; a bracket group is self-delimiting.
+['']            an explicitly quoted empty key is a key. An unquoted a[] is still malformed.
+```
+
+**For oasgen-provider the no-dot spelling `a['b.c']` starts working**, which its own documentation had promised and its parser refused — while the spelling that worked, `a.['b.c']`, was undocumented. **Existing definitions using the dot spelling are unaffected.** Array indices and `[?key=value]` selectors are now refused *at the path*, with a message naming the reason and a working escape, because every path in the generator addresses the property names of a schema and a schema has no indexed elements.
+
+Both adoptions **removed** a third-party dependency rather than adding one.
+
+### A resource can now tell you its absence was inferred, not reported
+
+A `findby` that lists successfully and matches nothing is treated as "the resource does not exist", and a create follows. That is the right default — it is how every findby-only kind reaches its first create — but it is **indistinguishable from a resource that exists and could not be matched**, and the second case creates a duplicate at the vendor (#485, #511).
+
+The resource now says which it was:
+
+```
+first inference    Normal event. At first contact there is no id to GET, so an unmatched listing is
+                   the only possible answer. Nothing is wrong.
+a repeat           Warning. Absence was inferred AGAIN for the same spec generation, so the create
+                   that followed the previous inference did not make the resource findable.
+```
+
+**The severity follows the count rather than the verdict**, because a consumer measured the first version of this on a live fleet and found **5 of 5 emissions were healthy first creates and none were pathological** — a Warning on every healthy resource of every findby-only kind is one readers learn to skip, and then it cannot do its job in the case it exists for.
+
+There is a second destination for the same verdict: when a create is already pending, the controller reports exists-and-up-to-date **without observing anything**. A consumer's fleet sat in that state for **318 consecutive observes with 0 creates** — findby was issued, returned 200 with a full list, and no item carried the identifier because no `responseTransform` existed. Nothing was failing, which is why nobody looked. That path now reports once after a consecutive-repeat budget, so a create in flight stays quiet and a latch that will never resolve does not.
+
+### A bracket-escaped binding is recognised as supplying its parameter
+
+A parameter whose **name** contains a dot must be bracket-escaped in a `fieldMapping`, because an unescaped dot reads as a path separator:
+
+```yaml
+inQuery: '["searchCriteria.sourceRefName"]'
+inCustomResource: spec.sourceRefName
+```
+
+The supplied-parameters map was keyed on that **raw string** while the lookup used the **OAS parameter's name**, so they could never match. The exemption never fired and the parameter appeared as a spec field alongside the one the author meant to expose — forcing **"exclude *and* bind"** for something that is bound (#514, #522).
+
+**Our own `docs/REAL_EXAMPLES.md` carried that workaround**, listing two escaped names in `excludedSpecFields` *and* binding both. So the generated spec came out clean and the missing exemption was invisible to every reader of the example. Those two exclusions are now redundant; the other ten in that list are genuinely unbound and remain necessary.
+
+The comparison is **asymmetric** on purpose: a parameter name is atomic, a mapping value is a path, so a mapping value names a parameter only when it parses to exactly one segment. A dotted name written *without* brackets is ambiguous and keeps the old behaviour — this can only turn a non-match into a match, never the reverse.
+
+### A false warning on a content-filter mapping, fixed before release
+
+The path refusal above shipped with a claim that was wrong: that **every** path the generator parses addresses the property names of a schema. **`inCustomResource` does not** — it is parsed for a validation screen, but what it addresses at runtime is a **CR instance**, which can hold arrays and which the controller walks with a walker handling both indices and `[?key=value]` filters.
+
+A consumer found it within an hour of the refusal merging, by grepping their own definitions. Theirs uses `spec.credentials[?type=otp].secretDataSecretRef` in sixteen places, and the generator would have reported it as *"not a parseable field path"* while advising the author to *"point inCustomResource at a field the CR carries, or remove the mapping"* — **about a path the controller resolves correctly.** The kind still installed; the advice would have broken it.
+
+**Fixed before tagging rather than shipped and patched.** Schema paths still refuse indices and filters, where they genuinely cannot address anything; document paths accept the whole grammar.
+
+### Not in this release
+
+**#510 (every secretRef resource fails on 0.53.0+) is NOT fixed here.** This release lands its prerequisite — the provider and the controller can no longer disagree about a path — and nothing more. The provider-side collector, the generated-Kind watch and Role provisioning are unwritten. If your resources use `secretRef`, **0.52.0 remains the last release on which they reconcile.**
+
+Also open and not addressed: #517 (an index-path identifier can never match, because twelve walker call sites cannot follow the segments the parser produces), #519, #521, #486, #508.
 
 ## 2026-11-07 — 0.54.1
 
