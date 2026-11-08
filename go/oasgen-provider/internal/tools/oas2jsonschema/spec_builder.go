@@ -1005,20 +1005,57 @@ func mappingSuppliedParams(verbs []Verb) suppliedParams {
 			// warning names a stable verb across renders rather than whichever one verbsDescription
 			// happens to list last.
 			if m.InPath != "" && !selfReferentialSpecSource(m.InCustomResource, m.InPath) {
-				if _, seen := supplied[m.InPath]; !seen {
-					supplied[m.InPath] = mappingSource{action: verb.Action, in: "path", from: m.InCustomResource}
+				k := boundParameterName(m.InPath)
+				if _, seen := supplied[k]; !seen {
+					supplied[k] = mappingSource{action: verb.Action, in: "path", from: m.InCustomResource}
 				}
-				note(m.InPath, verb.Action)
+				note(k, verb.Action)
 			}
 			if m.InQuery != "" && !selfReferentialSpecSource(m.InCustomResource, m.InQuery) {
-				if _, seen := supplied[m.InQuery]; !seen {
-					supplied[m.InQuery] = mappingSource{action: verb.Action, in: "query", from: m.InCustomResource}
+				k := boundParameterName(m.InQuery)
+				if _, seen := supplied[k]; !seen {
+					supplied[k] = mappingSource{action: verb.Action, in: "query", from: m.InCustomResource}
 				}
-				note(m.InQuery, verb.Action)
+				note(k, verb.Action)
 			}
 		}
 	}
 	return suppliedParams{firstBy: supplied, byAction: byAction}
+}
+
+// boundParameterName returns the PARAMETER NAME a mapping value binds, which is not always the string the
+// author wrote (#514).
+//
+// A parameter whose name contains a dot has to be bracket-escaped, because an unescaped dot would be read
+// as a path separator:
+//
+//	inQuery: '["searchCriteria.sourceRefName"]'
+//
+// The supplied map was keyed on that raw string while suppliesFor looks it up by the OAS parameter's name,
+// so the two could never match: the exemption never fired, and the parameter appeared as a spec field
+// alongside the one the author meant to expose. Both the firstBy map and the byAction map have to carry the
+// normalised key, because suppliesFor consults BOTH -- normalising one of them would leave the lookup
+// failing in exactly the same way for a different reason.
+//
+// THE COMPARISON IS ASYMMETRIC, deliberately. A parameter name is ATOMIC; a mapping value is a PATH. So a
+// mapping value is treated as a name only when it parses to exactly one segment:
+//
+//	["searchCriteria.sourceRefName"]   -> one segment -> the name is searchCriteria.sourceRefName
+//	pullRequestId                      -> one segment -> unchanged
+//	searchCriteria.sourceRefName       -> TWO segments -> raw string, as before
+//
+// The third case is the one worth being careful about. A dotted name written WITHOUT brackets is ambiguous
+// -- it could be a nested path or an escaped-badly parameter name -- and guessing would make the fix
+// change behaviour for definitions that work today. The raw string is what those have always used.
+//
+// An unparseable value also falls back to the raw string, so this can only ever turn a non-match into a
+// match, never the reverse.
+func boundParameterName(mappingValue string) string {
+	segs, err := pathparsing.ParsePath(mappingValue)
+	if err != nil || len(segs) != 1 {
+		return mappingValue
+	}
+	return segs[0]
 }
 
 // selfReferentialSpecSource reports whether a request-direction mapping reads from the exact top-level
