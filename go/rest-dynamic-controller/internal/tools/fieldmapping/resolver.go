@@ -140,11 +140,21 @@ func CollectSecretRefNames(verbs []getter.VerbsDescription, mg *unstructured.Uns
 // "credentials[0].value" or "credentials.0.value") as well as nest through maps.
 func readAnyPath(mg *unstructured.Unstructured, path string) (interface{}, error) {
 	segments, err := pathparsing.ParsePath(path)
-	if err != nil || len(segments) == 0 {
-		return nil, fmt.Errorf("invalid path %q", path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path %q: %w", path, err)
+	}
+	if len(segments) == 0 {
+		return nil, fmt.Errorf("invalid path %q: it names no field", path)
 	}
 	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
-	if err != nil || !found {
+	if err != nil {
+		// NOT "not found". The walker distinguishes "this path cannot apply here" from "nothing is
+		// there", and collapsing the two reported a duplicate [?key=value] match -- which matches
+		// MORE than one element -- as an absence. A consumer debugging that was told the path was
+		// not on the resource when it was on it twice.
+		return nil, fmt.Errorf("path %q cannot be read on the custom resource: %w", path, err)
+	}
+	if !found {
 		return nil, fmt.Errorf("path %q not found on the custom resource", path)
 	}
 	return val, nil
@@ -152,11 +162,17 @@ func readAnyPath(mg *unstructured.Unstructured, path string) (interface{}, error
 
 func readStringPath(mg *unstructured.Unstructured, path string) (string, error) {
 	segments, err := pathparsing.ParsePath(path)
-	if err != nil || len(segments) == 0 {
-		return "", fmt.Errorf("invalid path %q", path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path %q: %w", path, err)
+	}
+	if len(segments) == 0 {
+		return "", fmt.Errorf("invalid path %q: it names no field", path)
 	}
 	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
-	if err != nil || !found {
+	if err != nil {
+		return "", fmt.Errorf("path %q cannot be read on the custom resource: %w", path, err)
+	}
+	if !found {
 		return "", fmt.Errorf("path %q not found on the custom resource", path)
 	}
 	s, ok := val.(string)
