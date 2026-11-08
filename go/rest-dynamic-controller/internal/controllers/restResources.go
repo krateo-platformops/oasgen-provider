@@ -39,6 +39,14 @@ const (
 	reasonCreated event.Reason = "ResourceCreated"
 	reasonUpdated event.Reason = "ResourceUpdated"
 	reasonDeleted event.Reason = "ResourceDeleted"
+	// reasonAbsenceInferred reports that Observe concluded the external resource does not exist from a
+	// findby that listed SUCCESSFULLY and matched nothing -- a 404 this controller synthesised -- rather
+	// than from a 404 the vendor returned. The runtime creates on not-exists either way; this says which
+	// of the two it was (#485).
+	reasonAbsenceInferred event.Reason = "AbsenceInferredFromUnmatchedListing"
+	// reasonAbsenceLatched is the same inference, but on the path where NO create follows it and the
+	// resource is reported converged -- see latched_absence.go for why that needs its own signal.
+	reasonAbsenceLatched event.Reason = "AbsenceLatchedWhileCreatePending"
 )
 
 func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool, hostPolicyCfg hostpolicy.Config) controller.ExternalClient {
@@ -450,12 +458,48 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		notfound := restclient.IsNotFoundError(err)
 		if notfound && unstructuredtools.IsConditionSet(mg, customcondition.Pending()) {
 			log.Debug("External resource exist but is in pending state", "kind", mg.GetKind())
+			// REPORT, DO NOT REFUSE (#485) -- the latched half.
+			//
+			// The verdict below is unchanged: during a genuine async create this IS the right answer. But the
+			// same state held indefinitely is a resource reported converged that has never been observed, and
+			// returning here means reportInferredAbsence (in the else-if) can never see it. Counting
+			// consecutive latches separates a create in flight from one that will never land.
+			h.reportLatchedInferredAbsence(ctx, mg, err, log)
 			// We can stop here if the resource is not found and it is in pending state because it means that the resource is being created.
 			return controller.ExternalObservation{
 				ResourceExists:   true,
 				ResourceUpToDate: true,
 			}, nil
 		} else if notfound {
+			// REPORT, DO NOT REFUSE (#485).
+			//
+			// A synthesised 404 -- findby listed successfully and no item matched -- and a vendor 404 are
+			// both not-found here, and the runtime creates on either. That is DELIBERATE and documented at
+			// restclient.go's Exhausted branch: "For Observe the distinction does not matter -- not-exists
+			// is the right conclusion and creating is the intent." Refusing absence instead would stop the
+			// FIRST create of every findby-only kind; 37 such kinds were measured across two consumers.
+			//
+			// But the two are not equally trustworthy, and the difference is invisible today. A matching
+			// failure can come from a truncated listing, an envelope that resolves to the wrong collection,
+			// or identifiers absent from the item shape -- none of which is absence. Measured by
+			// aruba-provider-kog: a findby blinded by a bad offset produced reason=Creating and a create the
+			// vendor refused with 400. For a name-constrained kind the outcome is a resource stuck retrying;
+			// for an unconstrained one it is a duplicate. NOTHING APPEARS AT THE VENDOR TO SEE in the first
+			// case, which is why it needs a signal rather than a refusal.
+			//
+			// AN EVENT RATHER THAN A CONDITION, and that is not a preference. The runtime owns the
+			// conditions on this path -- worker.go sets Synced=ReconcileSuccess or ReconcileError after
+			// every create -- so a condition set here is overwritten on the very next step, every time. The
+			// comment above at the Creating branch says it plainly: a condition is an output of the previous
+			// reconcile, not evidence about the world. The event is what survives to `kubectl describe`, and
+			// it supplies the one thing the subsequent create's own condition cannot: why a create was
+			// attempted at all.
+			h.reportInferredAbsence(ctx, mg, err, log)
+			// This observe did NOT take the latch, so any latched count belongs to a state that has ended.
+			// A no-op unless something is recorded.
+			if cerr := h.clearLatchedAbsence(ctx, mg); cerr != nil {
+				log.Debug("Could not clear the latched-absence count", "error", cerr)
+			}
 			log.Debug("External resource not found", "kind", mg.GetKind())
 			return controller.ExternalObservation{
 				ResourceExists:   false,
@@ -749,6 +793,12 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			}, nil
 		}
 		// The comparison agrees, so any recorded non-convergence is stale.
+		if cerr := h.clearLatchedAbsence(ctx, mg); cerr != nil {
+			log.Debug("Could not clear the latched-absence count", "error", cerr)
+		}
+		if cerr := h.clearInferredAbsence(ctx, mg); cerr != nil {
+			log.Debug("Could not clear the inferred-absence count", "error", cerr)
+		}
 		if cerr := h.clearDriftRepeats(ctx, mg); cerr != nil {
 			return controller.ExternalObservation{}, cerr
 		}
@@ -774,6 +824,68 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		ResourceExists:   true,
 		ResourceUpToDate: true,
 	}, nil
+}
+
+// reportInferredAbsence emits a Warning Event when Observe's not-found verdict came from a 404 THIS
+// CONTROLLER SYNTHESISED -- a findby that listed successfully and matched nothing -- rather than from one
+// the vendor returned. It returns whether it reported, which is what makes the decision testable without
+// standing up the whole Observe path.
+//
+// It changes no control flow and no condition. See the call site in Observe's findby branch for why this
+// reports rather than refuses, and why an Event rather than a condition.
+// FIRST CONTACT IS NOT A WARNING.
+//
+// A consumer measured this across two kinds of run: 5 of 5 emissions on their cluster were healthy first
+// creates, and ZERO were pathological. That is not an accident of their fleet -- the first existence check
+// of a findby-only resource MUST infer absence, because there is no id to GET yet and an empty listing is
+// the only possible answer. So a Warning here fires once on every healthy resource of every findby-only
+// kind (37 across two consumers), and `kubectl describe` on a perfectly good resource shows it.
+//
+// That is the same argument this PR applies to the latched path -- "reporting unconditionally there would
+// be noisy during a normal async create" -- and it applies here too. I did not consider it on this path
+// until the measurement arrived. A Warning that appears on every healthy create is one readers learn to
+// skip, and then it cannot do its job in the blinded case, which is the case it exists for.
+//
+// So severity follows the count rather than the verdict:
+//
+//	first inference  -> Normal.  True, informational, and the only possible answer at first contact.
+//	    a repeat     -> Warning. Absence was inferred AGAIN for the same spec generation, so the create
+//	                   that followed the first inference did not make the resource findable. That is the
+//	                   shape a blinded or mis-scoped findby produces, and it is worth interrupting for.
+//
+// The count is cleared as soon as an observe does NOT infer absence, so a resource that converges normally
+// leaves nothing behind and a later inference reads as fresh first contact.
+func (h *handler) reportInferredAbsence(ctx context.Context, mg *unstructured.Unstructured, err error, log logging.Logger) bool {
+	if !restclient.IsSynthesisedNotFound(err) {
+		return false
+	}
+	why := "If it does exist, the identifiers may be absent from the collection's item shape, the listing " +
+		"may be truncated, or the envelope may resolve to the wrong collection"
+	sig := inferredCounter.signature(mg)
+	n, perr := inferredCounter.record(ctx, h, mg, sig)
+	if perr != nil {
+		// Losing the count must not lose the report: fall back to the informational form, which is correct
+		// for the common case and never cries wolf.
+		log.Debug("Could not record the inferred-absence count", "error", perr)
+		n = 1
+	}
+	if n <= 1 {
+		h.eventRecorder.Event(mg, event.Normal(reasonAbsenceInferred, "Observe", fmt.Sprintf(
+			"%s is being treated as absent because its findby listed successfully and no item matched -- "+
+				"not because the API reported it missing. For a first create that is the only possible "+
+				"answer. A create will be attempted on this basis", mg.GetName())))
+		log.Info("Absence was inferred from an unmatched findby listing, not reported by the API; a create "+
+			"will be attempted", "kind", mg.GetKind(), "name", mg.GetName())
+		return true
+	}
+	h.eventRecorder.Event(mg, event.Warning(reasonAbsenceInferred, "Observe", fmt.Errorf(
+		"%s has had its absence inferred from an unmatched findby listing %d times for the same spec "+
+			"generation: the create that followed the previous inference did not make it findable. %s. "+
+			"A create will be attempted again on this basis", mg.GetName(), n, why)))
+	log.Info("Absence was inferred from an unmatched findby listing AGAIN for the same generation; the "+
+		"previous create did not make the resource findable",
+		"kind", mg.GetKind(), "name", mg.GetName(), "inferences", n)
+	return true
 }
 
 // lastReconcileErrored reports whether the PREVIOUS reconcile of this object ended in an error, by reading
