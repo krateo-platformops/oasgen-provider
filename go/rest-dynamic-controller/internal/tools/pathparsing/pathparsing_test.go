@@ -27,9 +27,14 @@ func TestParsePath(t *testing.T) {
 			expected: []string{"pullRequestId"},
 		},
 		{
-			name:     "Empty path",
-			path:     "",
-			expected: []string{""},
+			// WAS: []string{""}, nil. A plausible-but-wrong value -- it passed every `len(segs) == 0`
+			// guard, so the caller believed it had a path and walked to a property named "". Now an
+			// error (#513). Callers that can receive an unset optional field test path == "" first;
+			// 12 of the 26 call sites already did.
+			name:          "Empty path is an error, not one empty segment",
+			path:          "",
+			expectError:   true,
+			errorContains: "empty",
 		},
 
 		// Bracket notation
@@ -73,19 +78,26 @@ func TestParsePath(t *testing.T) {
 
 		// Leading dots (attach to next segment)
 		{
-			name:     "Leading dot",
+			// WAS: []string{".a", "b"} -- the dot was KEPT in the segment name, so ".a" addressed a
+			// property literally called ".a". No document has one, so it resolved to nothing,
+			// silently. Stripping it is a FIX, not compatibility: paths of this shape exist in the
+			// wild because two of our own doc examples disagreed about the dialect.
+			name:     "Leading dot is stripped",
 			path:     ".a.b",
-			expected: []string{".a", "b"},
+			expected: []string{"a", "b"},
 		},
 		{
-			name:     "Single segment with leading dot",
+			// WAS: []string{".a"}. Same change. This is the shape a consumer actually wrote --
+			// `operationRef.path: .id` -- which addressed ".id" and found nothing.
+			name:     "Single segment with leading dot is stripped",
 			path:     ".a",
-			expected: []string{".a"},
+			expected: []string{"a"},
 		},
 		{
-			name:     "Multiple leading dots",
+			// WAS: []string{"..a", "b"}. Same change, applied to all leading separators.
+			name:     "Multiple leading dots are all stripped",
 			path:     "..a.b",
-			expected: []string{"..a", "b"},
+			expected: []string{"a", "b"},
 		},
 
 		// Trailing dots (error)
@@ -93,13 +105,13 @@ func TestParsePath(t *testing.T) {
 			name:          "Trailing dot",
 			path:          "a.b.",
 			expectError:   true,
-			errorContains: "trailing dot",
+			errorContains: "trailing separator",
 		},
 		{
 			name:          "Single segment trailing dot",
 			path:          "a.",
 			expectError:   true,
-			errorContains: "trailing dot",
+			errorContains: "trailing separator",
 		},
 
 		// Consecutive dots (error)
@@ -107,27 +119,31 @@ func TestParsePath(t *testing.T) {
 			name:          "Consecutive dots in middle",
 			path:          "a..b",
 			expectError:   true,
-			errorContains: "consecutive dots",
+			errorContains: "empty segment",
 		},
 
 		// Dot + bracket combinations
 		{
-			name:          "Dot before bracket",
-			path:          ".['a']",
-			expectError:   true,
-			errorContains: "dot before bracket",
+			// WAS: an error, "dot before bracket". Now valid, as a CONSEQUENCE of leading-dot
+			// stripping rather than as a separate decision: the dot is removed, leaving ['a'].
+			// This row is why the change is worth stating -- it was not in my first list of five.
+			name:     "Dot before bracket is valid once the leading dot is stripped",
+			path:     ".['a']",
+			expected: []string{"a"},
 		},
 		{
 			name:          "Dot after bracket at end",
 			path:          "['a'].",
 			expectError:   true,
-			errorContains: "trailing dot",
+			errorContains: "trailing separator",
 		},
 		{
-			name:          "Adjacent brackets without dot",
-			path:          "a.['b']['c']",
-			expectError:   true,
-			errorContains: "adjacent brackets",
+			// WAS: an error, "adjacent brackets must be separated by dot". A bracket group is
+			// self-delimiting, so requiring a dot between two of them was a restriction with no
+			// ambiguity behind it.
+			name:     "Adjacent brackets are separate segments",
+			path:     "a.['b']['c']",
+			expected: []string{"a", "b", "c"},
 		},
 
 		// Invalid bracket syntax
@@ -135,19 +151,27 @@ func TestParsePath(t *testing.T) {
 			name:          "Unclosed bracket",
 			path:          "['a.b.c",
 			expectError:   true,
-			errorContains: "unclosed",
+			errorContains: "unterminated bracket",
 		},
 		{
 			name:          "Missing quotes in bracket",
 			path:          "a.[b].c",
 			expectError:   true,
-			errorContains: "bracket must contain quoted string",
+			errorContains: "bracket must contain",
 		},
 		{
-			name:          "Empty bracket content",
-			path:          "['']",
+			// WAS: an error, "empty bracket content". Quoting is how a user says "this is the key I
+			// mean", so an explicitly-quoted empty key is a key. An UNQUOTED a[] is still refused --
+			// see the row below.
+			name:     "An explicitly quoted empty key is a key",
+			path:     "['']",
+			expected: []string{""},
+		},
+		{
+			name:          "An unquoted empty bracket is still malformed",
+			path:          "a[]",
 			expectError:   true,
-			errorContains: "empty bracket content",
+			errorContains: "empty bracket",
 		},
 
 		// Spaces
@@ -155,13 +179,13 @@ func TestParsePath(t *testing.T) {
 			name:          "Spaces in path",
 			path:          "a. b.c",
 			expectError:   true,
-			errorContains: "spaces",
+			errorContains: "unquoted whitespace",
 		},
 		{
 			name:          "Spaces around brackets",
 			path:          "[ 'field' ]",
 			expectError:   true,
-			errorContains: "spaces",
+			errorContains: "bracket must contain",
 		},
 
 		// Special characters in segments
@@ -198,7 +222,7 @@ func TestParsePath(t *testing.T) {
 			name:          "Only dots",
 			path:          "...",
 			expectError:   true,
-			errorContains: "trailing dot",
+			errorContains: "nothing but separators",
 		},
 
 		// Double quotes in brackets
@@ -230,10 +254,11 @@ func TestParsePath(t *testing.T) {
 			expected: []string{"credentials", "0"},
 		},
 		{
-			name:          "Chained array indices are not supported",
-			path:          "matrix[0][1]",
-			expectError:   true,
-			errorContains: "adjacent brackets",
+			// WAS: an error, "adjacent brackets". Same change as the row above; renamed because the
+			// old name asserted a limitation that no longer holds.
+			name:     "Chained array indices are supported",
+			path:     "matrix[0][1]",
+			expected: []string{"matrix", "0", "1"},
 		},
 		{
 			name:     "Dotted numeric segment equivalent to bracket index",
@@ -244,7 +269,7 @@ func TestParsePath(t *testing.T) {
 			name:          "Redundant leading zero index is rejected as an index but still invalid unquoted",
 			path:          "credentials[00].value",
 			expectError:   true,
-			errorContains: "bracket must contain quoted string",
+			errorContains: "bracket must contain",
 		},
 	}
 

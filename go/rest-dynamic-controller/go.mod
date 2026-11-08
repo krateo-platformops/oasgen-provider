@@ -5,7 +5,6 @@ go 1.26.0
 toolchain go1.26.10
 
 require (
-	github.com/go-andiamo/splitter v1.2.5
 	github.com/go-logr/logr v1.4.4
 	github.com/gobuffalo/flect v1.0.3
 	github.com/google/go-cmp v0.7.0
