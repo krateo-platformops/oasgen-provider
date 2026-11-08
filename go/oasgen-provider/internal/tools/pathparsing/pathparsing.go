@@ -38,8 +38,9 @@ import (
 // assertion of not-X refutes X for the cost of one search.)
 //
 // Array indices and [?key=value] predicates are part of the shared grammar and are REFUSED here, at the
-// path, rather than being passed on. Every caller in this module addresses the property names of a JSON
-// SCHEMA:
+// path, rather than being passed on, because the callers of THIS function walk a JSON SCHEMA. A path that
+// addresses a DOCUMENT -- a CR instance or a response body -- uses ParseDocumentPath above instead; I
+// originally claimed every caller in this module was a schema path, and that was wrong:
 //
 //	7 sites walk a *Schema          arrayAtPath, lookupTypeByPath, fieldExistsAtPath, removeFieldAtPath,
 //	                                findPropertyByPath, buildIncludeTree
@@ -70,6 +71,38 @@ import (
 // readers. That distinction is real but it does not change what the author must do, and both halves are
 // covered by the same true sentence: this path addresses a schema's property names. Two near-identical
 // messages would be a difference the reader has to resolve for no benefit.
+// ParseDocumentPath parses a field path that addresses a DOCUMENT -- a CR instance or a vendor response
+// body -- rather than a schema. It accepts the whole shared grammar, including array indices and
+// [?key=value] selectors.
+//
+// # Why this exists, and the error it corrects
+//
+// ParsePath below refuses indices and selectors, on the grounds that a schema describes one element shape
+// rather than indexed elements. That is right for a path walked against a *Schema, and I applied it to
+// every path this module parses on the claim that all of them are schema paths. They are not.
+//
+// `inCustomResource` is parsed HERE for a validation screen, but what it addresses at RUNTIME is a CR
+// instance, which can hold arrays and which the controller walks with a walker that handles both indices
+// and selectors. A live consumer's KeycloakUser uses
+//
+//	spec.credentials[?type=otp].secretDataSecretRef
+//
+// in sixteen places. Refusing it produced a warning saying the path "is not a parseable field path" and
+// advising the author to "point inCustomResource at a field the CR carries, or remove the mapping" --
+// about a path the controller parses correctly. That function's own comment had already named the hazard:
+// "a missed warning costs a silent wrong request that is ALREADY happening today; a FALSE REFUSAL BREAKS A
+// KIND THAT IS WORKING."
+//
+// The screen that consumes this only inspects the first two segments (spec|status, then a top-level
+// property), and those are always keys, so accepting the rest costs the validation nothing.
+func ParseDocumentPath(path string) ([]string, error) {
+	segs, err := fieldpath.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	return fieldpath.Keys(segs), nil
+}
+
 func ParsePath(path string) ([]string, error) {
 	segs, err := fieldpath.Parse(path)
 	if err != nil {
