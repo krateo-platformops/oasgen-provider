@@ -6,8 +6,21 @@ import (
 
 	"github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
 	"github.com/krateo-platformops/plumbing/fieldpath"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
+
+// anchorOf returns the prefix of segs up to and including its last selector or index -- the ENTRY a leaf
+// path hangs off. It reports false when there is none, which means the path addresses a fixed location
+// and "the entry is absent" is not a distinct case from "the leaf is absent".
+func anchorOf(segs []fieldpath.Segment) ([]fieldpath.Segment, bool) {
+	for i := len(segs) - 1; i >= 0; i-- {
+		if segs[i].Kind == fieldpath.KindPredicate || segs[i].Kind == fieldpath.KindIndex {
+			return segs[:i+1], true
+		}
+	}
+	return nil, false
+}
 
 // secretRefResolverType is the resolver kind whose Secret this collects. Matched exactly, so a future
 // resolver type cannot be swept in by a prefix or a contains check.
@@ -59,7 +72,7 @@ const secretRefResolverType = "secretRef"
 // A PARSE failure is different in kind and is returned as an error: the path comes from the
 // RestDefinition, not from the CR, so it is a DEFINITION defect that every CR of the kind shares. Being
 // lenient about it would hide a broken definition behind "no Secrets to grant".
-func CollectSecretRefNames(verbs []v1alpha1.VerbsDescription, cr *unstructured.Unstructured) (map[string][]string, error) {
+func CollectSecretRefNames(verbs []v1alpha1.VerbsDescription, cr *unstructured.Unstructured, log logging.Logger) (map[string][]string, error) {
 	if cr == nil {
 		return nil, nil
 	}
@@ -88,6 +101,30 @@ func CollectSecretRefNames(verbs []v1alpha1.VerbsDescription, cr *unstructured.U
 						"defect rather than missing data", verb.Action, path, err)
 			}
 			v, found, err := fieldpath.Get(cr.Object, segs)
+			if !found && err == nil {
+				// ABSENT, and WHICH absence matters to an operator reading a Role that came out narrower
+				// than expected. Both of these return found=false with a nil error, so the leaf read alone
+				// cannot tell them apart -- a consumer pointed this out after I claimed it could:
+				//
+				//	the ENTRY is absent        a password-only user has no OTP credential. Expected.
+				//	the entry is present and
+				//	  its REF is absent        the author declared the credential and left the ref off.
+				//	                           The resolver will refuse the request loudly, so the CR
+				//	                           already says so -- this line says why the ROLE is narrow.
+				//
+				// The anchor is the path up to and including its last selector or index: if THAT resolves,
+				// the entry exists and only the ref is missing.
+				if anchor, ok := anchorOf(segs); ok {
+					if _, anchorFound, anchorErr := fieldpath.Get(cr.Object, anchor); anchorFound && anchorErr == nil {
+						log.Debug("secretRef collection: the entry exists but its Secret reference is absent, so the Role will not name it",
+							"verb", verb.Action, "path", path, "resource", cr.GetName())
+						continue
+					}
+				}
+				log.Debug("secretRef collection: no entry matches this path on this resource, so the Role will not name it",
+					"verb", verb.Action, "path", path, "resource", cr.GetName())
+				continue
+			}
 			if err != nil {
 				// EXPLICIT, and a mutation test is why it is written this way.
 				//
@@ -112,14 +149,14 @@ func CollectSecretRefNames(verbs []v1alpha1.VerbsDescription, cr *unstructured.U
 				// LENIENT, per the contract above: a null ref, a scalar where a map was expected, or a
 				// selector matching more than one element contributes no name. The controller resolves the
 				// same path strictly when it builds the request, and reports a field-specific error there.
-				continue
-			}
-			if !found {
-				// Absent: the entry is not on this CR at all -- a password-only user's OTP path.
+				log.Debug("secretRef collection: this path cannot be read on this resource, so the Role will not name it",
+					"verb", verb.Action, "path", path, "resource", cr.GetName(), "reason", err.Error())
 				continue
 			}
 			name, ok := v.(string)
 			if !ok || name == "" {
+				log.Debug("secretRef collection: this path resolved to no usable Secret name, so the Role will not name it",
+					"verb", verb.Action, "path", path, "resource", cr.GetName())
 				continue
 			}
 			seen[name] = struct{}{}

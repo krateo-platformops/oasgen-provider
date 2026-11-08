@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -51,7 +52,7 @@ func TestTheKeycloakUserAcceptanceCase(t *testing.T) {
 		map[string]any{"type": "otp", "secretDataSecretRef": map[string]any{"name": "otp-secret", "key": "secretData"}},
 	})
 
-	got, err := CollectSecretRefNames(verbs, cr)
+	got, err := CollectSecretRefNames(verbs, cr, logging.NewNopLogger())
 	require.NoError(t, err)
 	assert.Equal(t, map[string][]string{"kc": {"otp-secret", "pw-secret"}}, got,
 		"exactly those two, sorted; grouped by the CR's own namespace because that is where the controller "+
@@ -86,7 +87,7 @@ func TestAPasswordOnlyUserIsNotBlockedByTheUnusedOtpPath(t *testing.T) {
 		}, why: "an empty name would scope a Role to a Secret that cannot exist"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := CollectSecretRefNames(verbs, keycloakUser("kc", tc.creds))
+			got, err := CollectSecretRefNames(verbs, keycloakUser("kc", tc.creds), logging.NewNopLogger())
 			require.NoError(t, err, "the collector must never fail on CR DATA: %s", tc.why)
 			assert.Equal(t, map[string][]string{"kc": {"pw-secret"}}, got,
 				"the password Role must still be granted: %s", tc.why)
@@ -103,7 +104,7 @@ func TestADuplicatePredicateContributesNothing(t *testing.T) {
 		map[string]any{"type": "otp", "secretDataSecretRef": map[string]any{"name": "first"}},
 		map[string]any{"type": "otp", "secretDataSecretRef": map[string]any{"name": "second"}},
 	})
-	got, err := CollectSecretRefNames(verbs, cr)
+	got, err := CollectSecretRefNames(verbs, cr, logging.NewNopLogger())
 	require.NoError(t, err)
 	assert.Nil(t, got,
 		"the walker refuses an ambiguous selector; granting EITHER name would be the wrong-element bug "+
@@ -114,7 +115,7 @@ func TestADuplicatePredicateContributesNothing(t *testing.T) {
 // TestAnUnparseablePathIsADefinitionDefect is the one error the collector DOES return, and the line
 // between the two.
 func TestAnUnparseablePathIsADefinitionDefect(t *testing.T) {
-	got, err := CollectSecretRefNames(secretRefVerbs("spec..credentials"), keycloakUser("kc", nil))
+	got, err := CollectSecretRefNames(secretRefVerbs("spec..credentials"), keycloakUser("kc", nil), logging.NewNopLogger())
 	require.Error(t, err, "the path comes from the RestDefinition, so every CR of the kind is affected")
 	assert.Contains(t, err.Error(), "definition defect")
 	assert.Nil(t, got)
@@ -147,7 +148,7 @@ func TestOnlySecretRefResolversAreCollected(t *testing.T) {
 		// Resolvable and named differently, so collecting the dependentLookup row would ADD a name.
 		map[string]any{"type": "otp", "secretDataSecretRef": map[string]any{"name": "otp-not-to-be-collected"}},
 	})
-	got, err := CollectSecretRefNames(verbs, cr)
+	got, err := CollectSecretRefNames(verbs, cr, logging.NewNopLogger())
 	require.NoError(t, err)
 	assert.Equal(t, map[string][]string{"kc": {"pw-secret"}}, got)
 }
@@ -156,6 +157,6 @@ func TestOnlySecretRefResolversAreCollected(t *testing.T) {
 // to do without one, and silently returning nothing would grant no access with no explanation.
 func TestACrWithoutANamespaceIsRefused(t *testing.T) {
 	cr := keycloakUser("", []any{map[string]any{"type": "password", "valueSecretRef": map[string]any{"name": "pw"}}})
-	_, err := CollectSecretRefNames(secretRefVerbs("spec.credentials[?type=password].valueSecretRef.name"), cr)
+	_, err := CollectSecretRefNames(secretRefVerbs("spec.credentials[?type=password].valueSecretRef.name"), cr, logging.NewNopLogger())
 	assert.Error(t, err)
 }
