@@ -6,6 +6,7 @@ import (
 
 	definitionv1alpha1 "github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/deploy"
+	"github.com/krateo-platformops/oasgen-provider/internal/tools/text"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -77,6 +78,16 @@ func (e *external) teardownSecretRefRBAC(ctx context.Context, cr *definitionv1al
 // and Observe's drift check so the two cannot disagree about which kind to collect from -- if they did, the
 // digest would be computed over one set and the Role provisioned from another, and the resource would report
 // drift on every reconcile for ever.
+// CapitaliseFirstLetter, like every other generated-GVK construction in this package (see the Kind passed
+// to plurals.ToGroupVersionResource at restdefinition.go:354). spec.resource.kind is author-written and is
+// NOT validated for case, so a definition saying `kind: user` yields a CRD serving `User`. Using the raw
+// value here made the lister ask for a Kind the apiserver does not serve: zero instances, zero names, no
+// Role -- #510's symptom reproduced silently by the fix for #510. A reviewer found this by checking my new
+// call against the existing convention rather than against the symptom.
 func secretRefGeneratedGVK(cr *definitionv1alpha1.RestDefinition, gvr schema.GroupVersionResource) schema.GroupVersionKind {
-	return schema.GroupVersionKind{Group: gvr.Group, Version: gvr.Version, Kind: cr.Spec.Resource.Kind}
+	return schema.GroupVersionKind{
+		Group:   gvr.Group,
+		Version: gvr.Version,
+		Kind:    text.CapitaliseFirstLetter(cr.Spec.Resource.Kind),
+	}
 }
