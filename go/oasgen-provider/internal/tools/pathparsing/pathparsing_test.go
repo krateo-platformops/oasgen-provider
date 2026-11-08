@@ -241,10 +241,14 @@ func TestParsePath(t *testing.T) {
 			errorContains: "a [?key=value] selector",
 		},
 		{
+			// The wording here tracks the message, and this row is why: the first draft of the message
+			// interpolated s.String() and suggested ['[0]'] -- a key literally named "[0]". Fixing that
+			// changed the wording, and THIS ROW still asserted the old phrasing. It passed locally
+			// because the suite had been run before the fix and only a probe after it.
 			name:          "The refusal tells the author how to mean it literally",
 			path:          "credentials[0]",
 			expectError:   true,
-			errorContains: "Quote the segment if it is a literal property name",
+			errorContains: `If "0" is a literal property name, quote it: ['0']`,
 		},
 		{
 			// A QUOTED numeric segment is a KEY, not an index, and must still work -- this is the
