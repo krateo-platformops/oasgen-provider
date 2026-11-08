@@ -203,16 +203,20 @@ func AuthSecretRefsDigest(refs map[string][]string) (string, error) {
 // binding sa. It then removes the pair from every namespace in previouslyProvisioned that is no longer
 // present in bySecretNamespace, and returns the new complete set of provisioned namespaces — callers store
 // this back on the RestDefinition's status so the next call knows what to clean up.
+// NAMING NOTE. These errors name the ROLE rather than saying "auth-secret", because this function is
+// shared: #510 added a second caller that provisions the secretRef Role through it. Hardcoding the auth
+// noun sent an operator debugging a secretRef grant to the auth path -- a consumer found that by reading
+// the code before running it. The role name is also what a test can assert against.
 func SyncAuthSecretRBAC(ctx context.Context, kube client.Client, roleName string, bySecretNamespace map[string][]string, previouslyProvisioned []string, sa types.NamespacedName) ([]string, error) {
 	nowProvisioned := make([]string, 0, len(bySecretNamespace))
 	for ns, secretNames := range bySecretNamespace {
 		role := rbacgen.BuildRoleForSecret(ns, roleName, secretNames, authSecretVerbs)
 		if err := kubecli.Apply(ctx, kube, role, kubecli.ApplyOptions{}); err != nil {
-			return nil, fmt.Errorf("applying auth-secret Role in namespace %s: %w", ns, err)
+			return nil, fmt.Errorf("applying Role %q in namespace %s: %w", roleName, ns, err)
 		}
 		binding := rbacgen.BuildRoleBindingForRole(ns, roleName, roleName, sa)
 		if err := kubecli.Apply(ctx, kube, binding, kubecli.ApplyOptions{}); err != nil {
-			return nil, fmt.Errorf("applying auth-secret RoleBinding in namespace %s: %w", ns, err)
+			return nil, fmt.Errorf("applying RoleBinding %q in namespace %s: %w", roleName, ns, err)
 		}
 		nowProvisioned = append(nowProvisioned, ns)
 	}
@@ -227,7 +231,7 @@ func SyncAuthSecretRBAC(ctx context.Context, kube client.Client, roleName string
 			continue
 		}
 		if err := DeleteAuthSecretRBAC(ctx, kube, roleName, ns); err != nil {
-			return nil, fmt.Errorf("removing stale auth-secret RBAC in namespace %s: %w", ns, err)
+			return nil, fmt.Errorf("removing stale RBAC %q in namespace %s: %w", roleName, ns, err)
 		}
 	}
 	return nowProvisioned, nil
@@ -242,14 +246,14 @@ func DeleteAuthSecretRBAC(ctx context.Context, kube client.Client, roleName, ns 
 		ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: ns},
 	}
 	if err := kubecli.Uninstall(ctx, kube, role, kubecli.UninstallOptions{}); err != nil {
-		return fmt.Errorf("deleting auth-secret Role: %w", err)
+		return fmt.Errorf("deleting Role %q: %w", roleName, err)
 	}
 	binding := &rbacv1.RoleBinding{
 		TypeMeta:   metav1.TypeMeta{Kind: "RoleBinding", APIVersion: rbacv1.SchemeGroupVersion.String()},
 		ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: ns},
 	}
 	if err := kubecli.Uninstall(ctx, kube, binding, kubecli.UninstallOptions{}); err != nil {
-		return fmt.Errorf("deleting auth-secret RoleBinding: %w", err)
+		return fmt.Errorf("deleting RoleBinding %q: %w", roleName, err)
 	}
 	return nil
 }
@@ -306,7 +310,7 @@ func MissingAuthSecretRBAC(ctx context.Context, kube client.Client, roleName str
 			missing = append(missing, ns)
 			continue
 		case err != nil:
-			return nil, fmt.Errorf("getting auth-secret Role in namespace %s: %w", ns, err)
+			return nil, fmt.Errorf("getting Role %q in namespace %s: %w", roleName, ns, err)
 		}
 
 		var binding rbacv1.RoleBinding
@@ -314,7 +318,7 @@ func MissingAuthSecretRBAC(ctx context.Context, kube client.Client, roleName str
 		case apierrors.IsNotFound(err):
 			missing = append(missing, ns)
 		case err != nil:
-			return nil, fmt.Errorf("getting auth-secret RoleBinding in namespace %s: %w", ns, err)
+			return nil, fmt.Errorf("getting RoleBinding %q in namespace %s: %w", roleName, ns, err)
 		}
 	}
 	sort.Strings(missing)
