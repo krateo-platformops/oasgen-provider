@@ -200,7 +200,10 @@ func requestDestination(m FieldMappingEntry) (dest, name string) {
 // shapes a consumer uses most. The root segment IS decidable: it is a top-level property of spec or status,
 // both of which are fully generated here.
 func resolveCustomResourcePath(inCustomResource string, specProps, statusProps map[string]bool) (root, rest, reason string) {
-	segments, err := pathparsing.ParsePath(inCustomResource)
+	// ParseDocumentPath, not ParsePath: inCustomResource addresses a CR INSTANCE at runtime, which can
+	// hold arrays. Refusing an index or a [?key=value] selector here warned falsely about a path the
+	// controller resolves correctly -- see ParseDocumentPath's doc for the live case.
+	segments, err := pathparsing.ParseDocumentPath(inCustomResource)
 	if err != nil || len(segments) == 0 {
 		return "", "", fmt.Sprintf("is not a parseable field path (%v)", err)
 	}
