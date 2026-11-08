@@ -1207,6 +1207,20 @@ type RestDefinitionStatus struct {
 	// +optional
 	SecretRefRBACNamespaces []string `json:"secretRefRBACNamespaces,omitempty"`
 
+	// SecretRefDigest: a hash of the Secret names (grouped by namespace) currently referenced by a secretRef
+	// fieldMapping resolver, across every instance of the GENERATED Kind.
+	//
+	// WITHOUT THIS THE GRANT IS NEVER PROVISIONED. syncSecretRefRBAC runs only from Create and Update, and
+	// the generated CRD is created INSIDE Create -- so Create's own collection always sees zero instances,
+	// because no CR of the kind can exist before its CRD does. Observe must therefore notice when the
+	// instances change, or nothing ever reaches Update. A consumer measured exactly this on a real cluster:
+	// 8 CRs across 7 namespaces, 6.5 minutes, zero Roles provisioned.
+	//
+	// This is #473's lesson applied to the second caller: a digest answers "did the references change", and
+	// the companion existence check in Observe answers "does the Role still exist", which a digest cannot.
+	// +optional
+	SecretRefDigest string `json:"secretRefDigest,omitempty"`
+
 	// GeneratorBuild: the build identity of the oasgen-provider that last generated this
 	// RestDefinition's CRD -- the string stamped in at link time via -X main.Build, the same one
 	// SERVICE_VERSION carries.

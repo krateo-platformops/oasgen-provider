@@ -29,11 +29,7 @@ func (e *external) syncSecretRefRBAC(ctx context.Context, cr *definitionv1alpha1
 	// The GENERATED Kind, not the Configuration Kind. secretRef paths address a CR instance of the kind this
 	// RestDefinition generates, which is why a per-RestDefinition collector cannot size this grant: the names
 	// live in the CRs.
-	generatedGVK := schema.GroupVersionKind{
-		Group:   gvr.Group,
-		Version: gvr.Version,
-		Kind:    cr.Spec.Resource.Kind,
-	}
+	generatedGVK := secretRefGeneratedGVK(cr, gvr)
 
 	refs, err := deploy.CollectSecretRefNamesForAll(ctx, e.kube, generatedGVK, cr.Spec.Resource.VerbsDescription, e.log)
 	if err != nil {
@@ -52,6 +48,12 @@ func (e *external) syncSecretRefRBAC(ctx context.Context, cr *definitionv1alpha1
 	}
 
 	cr.Status.SecretRefRBACNamespaces = provisioned
+
+	digest, err := deploy.AuthSecretRefsDigest(refs)
+	if err != nil {
+		return fmt.Errorf("hashing secretRef secret names: %w", err)
+	}
+	cr.Status.SecretRefDigest = digest
 	return nil
 }
 
@@ -69,4 +71,12 @@ func (e *external) teardownSecretRefRBAC(ctx context.Context, cr *definitionv1al
 	}
 	roleName := deploy.SecretRefRoleName(gvr)
 	return deploy.DeleteAllAuthSecretRBAC(ctx, e.kube, roleName, cr.Status.SecretRefRBACNamespaces)
+}
+
+// secretRefGeneratedGVK is the GVK of the Kind this RestDefinition generates. Shared by syncSecretRefRBAC
+// and Observe's drift check so the two cannot disagree about which kind to collect from -- if they did, the
+// digest would be computed over one set and the Role provisioned from another, and the resource would report
+// drift on every reconcile for ever.
+func secretRefGeneratedGVK(cr *definitionv1alpha1.RestDefinition, gvr schema.GroupVersionResource) schema.GroupVersionKind {
+	return schema.GroupVersionKind{Group: gvr.Group, Version: gvr.Version, Kind: cr.Spec.Resource.Kind}
 }

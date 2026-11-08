@@ -177,6 +177,29 @@ func CollectSecretRefNames(verbs []v1alpha1.VerbsDescription, cr *unstructured.U
 	return map[string][]string{ns: names}, nil
 }
 
+// DeclaresSecretRef reports whether any verb of this RestDefinition names a secretRef resolver.
+//
+// A CHEAP GATE, and it fixes a real defect rather than only saving work. AuthSecretRefsDigest of an empty
+// map is NOT the empty string -- it is the FNV offset basis, "cbf29ce484222325". So a drift check written as
+// `status.SecretRefDigest != digest(collected)` fires forever on any resource whose status predates the
+// field: "" never equals that constant, so Observe reports drift, Update runs, and nothing it does makes the
+// next Observe quiet unless the sync stores the digest. For the overwhelming majority of kinds -- which
+// declare no secretRef resolver at all -- that was a redeploy on every reconcile, which is the exact failure
+// the auth path's own comments warn about.
+//
+// Gating on the DECLARATION rather than on the collected result also removes a List per reconcile for every
+// kind that cannot have secretRef Secrets.
+func DeclaresSecretRef(verbs []v1alpha1.VerbsDescription) bool {
+	for _, verb := range verbs {
+		for _, m := range verb.FieldMapping {
+			if m.Resolver != nil && m.Resolver.Type == secretRefResolverType && m.Resolver.SecretRef != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SecretRefRoleName is the Role name for the secretRef grant. The suffix differs from
 // AuthSecretRoleName's deliberately, and the separation is load-bearing rather than cosmetic:
 // SyncAuthSecretRBAC deletes the Role in every namespace that is in the caller's recorded set and no
@@ -218,6 +241,17 @@ func CollectSecretRefNamesForAll(
 		// The CRD may not be established yet on the first reconcile after generation. That is ABSENT, not
 		// an error: there are no instances, so there are no names, and the next reconcile will see them.
 		if strings.Contains(err.Error(), "no matches for") || strings.Contains(err.Error(), "the server could not find the requested resource") {
+			// OBSERVABLE, at a consumer's request, and the reason is that nothing else can see this fire.
+			// Every test for this branch INJECTS the error string -- the fake client returns err=nil with
+			// zero items for an unregistered type, so it cannot produce the real one. On a cluster, silence
+			// here is indistinguishable from "listed successfully after establishment". The log line is the
+			// only channel that separates them.
+			//
+			// It carries the error VERBATIM so a spelling neither string matches shows up as the absence of
+			// this line next to a failing reconcile, rather than as a mystery.
+			log.Debug("secretRef collection: the generated CRD is not served yet, so there are no instances to "+
+				"collect; treating as absent rather than failing the reconcile",
+				"kind", generatedGVK.Kind, "listError", err.Error())
 			return nil, nil
 		}
 		return nil, fmt.Errorf("listing %s instances to size the secretRef grant: %w", generatedGVK.Kind, err)
