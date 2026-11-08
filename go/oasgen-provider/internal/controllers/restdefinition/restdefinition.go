@@ -827,6 +827,15 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 		return fmt.Errorf("syncing auth secret RBAC: %w", err)
 	}
 
+	// #510, and deliberately NOT folded into the call above. The two grants are collected from different
+	// kinds -- auth refs from the Configuration Kind, secretRef targets from the GENERATED Kind -- and
+	// SyncAuthSecretRBAC revokes any namespace in the caller's record that its collected set no longer
+	// names. Sharing either the Role name or the status field between them makes each caller revoke the
+	// other's namespaces on every reconcile.
+	if err := e.syncSecretRefRBAC(ctx, cr, gvr); err != nil {
+		return fmt.Errorf("syncing secretRef RBAC: %w", err)
+	}
+
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
 		return fmt.Errorf("installing controller: %w", err)
@@ -1290,6 +1299,15 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 		return fmt.Errorf("syncing auth secret RBAC: %w", err)
 	}
 
+	// #510, and deliberately NOT folded into the call above. The two grants are collected from different
+	// kinds -- auth refs from the Configuration Kind, secretRef targets from the GENERATED Kind -- and
+	// SyncAuthSecretRBAC revokes any namespace in the caller's record that its collected set no longer
+	// names. Sharing either the Role name or the status field between them makes each caller revoke the
+	// other's namespaces on every reconcile.
+	if err := e.syncSecretRefRBAC(ctx, cr, gvr); err != nil {
+		return fmt.Errorf("syncing secretRef RBAC: %w", err)
+	}
+
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
 		return fmt.Errorf("installing controller: %w", err)
@@ -1465,6 +1483,14 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 		e.log.Warn("Tearing down auth secret RBAC failed; a Role and RoleBinding may be left behind, and "+
 			"nothing records which namespaces needed cleaning once this object is gone",
 			"kind", cr.Spec.Resource.Kind, "group", cr.Spec.ResourceGroup, "error", terr)
+	}
+
+	// #510. Separate record, separate Role name, so this removes only what syncSecretRefRBAC provisioned.
+	// Delete is the last pass over this resource: a Role left here is permanent, and it grants read access
+	// on real Secrets to a ServiceAccount that is about to stop existing.
+	if terr := e.teardownSecretRefRBAC(ctx, cr, gvr); terr != nil {
+		e.log.Warn("Removing secretRef RBAC failed (non-fatal); an orphaned Role may still grant secret "+
+			"access to a deleted ServiceAccount", "error", terr, "namespaces", cr.Status.SecretRefRBACNamespaces)
 	}
 
 	e.log.Debug("Deleting RestDefinition", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)

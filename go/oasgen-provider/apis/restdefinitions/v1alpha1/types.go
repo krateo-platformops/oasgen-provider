@@ -1193,6 +1193,20 @@ type RestDefinitionStatus struct {
 	// +optional
 	AuthSecretRBACNamespaces []string `json:"authSecretRBACNamespaces,omitempty"`
 
+	// SecretRefRBACNamespaces: the namespaces in which a namespace-scoped Role+RoleBinding currently grants
+	// RDC's ServiceAccount read access to the Secrets named by a secretRef fieldMapping resolver, collected
+	// across every instance of the GENERATED Kind (not the Configuration Kind -- see AuthSecretRBACNamespaces
+	// for that one).
+	//
+	// SEPARATE from AuthSecretRBACNamespaces, and the separation is load-bearing rather than tidiness.
+	// SyncAuthSecretRBAC deletes the Role in every namespace that is in the caller's recorded set and no
+	// longer in its collected set. Two callers sharing one record would each delete the other's namespaces on
+	// every reconcile, and the symptom -- a credential readable one moment and Forbidden the next -- would
+	// pass every unit test, because a single-caller test cannot observe the other caller. The Role NAMES are
+	// distinct for the same reason (see deploy.SecretRefRoleName).
+	// +optional
+	SecretRefRBACNamespaces []string `json:"secretRefRBACNamespaces,omitempty"`
+
 	// GeneratorBuild: the build identity of the oasgen-provider that last generated this
 	// RestDefinition's CRD -- the string stamped in at link time via -X main.Build, the same one
 	// SERVICE_VERSION carries.

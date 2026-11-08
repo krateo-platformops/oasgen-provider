@@ -4,10 +4,14 @@ import (
 	"fmt"
 	"sort"
 
+	"context"
 	"github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
 	"github.com/krateo-platformops/plumbing/fieldpath"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"strings"
 )
 
 // anchorOf returns the prefix of segs up to and including its last selector or index -- the ENTRY a leaf
@@ -171,4 +175,83 @@ func CollectSecretRefNames(verbs []v1alpha1.VerbsDescription, cr *unstructured.U
 	}
 	sort.Strings(names)
 	return map[string][]string{ns: names}, nil
+}
+
+// SecretRefRoleName is the Role name for the secretRef grant. The suffix differs from
+// AuthSecretRoleName's deliberately, and the separation is load-bearing rather than cosmetic:
+// SyncAuthSecretRBAC deletes the Role in every namespace that is in the caller's recorded set and no
+// longer in the collected set. Two callers sharing one name would each delete the other's namespaces on
+// every reconcile, and the symptom -- a Role that vanishes and reappears, or a Forbidden on a credential
+// that was readable a moment ago -- would pass every unit test, because a single-caller test never
+// observes the other caller.
+//
+// The group is in the name for the same reason as #440: two RestDefinitions sharing a resource plural
+// across API groups would otherwise collide on one name and revoke each other's access.
+func SecretRefRoleName(gvr schema.GroupVersionResource) string {
+	return fmt.Sprintf("%s-%s-%s-secretrefs", gvr.Resource, gvr.Group, rbacVersion)
+}
+
+// CollectSecretRefNamesForAll unions CollectSecretRefNames over every live instance of the generated kind.
+//
+// It exists because a Role must cover every CR that a controller might reconcile, and secretRef names come
+// from the CRs themselves rather than from the RestDefinition: a per-instance collector cannot size the
+// grant. This mirrors CollectAuthSecretRefs, which lists Configuration instances for the same reason.
+//
+// LENIENT, and the contract matters more here than in the per-instance collector. One malformed CR must not
+// cost every other CR of the kind its credential: an instance whose paths cannot be read contributes no
+// names and is logged. A DEFINITION defect -- a path that is not a valid field path at all, which affects
+// every CR of the kind -- is still fatal, because no CR of that kind can work and silence would hide it.
+func CollectSecretRefNamesForAll(
+	ctx context.Context,
+	kube client.Client,
+	generatedGVK schema.GroupVersionKind,
+	verbs []v1alpha1.VerbsDescription,
+	log logging.Logger,
+) (map[string][]string, error) {
+	if generatedGVK.Kind == "" {
+		return nil, nil
+	}
+
+	list := unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(generatedGVK)
+	if err := kube.List(ctx, &list); err != nil {
+		// The CRD may not be established yet on the first reconcile after generation. That is ABSENT, not
+		// an error: there are no instances, so there are no names, and the next reconcile will see them.
+		if strings.Contains(err.Error(), "no matches for") || strings.Contains(err.Error(), "the server could not find the requested resource") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("listing %s instances to size the secretRef grant: %w", generatedGVK.Kind, err)
+	}
+
+	byNamespace := map[string]map[string]struct{}{}
+	for i := range list.Items {
+		perCR, err := CollectSecretRefNames(verbs, &list.Items[i], log)
+		if err != nil {
+			// A definition defect affects every CR of the kind, so it cannot be worked around by skipping
+			// this one. Returning it fails the reconcile, which is where a definition defect belongs.
+			return nil, err
+		}
+		for ns, names := range perCR {
+			if byNamespace[ns] == nil {
+				byNamespace[ns] = map[string]struct{}{}
+			}
+			for _, n := range names {
+				byNamespace[ns][n] = struct{}{}
+			}
+		}
+	}
+
+	if len(byNamespace) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]string, len(byNamespace))
+	for ns, set := range byNamespace {
+		names := make([]string, 0, len(set))
+		for n := range set {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		out[ns] = names
+	}
+	return out, nil
 }
