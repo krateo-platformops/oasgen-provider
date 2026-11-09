@@ -38,7 +38,7 @@ import (
 //	                          typed: an error. The author asked for a key; an array element is not one.
 //	a.0 against an ARRAY      the same collapse, and A DOCUMENTED FORM REMOVED ON PURPOSE. `a.0` and
 //	                          `a['0']` parse to byte-identical segments, so no walker taking []Segment
-//	                          can accept one and refuse the other. readAnyPath's comment advertised
+//	                          can accept one and refuse the other. readStringPath's comment advertised
 //	                          "credentials.0.value" for as long as that read was flat.
 //	a[0] against a MAP        flat: "0" against a map is a key, so an INDEX silently became one.
 //	                          typed: an error. The author wrote an index; a map has none.
