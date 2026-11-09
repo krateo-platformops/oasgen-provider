@@ -4,6 +4,7 @@ package restResources
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
@@ -121,7 +122,32 @@ func TestBothCallSitesRefuseAnAmbiguousGuardPath(t *testing.T) {
 	if _, err := neededLookupNames([]getter.DependentLookup{{Name: "l1"}}, mapping, mg); err == nil {
 		t.Error("neededLookupNames must refuse an ambiguous guard path, not silently include or skip the lookup")
 	}
-	if _, err := fieldmapping.ResolveRequestResolvers(context.Background(), nil, mapping, mg, nil); err == nil {
-		t.Error("ResolveRequestResolvers must refuse it too")
+
+	// THE LOOKUP VALUE IS SUPPLIED ON PURPOSE. A reviewer found that this half passed for the wrong
+	// reason: with lookupValues nil, ResolveRequestResolvers errors about the MISSING LOOKUP whether or
+	// not the guard is ambiguous, so the assertion was vacuous -- it could not distinguish the thing it
+	// claimed to test. Supplying the value removes the other reason to fail, so only the guard can error.
+	supplied := map[string]interface{}{"l1": "already-resolved"}
+	_, err := fieldmapping.ResolveRequestResolvers(context.Background(), nil, mapping, mg, supplied)
+	if err == nil {
+		t.Fatal("ResolveRequestResolvers must refuse an ambiguous guard path even when the lookup value " +
+			"is already available: the guard is evaluated before anything else")
+	}
+	if !strings.Contains(err.Error(), "when.customResourceFieldPresent") {
+		t.Fatalf("the error must name the GUARD, not something incidental; got: %v", err)
+	}
+
+	// AND THE CONTROL: the same mapping with an UNAMBIGUOUS guard and the value supplied must succeed.
+	// Without it, the assertion above would pass against a resolver that refused everything.
+	okMapping := []getter.FieldMappingItem{{
+		InBody: "projectId",
+		Resolver: &getter.FieldResolver{
+			Type:            "dependentLookup",
+			When:            &getter.ResolverWhen{CustomResourceFieldPresent: "spec.items"},
+			DependentLookup: &getter.DependentLookupRef{Name: "l1"},
+		},
+	}}
+	if _, err := fieldmapping.ResolveRequestResolvers(context.Background(), nil, okMapping, mg, supplied); err != nil {
+		t.Fatalf("an unambiguous guard with the value supplied must resolve cleanly; got: %v", err)
 	}
 }

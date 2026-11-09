@@ -322,7 +322,17 @@ type ResolverWhen struct {
 	// a [?key=value] selector matching more than one element -- that is an ERROR, not a skip. A skip would
 	// turn a malformed resource into one that silently reconciles without the guarded field, which is the
 	// exact outcome the guard exists to prevent.
+	//
+	// MinLength=1 BECAUSE AN EMPTY PATH SILENTLY DISABLES THE GUARD. The field is +required, so `when: {}`
+	// is already refused -- but `customResourceFieldPresent: ""` was admitted, and both evaluation sites
+	// treat an empty path as "no guard" and resolve unconditionally. So a templating accident that renders
+	// an empty string produced a definition that validates, shows the guard on `kubectl get`, and behaves
+	// as though it were absent. A reviewer found this; no test covered it, because an empty path reaches
+	// exactly the same code path as a nil guard.
+	//
+	// Safe as a tightening: this field has never shipped, so no existing definition can carry an empty one.
 	// +required
+	// +kubebuilder:validation:MinLength=1
 	CustomResourceFieldPresent string `json:"customResourceFieldPresent"`
 }
 
