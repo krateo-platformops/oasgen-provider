@@ -201,6 +201,22 @@ type FieldResolver struct {
 	// DependentLookup names the pre-call read whose result is substituted for this field (used when Type
 	// is "dependentLookup"). The lookup itself is declared once, in Resource.DependentLookups.
 	DependentLookup *DependentLookupRef `json:"dependentLookup,omitempty"`
+	// When, if set, makes the whole mapping conditional on the CR carrying a field. Without it a resolver
+	// is unconditional, which is every definition's behaviour before this field existed.
+	//
+	// MUST BE READ HERE OR THE GUARD IS INERT. The CRD accepting `when` and this struct ignoring it would
+	// give a definition that validates, shows the field on `kubectl get`, and silently resolves the mapping
+	// anyway -- worse than not having the field, because the failure would no longer match the definition.
+	When *ResolverWhen `json:"when,omitempty"`
+}
+
+// ResolverWhen makes a resolver conditional on the shape of the CR. Separate from LookupWhen, which guards
+// a dependentLookup against running unnecessarily: that one asks "has the author already supplied this",
+// this one asks "does this mapping apply at all".
+type ResolverWhen struct {
+	// CustomResourceFieldPresent resolves the mapping only when this path resolves to a non-null value.
+	// Absent or explicitly null means the mapping is skipped entirely.
+	CustomResourceFieldPresent string `json:"customResourceFieldPresent"`
 }
 
 // DependentLookupRef names the lookup a resolver substitutes from, with an optional guard.

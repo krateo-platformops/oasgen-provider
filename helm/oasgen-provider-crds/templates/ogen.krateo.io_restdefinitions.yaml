@@ -1174,6 +1174,32 @@ spec:
                                     - secretRef
                                     - dependentLookup
                                     type: string
+                                  when:
+                                    description: |-
+                                      When makes this resolver conditional on the Custom Resource carrying a field. Without it a resolver
+                                      is unconditional, which is the behaviour every definition has today.
+
+                                      AT THE RESOLVER LEVEL, not inside secretRef, and deliberately so: the guard is about whether this
+                                      MAPPING applies, which is independent of which resolver kind supplies the value. DependentLookupRef
+                                      keeps its own `when` (LookupWhen) at its existing path, so no published field moves.
+                                    properties:
+                                      customResourceFieldPresent:
+                                        description: |-
+                                          CustomResourceFieldPresent resolves this mapping only when this path resolves to a non-null value on
+                                          the Custom Resource. When the path is absent or explicitly null, the whole mapping is SKIPPED: no
+                                          Secret is read and nothing is written to the request.
+
+                                          An explicit null counting as absent is the existing convention (see LookupWhen): it is how a CR says
+                                          "I am not supplying this".
+
+                                          THE GUARD PATH IS A SEPARATE READ from the resolver's own paths. If the guard path is ambiguous --
+                                          a [?key=value] selector matching more than one element -- that is an ERROR, not a skip. A skip would
+                                          turn a malformed resource into one that silently reconciles without the guarded field, which is the
+                                          exact outcome the guard exists to prevent.
+                                        type: string
+                                    required:
+                                    - customResourceFieldPresent
+                                    type: object
                                 required:
                                 - type
                                 type: object

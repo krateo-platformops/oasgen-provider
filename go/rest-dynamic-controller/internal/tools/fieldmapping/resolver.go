@@ -54,6 +54,14 @@ func ResolveRequestResolvers(ctx context.Context, dyn dynamic.Interface, mapping
 		if m.InPath == "" && m.InQuery == "" && m.InBody == "" {
 			continue // response-direction entry; CRD-level validation already forbids resolver here
 		}
+		// THE RESOLVER-LEVEL GUARD (#524), before the switch because `when` is about whether this MAPPING
+		// applies, not about which resolver kind supplies the value.
+		if skip, err := resolverGuardSkips(m.Resolver.When, mg); err != nil {
+			return nil, fmt.Errorf("evaluating when.customResourceFieldPresent for field %q: %w",
+				m.InCustomResource, err)
+		} else if skip {
+			continue
+		}
 		switch m.Resolver.Type {
 		case "secretRef":
 			r := m.Resolver.SecretRef
@@ -180,6 +188,42 @@ func readStringPath(mg *unstructured.Unstructured, path string) (string, error) 
 		return "", fmt.Errorf("path %q is not a string", path)
 	}
 	return s, nil
+}
+
+// resolverGuardSkips reports whether a resolver's `when` guard means the whole mapping is skipped (#524).
+//
+// THE OPPOSITE POLARITY TO guardSkips BELOW, and for a different reason. guardSkips asks "has the author
+// already supplied this value, so I can save an API call". This asks "does this mapping apply to this CR at
+// all" -- the motivating case being a KeycloakUser with a password credential and no OTP credential, which
+// before this could never be created because the OTP mapping's path was unresolvable.
+//
+// A nil guard never skips, so every definition written before this field existed behaves exactly as it did.
+// An explicit null counts as absent, matching guardSkips: that is how a CR says "I am not supplying this".
+//
+// AN AMBIGUOUS GUARD PATH IS AN ERROR, NOT A SKIP, and the reasoning is a consumer's rather than mine. A
+// [?key=value] selector matching more than one element is refused by the walker. Treating that refusal as a
+// skip would turn a malformed resource -- say a user with two `type: otp` credentials -- into one that
+// reconciles successfully WITHOUT the guarded field, which is precisely the outcome the guard exists to
+// prevent. The error propagates to the CR's condition instead.
+func resolverGuardSkips(when *getter.ResolverWhen, mg *unstructured.Unstructured) (bool, error) {
+	if when == nil || when.CustomResourceFieldPresent == "" {
+		return false, nil
+	}
+	segments, err := pathparsing.ParsePath(when.CustomResourceFieldPresent)
+	if err != nil {
+		return false, fmt.Errorf("invalid path %q: %w", when.CustomResourceFieldPresent, err)
+	}
+	if len(segments) == 0 {
+		return false, fmt.Errorf("invalid path %q: it names no field", when.CustomResourceFieldPresent)
+	}
+	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
+	if err != nil {
+		// Ambiguous or inapplicable -- NOT an absence. See the note above.
+		return false, fmt.Errorf("path %q cannot be read on the custom resource: %w",
+			when.CustomResourceFieldPresent, err)
+	}
+	// SKIP when absent or null; resolve when present.
+	return !found || val == nil, nil
 }
 
 // guardSkips reports whether a dependentLookup's `when` guard means the lookup is skipped because the CR
