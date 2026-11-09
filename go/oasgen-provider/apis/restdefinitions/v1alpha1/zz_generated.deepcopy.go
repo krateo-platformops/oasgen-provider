@@ -757,6 +757,11 @@ func (in *RestDefinitionStatus) DeepCopyInto(out *RestDefinitionStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.SecretRefRBACNamespaces != nil {
+		in, out := &in.SecretRefRBACNamespaces, &out.SecretRefRBACNamespaces
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.SchemaWarnings != nil {
 		in, out := &in.SchemaWarnings, &out.SchemaWarnings
 		*out = make([]string, len(*in))

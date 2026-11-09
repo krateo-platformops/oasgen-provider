@@ -618,6 +618,44 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		}
 	}
 
+	// THE SAME TWO CHECKS FOR THE secretRef GRANT (#510), and deliberately NOT inside the configurationGVR
+	// gate above: these references come from instances of the GENERATED Kind, which exists whether or not the
+	// RestDefinition has a Configuration CRD at all.
+	//
+	// Without these, syncSecretRefRBAC is unreachable in the normal flow. It runs only from Create and
+	// Update; the generated CRD is created INSIDE Create, so Create's collection always sees zero instances;
+	// and nothing else triggers Update. Measured on a cluster before this existed: 8 CRs in 7 namespaces,
+	// zero Roles, empty status, no log lines.
+	//
+	// A FAILED EVALUATION IS NOT DRIFT, matching every other check in this function.
+	if deploy.DeclaresSecretRef(cr.Spec.Resource.VerbsDescription) {
+		generatedGVK := secretRefGeneratedGVK(cr, gvr)
+		if refs, cerr := deploy.CollectSecretRefNamesForAll(ctx, e.kube, generatedGVK, cr.Spec.Resource.VerbsDescription, e.log); cerr != nil {
+			e.log.Debug("Could not collect secretRef secret names for drift check; skipping", "error", cerr)
+		} else if h, herr := deploy.AuthSecretRefsDigest(refs); herr != nil {
+			e.log.Debug("Could not hash secretRef secret names for drift check; skipping", "error", herr)
+		} else if cr.Status.SecretRefDigest != h {
+			e.log.Debug("secretRef secret names changed", "status", cr.Status.SecretRefDigest, "current", h)
+			return e.observeDrift(cr, "the secretRef resolvers of this kind's instances reference a different "+
+				"set of Secrets; reprovisioning their RBAC")
+		}
+	}
+
+	// AND THE OBJECTS THEMSELVES, for the same reason as #473: the digest cannot express "does the Role
+	// exist", so a Role deleted by hand or lost to a namespace rebuild would leave this check satisfied and
+	// Update unreachable.
+	if len(cr.Status.SecretRefRBACNamespaces) > 0 && deploy.DeclaresSecretRef(cr.Spec.Resource.VerbsDescription) {
+		roleName := deploy.SecretRefRoleName(gvr)
+		if missing, merr := deploy.MissingAuthSecretRBAC(ctx, e.kube, roleName, cr.Status.SecretRefRBACNamespaces); merr != nil {
+			e.log.Debug("Could not check secretRef RBAC for drift; skipping", "error", merr)
+		} else if len(missing) > 0 {
+			e.log.Debug("secretRef RBAC is missing", "role", roleName, "namespaces", missing)
+			return e.observeDrift(cr, fmt.Sprintf(
+				"the secretRef RBAC %q is missing in namespace(s) %s, so the controller cannot read the "+
+					"Secrets its resolvers name; reprovisioning", roleName, strings.Join(missing, ", ")))
+		}
+	}
+
 	// Before a version-scoped controller starts watching, make sure the instances it is supposed to own
 	// actually carry the label it selects on. Reported, not fatal: failing the reconcile here would stop a
 	// working resource over a migration concern, and the next pass retries.
@@ -825,6 +863,15 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	// grants nothing until it does, which is the window Deploy then closes.
 	if err := e.syncAuthSecretRBAC(ctx, cr, gvr); err != nil {
 		return fmt.Errorf("syncing auth secret RBAC: %w", err)
+	}
+
+	// #510, and deliberately NOT folded into the call above. The two grants are collected from different
+	// kinds -- auth refs from the Configuration Kind, secretRef targets from the GENERATED Kind -- and
+	// SyncAuthSecretRBAC revokes any namespace in the caller's record that its collected set no longer
+	// names. Sharing either the Role name or the status field between them makes each caller revoke the
+	// other's namespaces on every reconcile.
+	if err := e.syncSecretRefRBAC(ctx, cr, gvr); err != nil {
+		return fmt.Errorf("syncing secretRef RBAC: %w", err)
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -1290,6 +1337,15 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 		return fmt.Errorf("syncing auth secret RBAC: %w", err)
 	}
 
+	// #510, and deliberately NOT folded into the call above. The two grants are collected from different
+	// kinds -- auth refs from the Configuration Kind, secretRef targets from the GENERATED Kind -- and
+	// SyncAuthSecretRBAC revokes any namespace in the caller's record that its collected set no longer
+	// names. Sharing either the Role name or the status field between them makes each caller revoke the
+	// other's namespaces on every reconcile.
+	if err := e.syncSecretRefRBAC(ctx, cr, gvr); err != nil {
+		return fmt.Errorf("syncing secretRef RBAC: %w", err)
+	}
+
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
 	if err != nil {
 		return fmt.Errorf("installing controller: %w", err)
@@ -1465,6 +1521,14 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 		e.log.Warn("Tearing down auth secret RBAC failed; a Role and RoleBinding may be left behind, and "+
 			"nothing records which namespaces needed cleaning once this object is gone",
 			"kind", cr.Spec.Resource.Kind, "group", cr.Spec.ResourceGroup, "error", terr)
+	}
+
+	// #510. Separate record, separate Role name, so this removes only what syncSecretRefRBAC provisioned.
+	// Delete is the last pass over this resource: a Role left here is permanent, and it grants read access
+	// on real Secrets to a ServiceAccount that is about to stop existing.
+	if terr := e.teardownSecretRefRBAC(ctx, cr, gvr); terr != nil {
+		e.log.Warn("Removing secretRef RBAC failed (non-fatal); an orphaned Role may still grant secret "+
+			"access to a deleted ServiceAccount", "error", terr, "namespaces", cr.Status.SecretRefRBACNamespaces)
 	}
 
 	e.log.Debug("Deleting RestDefinition", "Kind:", cr.Spec.Resource.Kind, "Group:", cr.Spec.ResourceGroup)

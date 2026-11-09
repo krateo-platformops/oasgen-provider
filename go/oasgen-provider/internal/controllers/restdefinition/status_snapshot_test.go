@@ -26,6 +26,8 @@ func fullyPopulatedStatus() definitionv1alpha1.RestDefinitionStatus {
 		ResourceHash:             "sha256:resource",
 		AuthSecretDigest:         "sha256:authsecret",
 		AuthSecretRBACNamespaces: []string{"ns-a", "ns-b"},
+		SecretRefRBACNamespaces:  []string{"ns-secretref-a", "ns-secretref-b"},
+		SecretRefDigest:          "sha256:secretref-digest-fixture",
 		GeneratorBuild:           "0.53.0-abc1234",
 		SchemaWarnings:           []string{"generation error: field 'spec.id' set in excludedSpecFields not found in schema"},
 	}
