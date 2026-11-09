@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-11-08T00:00:00Z
+timestamp: 2026-11-09T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,85 @@ timestamp: 2026-11-08T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-09 — 0.56.0
+
+**Every resource using a `secretRef` field mapping has been unable to reconcile since 0.53.0. This release fixes that, and makes a Secret-sourced field conditional so a resource that legitimately lacks one can exist at all.** Both halves were verified on a live cluster by the consumer who reported them.
+
+### A secretRef Secret is readable again
+
+0.54.0 removed a blanket cluster-wide secrets grant, on the stated grounds that the narrow per-Secret Role already covered the same ground. **It did not.** The narrow Role was built from Configuration-level authentication references only, so every Secret named by a `secretRef` field-mapping resolver lost its grant. A consumer measured **25 of 36 kinds no longer reconciling** (#510).
+
+rest-dynamic-controller had been provisioning that Role itself, and cannot: **a subject cannot grant itself less than nothing.** Self-imposed least privilege needs a broader grant to narrow *from*, and that is what 0.54.0 removed. The provider now does it (#527):
+
+```
+collected from   every live instance of the generated Kind, grouped by namespace -- because
+                 secretRef names live in the CRs, not in the RestDefinition, so a per-definition
+                 collector cannot size the grant
+Role name        <plural>-<group>-v1alpha1-secretrefs, SEPARATE from the auth Role's
+status record    status.secretRefRBACNamespaces, SEPARATE from the auth path's
+provisioned at   Create and Update; revoked when a namespace's last instance goes; torn down on
+                 RestDefinition delete
+```
+
+**The separation is load-bearing rather than tidiness.** The shared provisioner revokes the Role in every namespace that is in the caller's record and no longer in its collected set — so two callers sharing either the name or the record would delete each other's namespaces on every reconcile, with a symptom (a credential readable one moment and `Forbidden` the next) that no single-caller test can observe.
+
+**Lenient about a resource's data, strict about a definition's.** An instance whose paths cannot be read contributes no names and is logged, because one malformed resource must not cost every other resource of the kind its credential. A path that is not a valid field path at all affects every resource of the kind, so it fails the reconcile.
+
+**Four Debug lines distinguish the cases a narrow Role hinges on.** An absent credential *entry* and a present entry with an absent *reference* both read as "nothing there" at the leaf, so the collector resolves the path's **anchor** — the prefix up to its last selector — to tell them apart.
+
+**Timing, measured on a cluster**: 8 resources across 7 namespaces provisioned in **62 s**; a deleted resource's Secret revoked in **101 s**; a hand-deleted Role reprovisioned in **184 s**; teardown on delete within **6 s**, before any poll.
+
+### A Secret-sourced field can now be conditional
+
+A `secretRef` resolver was unconditional. A kind mapping two credentials from two Secrets — a password and a one-time-password seed — could therefore never create a resource carrying only one of them: the absent mapping's path was unresolvable and the create hard-errored (#524).
+
+```yaml
+resolver:
+  type: secretRef
+  when:
+    customResourceFieldPresent: spec.credentials[?type=otp]
+  secretRef:
+    nameFromCustomResource: spec.credentials[?type=otp].secretDataSecretRef.name
+```
+
+```
+no `when`                    unconditional -- every definition written before this is unaffected
+the path RESOLVES            the mapping resolves, as today
+the path is ABSENT or NULL   the mapping is SKIPPED: no Secret read, nothing sent
+the path is AMBIGUOUS        an ERROR, naming the guard
+```
+
+**An entry present with its reference missing still fails loudly**, because the guard is satisfied and the reference becomes required. **Only a missing entry skips.** The distinction is the point: a guard that swallowed a malformed entry would turn it into a silently reduced resource, which is the outcome the guard exists to prevent.
+
+**The guard suppresses the vendor call, not only the mapping.** The pass that decides which dependent lookups to run consults it too — without that, a guarded mapping still made its request and discarded the result, and a *failed* request would have failed the whole reconcile for a mapping the definition says does not apply.
+
+### What this release does NOT contain
+
+```
+prompt revocation      provisioning and revocation are bounded by the drift poll -- 3 minutes at
+                       the default OASGEN_PROVIDER_POLL_INTERVAL, 101 s measured. Nothing watches
+                       the generated Kind, so a deleted resource's Secret stays readable until the
+                       next poll. The DELETION direction is the security-relevant one. (#510, open)
+an explicit field manager   every Role is applied with no FieldManager, so the API server derives a
+                       generic name. A consumer's managedFields read shows manager="manager".
+                       Two writers that both omit one can collapse into a single entry, which is
+                       exactly what a provenance read is meant to detect. (#510, open)
+a lowercase kind       a RestDefinition whose spec.resource.kind is not capitalised generates a CRD
+                       that nothing reconciles: the controller's definition lookup compares the raw
+                       spelling against the served Kind. The provider half is fixed here; the
+                       controller half is not. (#530)
+generation-time validation   a resolver's configuration is validated only when a resource causes it
+                       to be resolved, so a guarded mapping can hide a malformed definition
+                       indefinitely. The skip decides whether we RESOLVE, never whether the
+                       definition is VALID. (#533)
+```
+
+### Upgrade notes
+
+**Move the provider and the CRDs chart together.** The release adds three CRD fields (`status.secretRefRBACNamespaces`, `status.secretRefDigest`, `spec…resolver.when`). If `oasgen-provider-crds` lags the provider, the API server **prunes** them: `kubectl apply` succeeds, the stored object lacks the field, and only the resource fails. For a kind with a `secretRef` resolver a pruned digest means a redeploy every poll **and** a revocation that silently becomes a no-op; for a kind without one, nothing. **Verify by reading the field back from the live object, not by checking that apply succeeded.**
+
+**`status.secretRefDigest` is written for every kind**, including those with no `secretRef` resolver — the digest of an empty set is a non-empty constant. `status.secretRefRBACNamespaces` is omitted when empty.
 
 ## 2026-11-08 — 0.55.0
 
