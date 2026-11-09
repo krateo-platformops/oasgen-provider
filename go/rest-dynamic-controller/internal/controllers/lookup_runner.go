@@ -101,6 +101,23 @@ func neededLookupNames(
 		if m.Resolver == nil || m.Resolver.Type != "dependentLookup" || m.Resolver.DependentLookup == nil {
 			continue
 		}
+		// THE RESOLVER-LEVEL GUARD FIRST (#524). Without this, a mapping whose `when` says it does not
+		// apply still marks its lookup as needed -- so the vendor call is made, and its result is then
+		// discarded when ResolveRequestResolvers skips the mapping.
+		//
+		// NOT MERELY WASTEFUL. If that call fails -- a vendor 404, an auth refusal, a timeout -- the whole
+		// reconcile fails, for a mapping the definition says does not apply to this resource. A guard that
+		// cannot prevent the request it exists to avoid is not a guard.
+		//
+		// Found by investigating my own flagged uncertainty rather than by a test: nothing here exercised a
+		// dependentLookup with a resolver-level guard, because the field did not exist until #524.
+		resolverSkip, err := resolverGuardSkipsForLookup(m.Resolver.When, mg)
+		if err != nil {
+			return nil, err
+		}
+		if resolverSkip {
+			continue
+		}
 		skip, err := lookupGuardSatisfied(m.Resolver.DependentLookup.When, mg)
 		if err != nil {
 			return nil, err
@@ -133,6 +150,27 @@ func neededLookupNames(
 
 // lookupGuardSatisfied reports whether the guard means the lookup can be SKIPPED, i.e. the CR already
 // carries the value. A nil guard never skips.
+// resolverGuardSkipsForLookup answers the resolver-level `when` for the lookup-selection pass.
+//
+// It mirrors fieldmapping.resolverGuardSkips deliberately rather than calling it: that one is unexported,
+// and duplicating four lines is better than exporting a predicate whose two call sites must agree. THEY
+// MUST AGREE -- if this said "resolve" where the resolver says "skip", a lookup would run whose value is
+// then discarded, and the reverse would send a request with a field the definition requires.
+func resolverGuardSkipsForLookup(when *getter.ResolverWhen, mg *unstructured.Unstructured) (bool, error) {
+	if when == nil || when.CustomResourceFieldPresent == "" {
+		return false, nil
+	}
+	segments, err := pathparsing.ParsePath(when.CustomResourceFieldPresent)
+	if err != nil || len(segments) == 0 {
+		return false, fmt.Errorf("invalid when.customResourceFieldPresent path %q", when.CustomResourceFieldPresent)
+	}
+	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
+	if err != nil {
+		return false, fmt.Errorf("reading when.customResourceFieldPresent %q: %w", when.CustomResourceFieldPresent, err)
+	}
+	return !found || val == nil, nil
+}
+
 func lookupGuardSatisfied(when *getter.LookupWhen, mg *unstructured.Unstructured) (bool, error) {
 	if when == nil || when.CustomResourceFieldAbsent == "" {
 		return false, nil
