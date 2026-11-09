@@ -118,6 +118,7 @@ func Setup(mgr ctrl.Manager, o controller.Options, metrics reconciler.MetricsRec
 		disc:     discovery,
 		parser:   oas2jsonschema.NewLibOASParser(),
 		cfgWatch: dynamicwatch.NewRegistry(mgr.GetCache()),
+		genWatch: dynamicwatch.NewRegistry(mgr.GetCache()),
 		genCfg:   genCfg,
 	}
 
@@ -227,6 +228,7 @@ type connector struct {
 	// with its own generated Configuration Kind); ctrl is the handle Watch is called on, captured from
 	// Build in Setup once the controller exists.
 	cfgWatch *dynamicwatch.Registry
+	genWatch *dynamicwatch.Registry
 	ctrl     crcontroller.Controller
 	genCfg   GeneratorConfig
 }
@@ -249,6 +251,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		disc:     c.disc,
 		parser:   c.parser,
 		cfgWatch: c.cfgWatch,
+		genWatch: c.genWatch,
 		ctrl:     c.ctrl,
 		genCfg:   c.genCfg,
 	}, nil
@@ -263,6 +266,7 @@ type external struct {
 	disc     discovery.DiscoveryInterface
 	parser   oas2jsonschema.Parser
 	cfgWatch *dynamicwatch.Registry
+	genWatch *dynamicwatch.Registry
 	ctrl     crcontroller.Controller
 	genCfg   GeneratorConfig
 }
@@ -279,6 +283,72 @@ type external struct {
 // compositionmirror.go, which this mechanism is modeled on). A watch on a Configuration Kind whose
 // RestDefinition is later deleted is harmless (its informer idles) but is never released for the life of
 // the process.
+// ensureGeneratedKindWatch registers a dynamic watch on the Kind this RestDefinition generates, so an
+// instance appearing or being deleted enqueues the RestDefinition (issue 510).
+//
+// WITHOUT IT, BOTH DIRECTIONS WAIT FOR THE DRIFT POLL. Nothing else enqueues a RestDefinition when an
+// instance of its generated Kind changes: For() watches the RestDefinition itself and
+// ensureConfigurationWatch watches the Configuration Kind. So the secretRef grant was provisioned and
+// REVOKED only on the next poll -- 3 minutes at the default, measured at 61-101 s on a consumer's cluster.
+//
+// THE DELETION DIRECTION IS THE SECURITY-RELEVANT ONE. A deleted resource's Secret stays readable by the
+// controller's ServiceAccount until the poll comes round. Provisioning late is an availability delay;
+// revoking late is a grant outliving the resource that justified it.
+//
+// A SEPARATE REGISTRY from cfgWatch. The registry dedupes by GVK and a Configuration Kind can never
+// collide with a generated Kind, so sharing one would work -- but a deferred registration logs the same
+// way for both, and the two have different consequences. Separate registries keep the log line attributable.
+//
+// Same "no unwatch" caveat as the Configuration watch: controller-runtime cannot remove a registered
+// source from a running controller, so a watch on a generated Kind whose RestDefinition is later deleted
+// idles for the life of the process.
+func (e *external) ensureGeneratedKindWatch(cr *definitionv1alpha1.RestDefinition, gvr schema.GroupVersionResource) {
+	if e.ctrl == nil || e.genWatch == nil {
+		return // not wired for dynamic watches (e.g. under unit tests)
+	}
+	gvk := secretRefGeneratedGVK(cr, gvr)
+	if gvk.Kind == "" {
+		return
+	}
+	if err := e.genWatch.EnsureWatch(e.ctrl, gvk, enqueueRestDefinitionForGeneratedKind(e.kube)); err != nil {
+		e.log.Debug("Dynamic watch registration on generated Kind deferred", "gvk", gvk.String(), "error", err)
+	}
+}
+
+// enqueueRestDefinitionForGeneratedKind maps an instance event to the reconcile of the RestDefinition whose
+// generated Kind it belongs to.
+//
+// THE GVK IS COMPUTED THE SAME WAY EVERYWHERE, via secretRefGeneratedGVK, which capitalises the
+// author-written spec.resource.kind. A raw comparison here would silently match nothing for a definition
+// whose kind is not capitalised -- exactly the defect a reviewer found in the collector, and the one
+// rest-dynamic-controller's own definition lookup still carries (#530).
+//
+// The version comes from observedVersion, not from re-deriving it: Observe and the collector both use the
+// DEPLOYED version, and a mid-flight bump would otherwise make the watch disagree with them about which
+// Kind an instance belongs to.
+func enqueueRestDefinitionForGeneratedKind(kube client.Client) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		var rds definitionv1alpha1.RestDefinitionList
+		if err := kube.List(ctx, &rds); err != nil {
+			return nil
+		}
+		gvk := obj.GetObjectKind().GroupVersionKind()
+		var reqs []reconcile.Request
+		for i := range rds.Items {
+			rd := &rds.Items[i]
+			rdGVR := plurals.ToGroupVersionResource(schema.GroupVersionKind{
+				Group:   rd.Spec.ResourceGroup,
+				Version: observedVersion(rd),
+				Kind:    rd.Spec.Resource.Kind,
+			})
+			if secretRefGeneratedGVK(rd, rdGVR) == gvk {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rd)})
+			}
+		}
+		return reqs
+	}
+}
+
 func (e *external) ensureConfigurationWatch(cr *definitionv1alpha1.RestDefinition) {
 	if e.ctrl == nil || e.cfgWatch == nil {
 		return // not wired for dynamic watches (e.g. under unit tests)
@@ -880,6 +950,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	}
 	if configurationGVR != (schema.GroupVersionResource{}) {
 		e.ensureConfigurationWatch(cr)
+		e.ensureGeneratedKindWatch(cr, gvr)
 	}
 
 	// Prune served versions superseded by this one that are safe to drop without migrating any instance
@@ -1352,6 +1423,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	}
 	if configurationGVR != (schema.GroupVersionResource{}) {
 		e.ensureConfigurationWatch(cr)
+		e.ensureGeneratedKindWatch(cr, gvr)
 	}
 
 	// Prune served versions superseded by this one that are safe to drop without migrating any instance
