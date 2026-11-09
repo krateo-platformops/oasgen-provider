@@ -39,7 +39,7 @@ provisioned at   Create and Update; revoked when a namespace's last instance goe
 
 **Four Debug lines distinguish the cases a narrow Role hinges on.** An absent credential *entry* and a present entry with an absent *reference* both read as "nothing there" at the leaf, so the collector resolves the path's **anchor** — the prefix up to its last selector — to tell them apart.
 
-**Timing, measured on a cluster**: 8 resources across 7 namespaces provisioned in **62 s**; a deleted resource's Secret revoked in **101 s**; a hand-deleted Role reprovisioned in **184 s**; and a hand-deleted Role reprovisioned in **184 s**.
+**Timing, measured on a cluster**: 8 resources across 7 namespaces provisioned in **62 s**; a deleted resource's Secret revoked in **101 s**; a hand-deleted Role reprovisioned in **184 s**.
 
 **The teardown figure needs a caveat, which a consumer found by asking how to reproduce it.** A RestDefinition delete is REFUSED while instances of its generated Kind exist — correctly, and the code states the contract: *"the RestDefinition keeps its finalizer and the CRD, its CRs and their external resources all survive."* So the secretRef Role cannot coexist with a RestDefinition delete in progress: by the time the delete proceeds, the last instance is gone and the Role has already been revoked by the namespace path.
 
