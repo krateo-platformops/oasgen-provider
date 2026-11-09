@@ -144,17 +144,27 @@ func CollectSecretRefNames(verbs []getter.VerbsDescription, mg *unstructured.Uns
 	return names
 }
 
-// readAnyPath reads the raw value at path, whatever its JSON type. The path may index into an array (e.g.
-// "credentials[0].value" or "credentials.0.value") as well as nest through maps.
+// readAnyPath reads the raw value at path, whatever its JSON type. The path may index into an array
+// ("credentials[0].value") and select an element by field ("credentials[?type=otp].value") as well as
+// nest through maps.
+//
+// THE DOTTED INDEX FORM IS GONE, and this comment used to document it: "credentials.0.value" resolved
+// here for as long as this read went through the flat walker, which asks the DATA what "0" means and
+// indexes an array with it. The typed walker asks the PATH, and a bare dotted segment parses as a KEY --
+// indistinguishable from the explicitly quoted "credentials['0'].value", which was always meant to be
+// refused. So the two spellings cannot be separated after parsing and both are now refused on a custom
+// resource. The walker's own error states the migration: use [0] without quotes if you meant an index.
+//
+// A body path is unaffected; those still go through the flat walker. See pathparsing/typed.go.
 func readAnyPath(mg *unstructured.Unstructured, path string) (interface{}, error) {
-	segments, err := pathparsing.ParsePath(path)
+	segments, err := pathparsing.ParseTyped(path)
 	if err != nil {
 		return nil, fmt.Errorf("invalid path %q: %w", path, err)
 	}
 	if len(segments) == 0 {
 		return nil, fmt.Errorf("invalid path %q: it names no field", path)
 	}
-	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
+	val, found, err := pathparsing.GetTyped(mg.Object, segments)
 	if err != nil {
 		// NOT "not found". The walker distinguishes "this path cannot apply here" from "nothing is
 		// there", and collapsing the two reported a duplicate [?key=value] match -- which matches
@@ -169,14 +179,14 @@ func readAnyPath(mg *unstructured.Unstructured, path string) (interface{}, error
 }
 
 func readStringPath(mg *unstructured.Unstructured, path string) (string, error) {
-	segments, err := pathparsing.ParsePath(path)
+	segments, err := pathparsing.ParseTyped(path)
 	if err != nil {
 		return "", fmt.Errorf("invalid path %q: %w", path, err)
 	}
 	if len(segments) == 0 {
 		return "", fmt.Errorf("invalid path %q: it names no field", path)
 	}
-	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
+	val, found, err := pathparsing.GetTyped(mg.Object, segments)
 	if err != nil {
 		return "", fmt.Errorf("path %q cannot be read on the custom resource: %w", path, err)
 	}
@@ -209,14 +219,14 @@ func resolverGuardSkips(when *getter.ResolverWhen, mg *unstructured.Unstructured
 	if when == nil || when.CustomResourceFieldPresent == "" {
 		return false, nil
 	}
-	segments, err := pathparsing.ParsePath(when.CustomResourceFieldPresent)
+	segments, err := pathparsing.ParseTyped(when.CustomResourceFieldPresent)
 	if err != nil {
 		return false, fmt.Errorf("invalid path %q: %w", when.CustomResourceFieldPresent, err)
 	}
 	if len(segments) == 0 {
 		return false, fmt.Errorf("invalid path %q: it names no field", when.CustomResourceFieldPresent)
 	}
-	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
+	val, found, err := pathparsing.GetTyped(mg.Object, segments)
 	if err != nil {
 		// Ambiguous or inapplicable -- NOT an absence. See the note above.
 		return false, fmt.Errorf("path %q cannot be read on the custom resource: %w",
@@ -233,11 +243,11 @@ func guardSkips(when *getter.LookupWhen, mg *unstructured.Unstructured) (bool, e
 	if when == nil || when.CustomResourceFieldAbsent == "" {
 		return false, nil
 	}
-	segments, err := pathparsing.ParsePath(when.CustomResourceFieldAbsent)
+	segments, err := pathparsing.ParseTyped(when.CustomResourceFieldAbsent)
 	if err != nil || len(segments) == 0 {
 		return false, fmt.Errorf("invalid when.customResourceFieldAbsent path %q", when.CustomResourceFieldAbsent)
 	}
-	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
+	val, found, err := pathparsing.GetTyped(mg.Object, segments)
 	if err != nil {
 		return false, fmt.Errorf("reading when.customResourceFieldAbsent %q: %w", when.CustomResourceFieldAbsent, err)
 	}

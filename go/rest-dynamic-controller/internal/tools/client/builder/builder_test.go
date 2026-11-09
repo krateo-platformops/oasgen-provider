@@ -1533,12 +1533,12 @@ func TestBuildCallConfig_FieldMappingPrecedesAutoPopulation(t *testing.T) {
 func TestBuildCallConfig_ResolverSourceStrippedFromBody(t *testing.T) {
 	resolverEntry := getter.FieldMappingItem{
 		InBody:           "credentials.0.value",
-		InCustomResource: "spec.credentials.0.valueSecretRef",
+		InCustomResource: "spec.credentials[0].valueSecretRef",
 		Resolver: &getter.FieldResolver{
 			Type: "secretRef",
 			SecretRef: &getter.SecretRefResolver{
-				NameFromCustomResource: "spec.credentials.0.valueSecretRef.name",
-				KeyFromCustomResource:  "spec.credentials.0.valueSecretRef.key",
+				NameFromCustomResource: "spec.credentials[0].valueSecretRef.name",
+				KeyFromCustomResource:  "spec.credentials[0].valueSecretRef.key",
 			},
 		},
 	}
@@ -1597,8 +1597,12 @@ func TestBuildCallConfig_FieldMappingKeepsUnmappedSiblings(t *testing.T) {
 			Body: text.StringSet{"credentials": {}, "username": {}},
 		},
 		FieldMapping: []getter.FieldMappingItem{
-			{InBody: "credentials.0.value", InCustomResource: "spec.credentials.0.pw"},
-			{InBody: "credentials.1.secretData", InCustomResource: "spec.credentials.1.seed"},
+			// The CUSTOM-RESOURCE side uses bracket indices and the BODY side keeps the dotted form,
+			// deliberately: a CR read goes through the typed walker, which refuses a KEY against an
+			// array, while a body WRITE still goes through the flat one, which accepts "0" as an index.
+			// The asymmetry is real until plumbing ships a typed Set -- see typed.go.
+			{InBody: "credentials.0.value", InCustomResource: "spec.credentials[0].pw"},
+			{InBody: "credentials.1.secretData", InCustomResource: "spec.credentials[1].seed"},
 		},
 	}
 	mg := &unstructured.Unstructured{

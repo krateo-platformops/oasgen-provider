@@ -226,12 +226,12 @@ func applyRequestFieldMapping(callInfo *CallInfo, mg *unstructured.Unstructured,
 
 	// Iterate over the request field mappings
 	for _, mapping := range callInfo.RequestFieldMapping {
-		pathSegments, err := pathparsing.ParsePath(mapping.InCustomResource)
+		pathSegments, err := pathparsing.ParseTyped(mapping.InCustomResource)
 		if len(pathSegments) == 0 {
 			continue
 		}
 
-		val, found, err := pathparsing.GetNestedField(mg.Object, pathSegments)
+		val, found, err := pathparsing.GetTyped(mg.Object, pathSegments)
 		if err != nil || !found {
 			continue
 		}
@@ -348,11 +348,11 @@ func applyFieldMapping(ctx context.Context, callInfo *CallInfo, mg *unstructured
 				}
 			}
 		} else {
-			pathSegments, err := pathparsing.ParsePath(mapping.InCustomResource)
+			pathSegments, err := pathparsing.ParseTyped(mapping.InCustomResource)
 			if err != nil || len(pathSegments) == 0 {
 				continue
 			}
-			v, found, err := pathparsing.GetNestedField(mg.Object, pathSegments)
+			v, found, err := pathparsing.GetTyped(mg.Object, pathSegments)
 			if err != nil || !found {
 				continue
 			}
