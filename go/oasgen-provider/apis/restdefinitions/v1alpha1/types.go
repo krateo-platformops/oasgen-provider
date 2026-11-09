@@ -294,6 +294,46 @@ type FieldResolver struct {
 	// 'dependentLookup'). The named lookup is declared in Resource.DependentLookups.
 	// +optional
 	DependentLookup *DependentLookupRef `json:"dependentLookup,omitempty"`
+	// When makes this resolver conditional on the Custom Resource carrying a field. Without it a resolver
+	// is unconditional, which is the behaviour every definition has today.
+	//
+	// AT THE RESOLVER LEVEL, not inside secretRef, and deliberately so: the guard is about whether this
+	// MAPPING applies, which is independent of which resolver kind supplies the value. DependentLookupRef
+	// keeps its own `when` (LookupWhen) at its existing path, so no published field moves.
+	// +optional
+	When *ResolverWhen `json:"when,omitempty"`
+}
+
+// ResolverWhen makes a resolver conditional on the shape of the Custom Resource.
+//
+// SEPARATE FROM LookupWhen, which guards a dependentLookup against running unnecessarily. The two differ
+// in polarity and in purpose: LookupWhen asks "has the author already supplied this, so I can skip an API
+// call", and its field is +required. This one asks "does this mapping apply to this CR at all". Reusing
+// LookupWhen here would have required customResourceFieldAbsent on every resolver that wanted a guard.
+type ResolverWhen struct {
+	// CustomResourceFieldPresent resolves this mapping only when this path resolves to a non-null value on
+	// the Custom Resource. When the path is absent or explicitly null, the whole mapping is SKIPPED: no
+	// Secret is read and nothing is written to the request.
+	//
+	// An explicit null counting as absent is the existing convention (see LookupWhen): it is how a CR says
+	// "I am not supplying this".
+	//
+	// THE GUARD PATH IS A SEPARATE READ from the resolver's own paths. If the guard path is ambiguous --
+	// a [?key=value] selector matching more than one element -- that is an ERROR, not a skip. A skip would
+	// turn a malformed resource into one that silently reconciles without the guarded field, which is the
+	// exact outcome the guard exists to prevent.
+	//
+	// MinLength=1 BECAUSE AN EMPTY PATH SILENTLY DISABLES THE GUARD. The field is +required, so `when: {}`
+	// is already refused -- but `customResourceFieldPresent: ""` was admitted, and both evaluation sites
+	// treat an empty path as "no guard" and resolve unconditionally. So a templating accident that renders
+	// an empty string produced a definition that validates, shows the guard on `kubectl get`, and behaves
+	// as though it were absent. A reviewer found this; no test covered it, because an empty path reaches
+	// exactly the same code path as a nil guard.
+	//
+	// Safe as a tightening: this field has never shipped, so no existing definition can carry an empty one.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	CustomResourceFieldPresent string `json:"customResourceFieldPresent"`
 }
 
 // SecretRefResolver substitutes a Kubernetes Secret's value for the field. The Secret is always read from
