@@ -30,7 +30,7 @@ collected from   every live instance of the generated Kind, grouped by namespace
 Role name        <plural>-<group>-v1alpha1-secretrefs, SEPARATE from the auth Role's
 status record    status.secretRefRBACNamespaces, SEPARATE from the auth path's
 provisioned at   Create and Update; revoked when a namespace's last instance goes; torn down on
-                 RestDefinition delete
+                 RestDefinition delete -- the first two are measured, the third is not (see below)
 ```
 
 **The separation is load-bearing rather than tidiness.** The shared provisioner revokes the Role in every namespace that is in the caller's record and no longer in its collected set — so two callers sharing either the name or the record would delete each other's namespaces on every reconcile, with a symptom (a credential readable one moment and `Forbidden` the next) that no single-caller test can observe.
@@ -39,7 +39,11 @@ provisioned at   Create and Update; revoked when a namespace's last instance goe
 
 **Four Debug lines distinguish the cases a narrow Role hinges on.** An absent credential *entry* and a present entry with an absent *reference* both read as "nothing there" at the leaf, so the collector resolves the path's **anchor** — the prefix up to its last selector — to tell them apart.
 
-**Timing, measured on a cluster**: 8 resources across 7 namespaces provisioned in **62 s**; a deleted resource's Secret revoked in **101 s**; a hand-deleted Role reprovisioned in **184 s**; teardown on delete within **6 s**, before any poll.
+**Timing, measured on a cluster**: 8 resources across 7 namespaces provisioned in **62 s**; a deleted resource's Secret revoked in **101 s**; a hand-deleted Role reprovisioned in **184 s**; and a hand-deleted Role reprovisioned in **184 s**.
+
+**The teardown figure needs a caveat, which a consumer found by asking how to reproduce it.** A RestDefinition delete is REFUSED while instances of its generated Kind exist — correctly, and the code states the contract: *"the RestDefinition keeps its finalizer and the CRD, its CRs and their external resources all survive."* So the secretRef Role cannot coexist with a RestDefinition delete in progress: by the time the delete proceeds, the last instance is gone and the Role has already been revoked by the namespace path.
+
+**The measured 6 seconds is therefore an ABSENCE, not a removal** — it shows the Roles were gone 6 s after the RestDefinition delete, not that the teardown removed them. **The teardown code path for the secretRef Role is unobserved**, and structurally unobservable from outside for the reason above. The 6 s applies to the auth Role, which has no such constraint.
 
 ### A Secret-sourced field can now be conditional
 
