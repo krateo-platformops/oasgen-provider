@@ -18,6 +18,19 @@
 *.exe~
 *.dll
 *.so
+
+# Go binaries built IN PLACE. `go build` with no -o names its output after the package
+# DIRECTORY and gives it no extension, so none of the four patterns above can ever match one --
+# which is how a 69 MiB arm64 Mach-O binary came to be committed at
+# go/rest-dynamic-controller/rest-dynamic-controller and went unnoticed (#564).
+#
+# Listed by exact path rather than by bare name: a loose `rest-dynamic-controller` pattern would
+# also ignore the module DIRECTORY of that name, hiding the whole module from git.
+/go/oasgen-provider/oasgen-provider
+/go/oasgen-provider/oasgen-render
+/go/oasgen-provider/main
+/go/rest-dynamic-controller/rest-dynamic-controller
+/go/rest-dynamic-controller/main
 *.dylib
 *.dat
 *.DS_Store
