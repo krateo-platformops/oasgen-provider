@@ -1694,19 +1694,99 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 	// that error would hold the finalizer on EVERY retry: the CR would sit in Deleting forever and block its
 	// namespace with it. Release the finalizer instead.
 	//
-	// Warn rather than debug: the identifier can also go missing on a resource that DOES exist (e.g. status
-	// was lost), and that case orphans the external resource. Holding the finalizer would not save it —
-	// nothing can re-derive the identifier — so the operator needs to see it, not be blocked by it.
+	// "NOTHING CAN RE-DERIVE THE IDENTIFIER" WAS FALSE, AND IT WAS THE WHOLE OF #548.
+	//
+	// This branch used to release unconditionally, on the premise above. It is wrong twice over:
+	//
+	//   * the kind may declare FINDBY, whose identifiers routinely live on spec -- a username, a name --
+	//     and are still there at delete time. The controller holds everything it needs to find the object.
+	//   * and this controller HAS ALREADY DONE IT. unstructured-runtime's incomplete-create recovery
+	//     (worker.go:552) calls externalResourceExists, which prefers our ExistenceChecker, whose
+	//     implementation answers the not-addressable case by running findby -- and on success the runtime
+	//     writes SetExternalCreateSucceeded. So in the window this issue is about, the controller resolved
+	//     the resource by findby, recorded that it had, and this line then released the finalizer without
+	//     consulting either the note or the mechanism.
+	//
+	// Measured by keycloak-provider-kog on two versions with a control: a CR deleted in the window between
+	// its create landing at the vendor and its identifier reaching status left an ENABLED Keycloak user
+	// with a working password after the CR was gone. The window needs nothing unusual to have gone wrong --
+	// the create lands before status is written, so a `kubectl delete` moments after an apply is enough.
+	//
+	// The branch is ALSO reached in the common case it was written for, a create that never succeeded,
+	// where releasing is correct. The two were indistinguishable here, which is why one honest behaviour
+	// was chosen for both; the create-tracking annotations distinguish them, so now they are.
 	if missing := pathparsing.UnresolvedPathParams(callInfo.Path, reqConfiguration.Parameters); len(missing) > 0 {
-		log.Warn("External resource is not addressable, releasing finalizer without calling the API",
-			"kind", mg.GetKind(), "path", callInfo.Path, "unresolvedPathParams", strings.Join(missing, ","))
-		if serr := unstructuredtools.SetConditions(mg, condition.Deleting()); serr != nil {
-			log.Warn("Setting condition", "error", serr)
+		outcome := classifyCreateOutcome(mg)
+		recovered := false
+		var recoveryErr error
+
+		if outcome == createSucceeded {
+			// A create landed, so something plausibly exists at the vendor. This is the only branch worth
+			// spending an API call on.
+			ok, rerr := h.recoverDeleteIdentifier(ctx, cs, clientInfo, mg, log)
+			recoveryErr = rerr
+			if ok {
+				// recoverDeleteIdentifier wrote the resolved identifier into status IN MEMORY. Rebuilding
+				// is what turns that into an addressable request, and it is re-checked rather than assumed:
+				// populateStatusFields writes the identifiers it was given, which need not be the ones this
+				// path binds.
+				if rebuilt := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved); rebuilt != nil {
+					if still := pathparsing.UnresolvedPathParams(callInfo.Path, rebuilt.Parameters); len(still) == 0 {
+						reqConfiguration = rebuilt
+						recovered = true
+						log.Info("Delete: the identifier was re-derived through findby, so the external resource is addressable after all",
+							"kind", mg.GetKind(), "name", mg.GetName(), "path", callInfo.Path)
+					} else {
+						recoveryErr = fmt.Errorf("findby resolved an object but the delete path is still unresolved (%v)", still)
+					}
+				} else {
+					recoveryErr = fmt.Errorf("findby resolved an object but the delete call configuration could not be rebuilt")
+				}
+			}
 		}
-		if derr := h.deleteSecretRefRBAC(ctx, mg); derr != nil {
-			log.Warn("secretRef RBAC teardown failed, continuing", "error", derr)
+
+		if !recovered {
+			// RELEASE, ALWAYS. Holding the finalizer here would turn one vendor hiccup into a CR that
+			// cannot be deleted and a namespace that cannot be emptied -- measured by a consumer as
+			// requiring a human. An orphan that is REPORTED is recoverable; an undeletable CR is not.
+			//
+			// What is reported depends on whether anything can actually have been left behind, because a
+			// signal that fires when nothing is wrong is one nobody reads:
+			//
+			//   createSucceeded + an error   -> an object may exist and we could not address it. ORPHAN.
+			//   createSucceeded + no error   -> the VENDOR said not-found. Proven absent; nothing to say.
+			//   never attempted / failed     -> no create landed under this CR. Nothing to orphan.
+			//   incomplete                   -> unreachable; see classifyCreateOutcome.
+			if shouldReportPossibleOrphan(outcome, recoveryErr) {
+				ids := identifierSummary(clientInfo, mg)
+				log.Warn("External resource may survive this deletion: a create succeeded but the resource could not be addressed or re-derived",
+					"kind", mg.GetKind(), "name", mg.GetName(), "identifiers", ids,
+					"unresolvedPathParams", strings.Join(missing, ","), "error", recoveryErr.Error())
+				// The EVENT is the durable artifact, not a condition: the CR is deleted in this same pass,
+				// so a condition set here would live for milliseconds. involvedObject plus the kind, name
+				// and namespace repeated in the text, because the object will not exist when this is read.
+				//
+				// Identifiers come from the CR and never from the vendor's response.
+				h.eventRecorder.Event(mg, event.Warning(reasonPossibleOrphan, "Delete", fmt.Errorf(
+					"released %s/%s in namespace %q while its external resource may still exist: the create "+
+						"succeeded but the resource could not be addressed (%s) and findby could not re-derive "+
+						"it (%v). Check the external system for an object matching these identifiers",
+					mg.GetKind(), mg.GetName(), mg.GetNamespace(), ids, recoveryErr)))
+			} else {
+				log.Warn("External resource is not addressable, releasing finalizer without calling the API",
+					"kind", mg.GetKind(), "path", callInfo.Path,
+					"unresolvedPathParams", strings.Join(missing, ","), "createOutcome", outcome.String())
+			}
+
+			if serr := unstructuredtools.SetConditions(mg, condition.Deleting()); serr != nil {
+				log.Warn("Setting condition", "error", serr)
+			}
+			if derr := h.deleteSecretRefRBAC(ctx, mg); derr != nil {
+				log.Warn("secretRef RBAC teardown failed, continuing", "error", derr)
+			}
+			return nil
 		}
-		return nil
+		// Recovered: fall through with a rebuilt, addressable request and delete the resource properly.
 	}
 
 	tb, terr := fieldmapping.ApplyRequestTransform(ctx, callInfo.RequestTransform, reqConfiguration.Body)
