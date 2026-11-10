@@ -65,6 +65,14 @@ func NewOASSchemaGeneratorFromSet(docs *DocumentSet, config *GeneratorConfig, re
 func (g *OASSchemaGenerator) Generate() (*GenerationResult, error) {
 	var generationWarnings []error
 
+	// A secretRef resolver aimed at a path or query parameter would put the Secret's value in the request
+	// URL. Refused outright, and FIRST: it is a property of the declaration alone, needs no schema, and
+	// there is no version of this definition worth generating. See refuseSecretRefInURL for why this is
+	// fatal where the sibling misconfigurations above are warnings (#555).
+	if err := g.refuseSecretRefInURL(); err != nil {
+		return nil, err
+	}
+
 	// Generate Spec Schema
 	specSchema, warnings, err := g.BuildSpecSchema()
 	if err != nil {

@@ -995,26 +995,63 @@ func mappingSuppliedParams(verbs []Verb) suppliedParams {
 	}
 	for _, verb := range verbs {
 		for _, m := range verb.FieldMapping {
-			// A request-direction entry names its source in the CR. An entry with no source is a
-			// response-direction mapping (inResponse -> inCustomResource) or malformed; neither supplies a
-			// request parameter.
-			if m.InCustomResource == "" {
+			// A request-direction entry supplies its parameter either from a CR path or from a RESOLVER.
+			//
+			// The original enumeration here named two cases and believed them exhaustive -- "a
+			// response-direction mapping (inResponse -> inCustomResource) or malformed" -- and a third
+			// exists: an entry whose value comes from a `dependentLookup` names no CR field at all. It
+			// does supply the parameter; it just does not read it from the resource. So the parameter
+			// stayed a REQUIRED top-level spec field that the author cannot meaningfully set, and the
+			// only escape was excludedSpecFields, which is immutable once the CRD exists and warns only
+			// when it matches nothing (#555).
+			//
+			// CONDITIONAL RESOLVERS ARE DELIBERATELY NOT INCLUDED. A `when` guard means the mapping is
+			// skipped when the guard does not hold -- the API contract is explicit that then "no Secret
+			// is read and nothing is written to the request" -- so in that case the AUTHOR is the
+			// supplier. Omitting the property would leave the guard-false case with no way to provide
+			// the value, turning a merely-redundant required field into an unsatisfiable kind. That is
+			// the #419 shape (a rule removing its own source) arriving from a different direction, and
+			// the guard's path is a separate read that may name any property, so "the guard does not
+			// point at this parameter" does not make omission safe either.
+			//
+			// A conditional resolver's parameter therefore keeps today's behaviour: present and
+			// required. That is wrong in the milder way -- the author CAN satisfy it -- and un-requiring
+			// it without omitting it is a separate change with its own predicate.
+			resolverSupplies := m.ResolverType != "" && !m.ResolverHasWhen
+			if m.InCustomResource == "" && !resolverSupplies {
 				continue
 			}
 			// FIRST declaration wins the attribution, matching uniqueParams' own first-seen rule, so the
 			// warning names a stable verb across renders rather than whichever one verbsDescription
 			// happens to list last.
-			if m.InPath != "" && !selfReferentialSpecSource(m.InCustomResource, m.InPath) {
+			// THE SELF-REFERENTIAL EXEMPTION DOES NOT APPLY TO A RESOLVER, and that is its own reasoning
+			// rather than a convenience. #419 exempts `inCustomResource: spec.node_id` for {node_id}
+			// because suppressing the parameter would delete the very property the mapping READS, leaving
+			// the mapping to find nothing. A resolver does not read that property -- measured in the
+			// controller: a secretRef reads NameFromCustomResource/KeyFromCustomResource and a
+			// dependentLookup reads lookupValues[name], and m.InCustomResource appears there only inside
+			// error-message labels. So there is no source to destroy, and the exemption's premise is
+			// absent.
+			exempt := func(param string) bool {
+				return m.ResolverType == "" && selfReferentialSpecSource(m.InCustomResource, param)
+			}
+			src := func(in string) mappingSource {
+				if resolverSupplies && m.InCustomResource == "" {
+					return mappingSource{action: verb.Action, in: in, resolver: m.ResolverType}
+				}
+				return mappingSource{action: verb.Action, in: in, from: m.InCustomResource}
+			}
+			if m.InPath != "" && !exempt(m.InPath) {
 				k := boundParameterName(m.InPath)
 				if _, seen := supplied[k]; !seen {
-					supplied[k] = mappingSource{action: verb.Action, in: "path", from: m.InCustomResource}
+					supplied[k] = src("path")
 				}
 				note(k, verb.Action)
 			}
-			if m.InQuery != "" && !selfReferentialSpecSource(m.InCustomResource, m.InQuery) {
+			if m.InQuery != "" && !exempt(m.InQuery) {
 				k := boundParameterName(m.InQuery)
 				if _, seen := supplied[k]; !seen {
-					supplied[k] = mappingSource{action: verb.Action, in: "query", from: m.InCustomResource}
+					supplied[k] = src("query")
 				}
 				note(k, verb.Action)
 			}
@@ -1083,11 +1120,15 @@ func selfReferentialSpecSource(inCustomResource, param string) bool {
 // of it: a test that rebuilds the message passes whatever the real one says, which is the failure where a
 // rule and the artifact it produces are each verified alone and never against each other.
 func mappingRemovalMessage(param string, src mappingSource) string {
+	supplier := fmt.Sprintf("from %q", src.from)
+	if src.resolver != "" {
+		supplier = fmt.Sprintf("supplied by its %s resolver", src.resolver)
+	}
 	return fmt.Sprintf("parameter %q is omitted from the generated spec because verb %q supplies it with a "+
-		"request-direction fieldMapping (in%s, from %q), so it is not the author's to set. If a CR "+
+		"request-direction fieldMapping (in%s, %s), so it is not the author's to set. If a CR "+
 		"previously set %q, that value is now pruned by the API server rather than rejected. Remove it "+
 		"from the CR, or remove the fieldMapping if the author should supply it",
-		param, src.action, strings.ToUpper(src.in[:1])+src.in[1:], src.from, param)
+		param, src.action, strings.ToUpper(src.in[:1])+src.in[1:], supplier, param)
 }
 
 // mappingSource records WHICH mapping suppressed a parameter, so the warning can name the verb and the CR
@@ -1096,7 +1137,14 @@ func mappingRemovalMessage(param string, src mappingSource) string {
 type mappingSource struct {
 	action string
 	in     string // "path" or "query"
-	from   string // the inCustomResource path the value is taken from
+	from   string // the inCustomResource path the value is taken from; "" when resolver != ""
+	// resolver is the resolver KIND that supplies the value ("dependentLookup"), or "" when the value
+	// comes from a CR path. Exactly one of from/resolver is set.
+	//
+	// It exists because the warning has to say where the value comes from, and a resolver-supplied entry
+	// has NO CR path to name -- `from ""` would read as a mapping with an empty source, which is a
+	// different and worse thing to tell an author than "a resolver supplies it" (#555).
+	resolver string
 }
 
 func dropResolverSuppliedRequired(schema *Schema, verbs []Verb) {

@@ -25,8 +25,10 @@ func toDomainFieldMapping(v definitionv1alpha1.VerbsDescription) []oas2jsonschem
 			vmType = m.ValueMapping.Type
 		}
 		var lookupName, resolverType string
+		var resolverHasWhen bool
 		if m.Resolver != nil {
 			resolverType = m.Resolver.Type
+			resolverHasWhen = m.Resolver.When != nil
 			if m.Resolver.Type == "dependentLookup" && m.Resolver.DependentLookup != nil {
 				lookupName = m.Resolver.DependentLookup.Name
 			}
@@ -40,6 +42,7 @@ func toDomainFieldMapping(v definitionv1alpha1.VerbsDescription) []oas2jsonschem
 			ValueMappingType:   vmType,
 			ResolverLookupName: lookupName,
 			ResolverType:       resolverType,
+			ResolverHasWhen:    resolverHasWhen,
 		})
 	}
 	// Legacy requestFieldMapping: request-direction only, no value transform.

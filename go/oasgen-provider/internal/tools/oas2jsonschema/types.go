@@ -171,6 +171,16 @@ type FieldMappingEntry struct {
 	// none. ResolverLookupName cannot stand in for it: a secretRef entry has a resolver and no lookup
 	// name, so testing the name would miss exactly the case that has shipped longest.
 	ResolverType string
+	// ResolverHasWhen reports whether the resolver carries a `when` guard, which makes it CONDITIONAL.
+	//
+	// Generation needs the bit and not the path. An unconditional resolver always supplies its
+	// destination, so the parameter is never the author's to set and mappingSuppliedParams omits the spec
+	// property outright. A CONDITIONAL one is skipped when its guard does not hold -- "no Secret is read
+	// and nothing is written to the request" -- so the author is still the supplier in that case, and
+	// omitting the property would leave the kind with no way to provide the value at all. The guard's own
+	// path is a separate read and may name any property, so even a guard that does not point at this
+	// parameter leaves the guard-false case unsatisfiable.
+	ResolverHasWhen bool
 }
 
 // DependentLookup mirrors the RestDefinition's dependentLookups entry, library-agnostic (see the API type
