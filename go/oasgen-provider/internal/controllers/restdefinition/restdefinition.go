@@ -901,7 +901,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	}
 
 	if !crdOk {
-		if err := e.generateAndApplyCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); err != nil {
+		// renderGeneratedCRDs, not generateAndApplyCRDs: the stamp has to travel with the render, and
+		// persistCreatePhaseStatus below snapshots the whole status, so setting it here persists it.
+		if err := e.renderGeneratedCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); err != nil {
 			return err
 		}
 
@@ -913,6 +915,23 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 			"RestDefinition '%s/%s' creating", cr.Spec.Resource.Kind, cr.Spec.ResourceGroup)
 
 		return nil
+	}
+
+	// THE CRD EXISTS, AND THAT IS NOT THE SAME AS BEING CURRENT (#541).
+	//
+	// Observe's generator-changed drift check is unreachable on the reconcile that routes here: it
+	// returns early while the generated Kind's controller Deployment is absent, so a provider upgrade
+	// whose first reconciles beat that Deployment into existence arrives at Create instead -- and Create
+	// used to skip generation because the CRD was present, while still recording the running build.
+	//
+	// Checked HERE rather than relied upon from Observe, because this path is reached precisely when
+	// Observe did not get that far.
+	if e.genCfg.generatorChanged(cr.Status.GeneratorBuild) {
+		e.log.Debug("Generator build changed and the CRD already exists; regenerating before stamping",
+			"status", cr.Status.GeneratorBuild, "current", e.genCfg.Build)
+		if err := e.renderGeneratedCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); err != nil {
+			return fmt.Errorf("regenerating the CRD after a provider upgrade: %w", err)
+		}
 	}
 
 	configurationGVR := getConfigurationGVR(cr, hasSecuritySchemes)
@@ -986,7 +1005,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
 	cr.Status.OASHash = oasHash
 	cr.Status.ResourceHash = resourceHash(cr)
-	cr.Status.GeneratorBuild = e.genCfg.Build
+	// NO GeneratorBuild STAMP HERE (#541). This phase does not render, and the field means "the build
+	// that rendered this CRD". renderGeneratedCRDs writes it, wherever the render happened -- including
+	// the branch above, which regenerates when the generator moved under an existing CRD.
 
 	// Taken AFTER every in-place step above and immediately before the write. A field set after this
 	// line is not in the snapshot and so is never persisted -- that is the one ordering rule this shape
@@ -1186,6 +1207,48 @@ func (e *external) ensureVersionPolicyBestEffort(ctx context.Context, cr *defini
 	}
 }
 
+// renderGeneratedCRDs renders this RestDefinition's CRDs and then records the build that rendered them.
+// It is the ONLY place Status.GeneratorBuild is written, and that is the whole point of its existing.
+//
+// # The defect it closes (#541)
+//
+// The stamp used to be written at the end of Create's second phase, unconditionally. On a provider
+// upgrade whose first reconciles land while the generated Kind's controller Deployment is still absent,
+// Observe returns early -- ResourceExists is deployOk, which is false on IsNotFound -- and so never
+// reaches the generator-changed drift check. provider-runtime then calls Create, Create finds the CRD
+// already present and SKIPS generation, falls through, and stamped the running build anyway.
+//
+// The result was a CRD still carrying the schema an older build rendered, under a status field asserting
+// the current build had rendered it. Worse than the field being absent: absent is honest, and anything
+// using it as a proxy for "this schema is current" got a confident wrong answer.
+//
+// AND IT SEALED ITSELF. generatorChanged returns true unconditionally when the stored value is empty --
+// the activation branch every pre-existing cluster takes exactly once -- and the Create path consumed
+// that branch without rendering, then wrote stored = current. No later reconcile, restart or re-upgrade
+// to the same version retried it. Recovery needed a status patch clearing the field, and the operator had
+// no signal that they needed one.
+//
+// Measured on a consumer's cluster: four rounds of "Dynamic Controller not deployed yet" across all six
+// controllers, then six Creates, then the first "already deployed" AFTER them; 12 of 12 CRDs unchanged
+// while status.generatorBuild moved to the new build on 6 of 6 RestDefinitions. A second consumer's
+// upgrade of the same images took the Update branch and regenerated 32 of 32 correctly, which is what
+// makes it a race rather than a version pair.
+//
+// # Why one function rather than a rule
+//
+// "Stamp only where you rendered" was already the rule, and the Update path's own comment stated it
+// correctly: "the CRD was just rendered by THIS build whatever provoked the render, so recording a
+// different build would be false." That reasoning is right, and it sat next to a sibling call site where
+// the premise did not hold. A rule written in a comment is enforced by whoever reads it; a single
+// function that renders and then stamps cannot be half-used by a third call site.
+func (e *external) renderGeneratedCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, docs *oas2jsonschema.DocumentSet, hasSecuritySchemes bool) error {
+	if err := e.generateAndApplyCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); err != nil {
+		return err
+	}
+	cr.Status.GeneratorBuild = e.genCfg.Build
+	return nil
+}
+
 func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, docs *oas2jsonschema.DocumentSet, hasSecuritySchemes bool) (err error) {
 	rendered, err := render.CRDs(ctx, cr, gvk, docs, hasSecuritySchemes)
 	if err != nil {
@@ -1362,15 +1425,14 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 			"oasChanged", oasHash != cr.Status.OASHash,
 			"resourceChanged", resHash != cr.Status.ResourceHash,
 			"generatorChanged", generatorChanged)
-		if gerr := e.generateAndApplyCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); gerr != nil {
+		// The stamp travels with the render, in renderGeneratedCRDs. This site's own comment used to
+		// state the rule correctly -- "the CRD was just rendered by THIS build whatever provoked the
+		// render, so recording a different build would be false" -- while a sibling call site stamped on
+		// a branch that had rendered nothing (#541). A rule in a comment is enforced by whoever reads it.
+		if gerr := e.renderGeneratedCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); gerr != nil {
 			return fmt.Errorf("regenerating CRD: %w", gerr)
 		}
 		cr.Status.ResourceHash = resHash
-		// Stamped unconditionally, not only when generatorChanged: the CRD was just rendered by THIS
-		// build whatever provoked the render, so recording a different build would be false. It also
-		// means an operator who has opted out still gets the stamp advanced by any real regeneration,
-		// and so does not collect a spurious one later if they opt back in.
-		cr.Status.GeneratorBuild = e.genCfg.Build
 	}
 
 	// Retire served versions nothing is using any more. OUTSIDE the regeneration gate above, because a
