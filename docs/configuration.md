@@ -223,17 +223,48 @@ reconcile; it does not supply any value the reconcile reads. The status fields s
 trigger cannot influence the outcome it is used to observe. That is the property that makes it an
 accelerator and not an input.
 
-**Two things to control for if the result is a non-event.** A probe asserting "X did not happen" needs to
-establish that the provider ran at all during the window, or "it correctly did nothing" and "it never ran"
-are the same reading. Count the provider's own reconcile lines for the definition
+**If the result is a non-event, you need an activity witness.** A probe asserting "X did not happen" must
+establish that the provider ran at all during the window, or *"it correctly did nothing"* and *"it never
+ran"* are the same reading. Count the provider's own reconcile lines for the definition
 (`managed/restdefinition.ogen.krateo.io`) and treat a window with no increase as **void** rather than as a
-pass. And on a loaded machine, check that the cluster's control plane is healthy before trusting a
-*duration*: object reads stay correct under a starved `kube-controller-manager`, so nothing fails — what
-breaks is timing and garbage collection, which is exactly what a timed window depends on.
+pass.
 
-Credit for the method, and for both controls, to the openstack-nova-operator-kog session, which found the
+**And beware a second trigger you did not intend.** Any change to the set of Secret names a kind's
+`secretRef` resolvers reference currently causes that kind's controller to be restarted, so a probe that
+plants and removes Configurations is also rolling the controller whose logs it is counting. Order such
+probes so the log-counting one runs first.
+
+Credit for the method and the activity witness to the openstack-nova-operator-kog session, which found the
 poll-interval trap by reporting a provider defect that turned out to be a 120-second wait against a
 3-minute period.
+
+## Before trusting any timed measurement, check the control plane
+
+This applies to **every** duration measured against this provider, not only to the forced reconcile above,
+and it is the control most likely to be missing.
+
+On a loaded machine — several `kind` clusters sharing one Docker VM, for instance — `kube-controller-manager`
+and `kube-scheduler` can be CPU-starved while `etcd` and the apiserver are fine. **Object reads stay
+correct under that, so nothing fails.** What degrades is *timing* and *garbage collection*, which is exactly
+what a timed window depends on. One session measured 143 kcm and 141 scheduler restarts against 3 for etcd
+and the apiserver on the same VM.
+
+So a structural result — a field's presence, a `required` set, a schema comparison, an admission verdict —
+is unaffected and can be trusted. A duration cannot, and should either be re-run or reported without
+timings.
+
+```bash
+# restart counts; anything much above zero on kcm or the scheduler means durations are unsafe
+kubectl get pods -n kube-system -o \
+  custom-columns=NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount
+
+# and a LIVE control, because a fresh cluster has zero restarts by construction and so proves nothing:
+# delete a one-replica Deployment and time how long its ReplicaSet survives. Garbage collection runs
+# inside kube-controller-manager, so a healthy cluster collects it in about a second.
+```
+
+The live control is the half worth keeping: a restart count of zero is equally consistent with "healthy"
+and with "this cluster is four minutes old", and only one of those tells you a duration is safe to quote.
 
 ## Inspecting a running controller — there is no shell in either image
 
