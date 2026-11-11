@@ -13,6 +13,76 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-11 — 0.60.0
+
+**The restart gate that 0.59.0 shipped had never fired, and this release is the one where a `rdc.env` change reaches a running controller.** 0.59.0's own section claimed otherwise — *"a `rdc.env` change such as `REST_CONTROLLER_DEBUG` … every generated controller must roll to pick it up"* — and that sentence was false when it was written. It has a correction block of its own.
+
+Both defects were found by consumers measuring their own clusters. Neither was visible to any check of ours, and the first was invisible to its own unit tests.
+
+### A `rdc.env` change now reaches the generated controller
+
+`Deploy` built one `NamespacedName` — `"<rd>-controller"` — and used it both for the Deployment and for the live ConfigMap read that the restart decision depends on. But the two assets render their names differently:
+
+```yaml
+# as the provider renders them -- i.e. AFTER Helm's pass over the assets, which is why
+# grepping the asset files shows these wrapped in {{ "{{" }} … {{ "}}" }} escapes
+assets/rdc/configmap.yaml   ->  name: {{ .name }}-configmap
+assets/rdc/deployment.yaml  ->  name: {{ .name }}
+```
+
+So the read asked for a ConfigMap at the **Deployment's** name, got `NotFound` on every reconcile of every kind, and concluded there was no previous ConfigMap — which the code deliberately treats as a first deploy needing no restart. The decision returned "no" unconditionally (issue 599).
+
+**The failure looked exactly like success.** The ConfigMap *was* updated, `helm upgrade` reported success, and no error, event or condition appeared anywhere. But `envFrom: configMapRef` is read once at container start, so the running controller kept its install-time environment indefinitely.
+
+Measured by a consumer on 25 generated controllers across two `rdc.env` changes, 400 s settle each: every ConfigMap's data changed, written by the provider itself; `deployment.kubernetes.io/revision` stayed at 1 for all 25 across both — 50 of 50 rows with zero rollouts; one ReplicaSet per Deployment, created at install; every pod still at `restartCount 0` with its install-time start time; and zero occurrences of the restart log line in a fully covered window.
+
+**Who was affected, and who was not.** An `rdc.image.tag` change alters the pod template, so **Kubernetes** rolls the Deployment and the gate is never consulted — image upgrades on 0.59.0 did take effect. A `secretRef` Secret name-set change is RBAC only and correctly causes no restart. **Only config-only changes were lost**, which is every value travelling through `rdc.env`: log level, OTEL settings, timeouts, anything an operator sets.
+
+**The fix is structural rather than a corrected string.** The ConfigMap is rendered first and the live object is read at the *rendered object's own key*, so the two names are one value instead of two that have to agree. Re-deriving the `-configmap` suffix in Go would restore the defect the next time an asset's name expression changes. A lookup that could not be performed is now an error rather than an absence, and a rendered object with no name is refused.
+
+### The restart annotation now survives the apply
+
+`kube.Apply`'s update path is a full `Update` with the *rendered* Deployment, whose asset declares no annotations at all — so every `Deploy` stripped whatever `kubectl.kubernetes.io/restartedAt` the live object held (issue 595). Removing that annotation changes the pod template exactly as much as adding it does, so it would have cost a second, pointless roll per ConfigMap change as soon as the gate above started firing.
+
+`kube.ApplyOptions` gains **`FromCurrent`**, called on the update path with the live object and the desired one, so a caller can carry over a field **another writer owns** — copied from the very version being replaced, re-run on each retry attempt, and never called on create. The name, argument order and "not called on create" rule match `ApplyOptions.FromCurrent` in `plumbing/kubeutil/objectclient` (v1.41.0+), which solved the same problem for core-provider; ours differs only in that `desired` is the typed object the caller already holds.
+
+It carries **one** annotation deliberately. A blanket carry-over would also preserve annotations left by a since-removed sidecar injector or a deleted mutating webhook, and those should disappear when they stop being applied.
+
+**Why both fixes are in one release.** Neither alone produces correct behaviour: with only the first, the restart fires and the next apply erases its annotation; with only the second, the annotation is preserved but never written. The end-to-end test's passes fail in different places for each half.
+
+### A latent defect in this package's error handling
+
+`retry-go` v3.0.0's `Error` is a `[]error` with no `Unwrap()`, so `errors.Is` and `errors.As` could not see through it: every error `Apply`, `Uninstall` and `UninstallFromReference` returned was unmatchable by any caller, and read in a log as `All attempts fail:\n#1: <the real error>` — the real error indented under a header that says nothing.
+
+Latent, because nothing in the tree classified an error from those three. It became load-bearing with `FromCurrent`, whose error is the caller's own verdict about the object. `retry.LastErrorOnly(true)` is now set on all three `retry.Do` sites. **If you grep provider logs for `All attempts fail`, that string is gone** — the underlying error text is unchanged and is now the whole message.
+
+### What was tested, and the gap that found the test
+
+`restartNeeded` already had a dedicated suite — six input shapes, both outcomes, and an assertion that the table contains both. The live read has one too. **Both were correct, and the bug was entirely in the wiring between them.**
+
+Mutation testing against those two suites showed two mutations that disable the restart outright, and **both survived**: comparing the rendered ConfigMap against itself, and forcing the "ConfigMap existed" flag to false. A decision function and the values fed into it can each be correct and individually covered while the connection between them is asserted nowhere.
+
+So this release adds an end-to-end test that drives the real `Deploy` against the real renderer with a fake client, and changes the ConfigMap's data **the way a `helm upgrade` does — by rewriting the template file**, since Helm ranges `rdc.env` into the asset at chart-render time and the provider's input is a file on disk. It asserts three passes: a first deploy must not roll, a data change must, and an unchanged reconcile must leave the stamp untouched. It kills both surviving mutations and four more.
+
+### Runtime evidence is outstanding
+
+No pod has started from this code at the time of writing. PR builds do not publish images, so a release is the earliest point at which any of this can be exercised on a cluster. A consumer will verify on a fresh disposable cluster with the criterion **revision delta plus new pod creation time** — never `generation` or `restartedAt` alone, both of which describe what something *wrote* rather than what happened. `generation` in particular is not a rollout count: it increments on any `spec` change and a no-op update does not bump it, which is how a 25-of-25 "pass" came to be withdrawn during this investigation.
+
+### Also in this release, with no behaviour change
+
+- **`docs/usage.md`** gains the case `--set-string` does not cover: **removing** an `rdc.env` key needs
+  `--reset-values`, or a `-f` values file with the key absent, because a bare `helm upgrade` reuses the
+  previous values and so cannot express a deletion.
+- **`docs/configuration.md`** gains three sections written from this release's investigation: finding out
+  who last wrote a field (`managedFields`, and the `--show-managed-fields` flag without which `kubectl`
+  strips it); whether a generated controller actually restarted (and why `generation`, `restartedAt` and
+  `observedGeneration` do not answer that); and which changes reach a running controller versus which
+  need a restart.
+- The **0.59.0** section below gains a correction. It had said a `rdc.env` change rolls every generated
+  controller, which was false, and a first correction then said one ConfigMap change produces two rolls,
+  which was also false and wrong in the reassuring direction. Both were derived from reading the code
+  rather than from watching a pod.
+
 ## 2026-11-11 — 0.59.0
 
 > **Correction (2026-11-11, issues 595 and 599).** This section describes a generated controller being
