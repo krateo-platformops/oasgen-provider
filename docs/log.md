@@ -15,6 +15,46 @@ provider and the rest-dynamic-controller together.
 
 ## 2026-11-11 — 0.59.0
 
+> **Correction (2026-11-11, issues 595 and 599).** This section describes a generated controller being
+> restarted "only when its ConfigMap data changed". **On this release it is never restarted at all.**
+>
+> `Deploy` builds one `NamespacedName` — `"<rd>-controller"` — and uses it both for the Deployment and for
+> the live ConfigMap read that the restart decision depends on. But the two assets render their names
+> differently: `assets/rdc/configmap.yaml` renders `{{ .name }}-configmap` while
+> `assets/rdc/deployment.yaml` renders `{{ .name }}`. So the read asks for a ConfigMap at the
+> **Deployment's** name, gets `NotFound` on every reconcile of every kind, and concludes there is no
+> previous ConfigMap — which the code deliberately treats as a first deploy needing no restart. The
+> decision therefore returns "no" unconditionally (issue 599).
+>
+> **The failure is silent and looks like success.** The ConfigMap *is* updated, `helm upgrade` reports
+> success, and no error, event or condition is produced anywhere. But `envFrom: configMapRef` is read once
+> at container start, so the running controller keeps its install-time environment indefinitely. Anything
+> travelling through `rdc.env` is affected: log level, OTEL settings, timeouts, any operator-supplied
+> variable.
+>
+> Measured by a consumer on a live cluster: 25 generated controllers, two `rdc.env` changes, 400s settle
+> after each. Every ConfigMap's data changed, written by the provider itself. `deployment.kubernetes.io/revision`
+> stayed at 1 for all 25 across both changes — 50 of 50 rows with zero rollouts — one ReplicaSet per
+> Deployment created at install, every pod still at `restartCount 0` with its install-time start time, and
+> **zero** occurrences of the restart log line in a fully covered window.
+>
+> **WORKAROUND on this release:** delete the generated controller's pods (`kubectl delete pod -l
+> app.kubernetes.io/name=<kind>-controller -n <namespace>`) after changing `rdc.env`. The replacement pods
+> read the updated ConfigMap at start. Upgrading to 0.60.0 removes the need.
+>
+> **A second defect, which this one was hiding.** `kube.Apply` performs a full `Update` with the *rendered*
+> Deployment, and the rendered asset carries **no annotations at all** — so every `Deploy` strips whatever
+> `kubectl.kubernetes.io/restartedAt` the live object holds (issue 595). That cannot be observed here,
+> because nothing ever writes the annotation in the first place; it would have cost a second, pointless roll
+> per ConfigMap change once the gate started firing. Both are fixed together in 0.60.0, because either fix
+> alone leaves the behaviour wrong.
+>
+> **This release is a regression on this axis, and the earlier wording understated it twice.** 0.58.0
+> restarted on *every* reconcile reaching `Deploy` — noisy, and it lost the pod's logs, but the change did
+> arrive. An earlier version of this correction said one ConfigMap change produces "two rolls"; that was
+> wrong in the reassuring direction, and it was wrong because it was derived from reading the code rather
+> than from watching a pod.
+
 **Two defects that made an upgrade noisy and a controller's logs unreadable.** Neither is new in 0.57.0 — both predate it — but 0.57.0 gave each a reason to fire often enough to be noticed, and both were found by consumers measuring their own upgrades rather than by any check of ours.
 
 ### A successful reconcile no longer reports an error
