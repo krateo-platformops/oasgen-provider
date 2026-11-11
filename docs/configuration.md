@@ -266,6 +266,93 @@ kubectl get pods -n kube-system -o \
 The live control is the half worth keeping: a restart count of zero is equally consistent with "healthy"
 and with "this cluster is four minutes old", and only one of those tells you a duration is safe to quote.
 
+## Where a credentialed request may go — `rdc.endpointAllowlist`
+
+This is the config surface's one security control and it was missing from this page. The values carry
+thorough comments; what follows is the **matching rule**, which they do not state and which decides
+whether a given redirect is refused.
+
+```yaml
+rdc:
+  endpointAllowlist: []       # default: only the hosts the OAS document itself names
+  allowAnyHost: false         # default: matching is enforced
+```
+
+They render into `REST_CONTROLLER_ENDPOINT_ALLOWLIST` and `REST_CONTROLLER_ALLOW_ANY_HOST`. Set them
+through these **dedicated keys, not through `rdc.env`** — a misspelled key in a free-form env map
+silently does nothing, so an operator would believe the allowlist is set when it is not. The schema
+rejects a typo in these.
+
+### The matching rule: `(host, port, scheme)`, with the port defaulted first
+
+An entry and a request are compared on all three, **exactly** — but an omitted port is filled in from the
+scheme first, **on both sides, by the same rule**:
+
+```
+no port + https  ->  443
+no port + http   ->  80
+any other scheme ->  refused outright
+```
+
+The symmetry is what makes the exact comparison usable at all: an entry written `api.example.com` becomes
+`(api.example.com, 443, https)`, so it matches a request to `https://api.example.com` *and* one to
+`https://api.example.com:443`. Without defaulting the entry too, a port-less entry would match nothing.
+
+That defaulting is the part worth knowing, because it makes two superficially similar redirects go
+opposite ways:
+
+| redirect | outcome | why |
+|---|---|---|
+| `https://api.example.com:8443` → `https://api.example.com:9443` | **refused** | 9443 ≠ 8443 |
+| `http://api.example.com:80` → `http://api.example.com` | **permitted** | both resolve to port 80 |
+| `https://api.example.com` → `https://api.example.com:443` | **permitted** | both resolve to port 443 |
+
+So "a redirect that changes only the port is refused" is **too strong**. A redirect that only adds or
+drops the *scheme's default* port changes nothing the policy can see, and is allowed. One that moves to
+any other port is refused.
+
+Entry syntax, from the values' own comment: `host[:port]`, optionally prefixed `http://` — **no prefix
+permits https only**, cleartext has to be asked for. A single leading `*.` wildcard matches one or more
+leading labels and **not** the bare suffix. A bare `*` is rejected at startup; use `allowAnyHost`. A
+**path is refused at startup** with a message saying what to write instead, so pasting a document's
+`servers[0]` verbatim fails loudly rather than silently never matching.
+
+### `allowAnyHost: true` short-circuits all of it
+
+It is the first thing checked, so nothing below it runs. It is a separate key rather than a `*` entry so
+that "permit any host" shows up in a values diff instead of hiding as punctuation, and the controller
+logs it loudly once at startup.
+
+**If you are testing whether the policy refuses something, assert `allowAnyHost` is off first.** A
+permitted request under allow-any mode looks exactly like a policy that failed to refuse.
+
+### Two refusals with different causes
+
+A refused redirect names the endpoint:
+
+```
+refusing to follow a redirect: refusing to send a credentialed request to "<host>:<port>":
+it is not the document's server and is not in the operator's endpoint allowlist
+```
+
+A **different** refusal, `stopped after 10 redirects`, is Go's hop limit and says nothing about the
+allowlist. Match on the endpoint text, not on "a redirect was refused".
+
+### Verbose debugging does not bypass the check
+
+Worth stating because the opposite was once true: the debug round-tripper used to wrap the *caller's*
+transport and assign it back, which made that transport non-nil and sent the request on it instead of on
+the policy's — so enabling verbose logging silently skipped the resolved-address and per-hop redirect
+checks, in the one configuration an operator turns on when something is already wrong.
+
+That is fixed and guarded in two independent ways, which is why this section can state it rather than
+hedge it:
+
+- a source-level guard asserting **no production site supplies an `http.Transport`**, scoped to the
+  package where the client construction sites live, with a control count
+- behavioural tests in **both** directions — the guard still applies with debug enabled, *and* a
+  permitted host still works with debug enabled
+
 ## Finding out who last wrote a field
 
 When a value on a generated object is not what you expect, the first question is whether this provider
