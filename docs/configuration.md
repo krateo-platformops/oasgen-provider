@@ -189,6 +189,52 @@ have changed. From 0.53.0 a provider **upgrade** also re-renders every definitio
 (`status.generatorBuild`), so an upgrade refreshes this field across the fleet. If you have set
 `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false`, it refreshes only when a definition itself changes.
 
+## Forcing a reconcile, when you are measuring something
+
+A provider behaviour you are trying to observe may simply not have happened yet. **An individual resource
+is checked for drift every 3 minutes by default**, so a probe that waits less than that and then reports
+"the provider never did X" is measuring your patience rather than the provider.
+
+```
+poll interval   default 3m    -poll   /  OASGEN_PROVIDER_POLL_INTERVAL
+sync period     default 1h    -sync   /  OASGEN_PROVIDER_SYNC
+```
+
+The `-poll` value is what governs per-resource drift checks; `-sync` is the controller manager's own
+resync and is much longer. A measurement window has to exceed the poll interval, or exceed it after
+forcing a reconcile.
+
+**To force one, write to the RestDefinition itself — not to its status.**
+
+```bash
+kubectl annotate restdefinition <name> -n <ns> \
+  example.com/force-reconcile="$(date +%s)" --overwrite
+```
+
+A **main-resource** write triggers a reconcile; a `/status` patch does not, because the controller does not
+watch its own status writes (which is also what stops a status update from looping). So annotating is the
+reliable trigger and patching status is not — and the failure mode of getting that wrong is silence rather
+than an error.
+
+**Why this is safe for a measurement rather than a way of faking one.** The annotation only causes a
+reconcile; it does not supply any value the reconcile reads. The status fields such a probe inspects —
+`status.authSecretRBACNamespaces`, `status.authSecretDigest`, `status.schemaWarnings`,
+`status.generatorBuild` — are written **only** by the provider, from the document and the cluster, so the
+trigger cannot influence the outcome it is used to observe. That is the property that makes it an
+accelerator and not an input.
+
+**Two things to control for if the result is a non-event.** A probe asserting "X did not happen" needs to
+establish that the provider ran at all during the window, or "it correctly did nothing" and "it never ran"
+are the same reading. Count the provider's own reconcile lines for the definition
+(`managed/restdefinition.ogen.krateo.io`) and treat a window with no increase as **void** rather than as a
+pass. And on a loaded machine, check that the cluster's control plane is healthy before trusting a
+*duration*: object reads stay correct under a starved `kube-controller-manager`, so nothing fails — what
+breaks is timing and garbage collection, which is exactly what a timed window depends on.
+
+Credit for the method, and for both controls, to the openstack-nova-operator-kog session, which found the
+poll-interval trap by reporting a provider defect that turned out to be a 120-second wait against a
+3-minute period.
+
 ## Inspecting a running controller — there is no shell in either image
 
 Both images run on `gcr.io/distroless/static:nonroot`: `rest-dynamic-controller` since **0.20.0**, and
