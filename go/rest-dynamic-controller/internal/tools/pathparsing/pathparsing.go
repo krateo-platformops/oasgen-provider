@@ -18,7 +18,13 @@ import (
 // purpose, because `a[0]` (a list index) and `a['0']` (a map key) flatten to the same thing. Rewriting 26
 // sites to carry typed segments would be a large diff whose reviewers could not separate "moved to the
 // shared parser" from "changed what this site does with the result". The behaviour change lives in one
-// function, where differential_test.go guards it.
+// function, where stated_changes_test.go guards it.
+//
+// (This comment named differential_test.go, which at the time existed nowhere: the differential that
+// found these five changes was deleted once the adoption made its rows tautologies, and
+// stated_changes_test.go says so in its own doc. differential_test.go now exists again and guards a
+// different pair -- this flat walker against the typed one in typed.go -- so the two names are no longer
+// interchangeable.)
 //
 // The typed form is available directly from `fieldpath.Parse` for any site that later needs to tell an
 // index from a key -- a writer, a validator, or a diagnostic. `GetNestedField` does not: it dispatches on

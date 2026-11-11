@@ -160,11 +160,11 @@ func resolverGuardSkipsForLookup(when *getter.ResolverWhen, mg *unstructured.Uns
 	if when == nil || when.CustomResourceFieldPresent == "" {
 		return false, nil
 	}
-	segments, err := pathparsing.ParsePath(when.CustomResourceFieldPresent)
+	segments, err := pathparsing.ParseTyped(when.CustomResourceFieldPresent)
 	if err != nil || len(segments) == 0 {
 		return false, fmt.Errorf("invalid when.customResourceFieldPresent path %q", when.CustomResourceFieldPresent)
 	}
-	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
+	val, found, err := pathparsing.GetTyped(mg.Object, segments)
 	if err != nil {
 		return false, fmt.Errorf("reading when.customResourceFieldPresent %q: %w", when.CustomResourceFieldPresent, err)
 	}
@@ -175,11 +175,11 @@ func lookupGuardSatisfied(when *getter.LookupWhen, mg *unstructured.Unstructured
 	if when == nil || when.CustomResourceFieldAbsent == "" {
 		return false, nil
 	}
-	segments, err := pathparsing.ParsePath(when.CustomResourceFieldAbsent)
+	segments, err := pathparsing.ParseTyped(when.CustomResourceFieldAbsent)
 	if err != nil || len(segments) == 0 {
 		return false, fmt.Errorf("invalid when.customResourceFieldAbsent path %q", when.CustomResourceFieldAbsent)
 	}
-	val, found, err := pathparsing.GetNestedField(mg.Object, segments)
+	val, found, err := pathparsing.GetTyped(mg.Object, segments)
 	if err != nil {
 		return false, fmt.Errorf("reading when.customResourceFieldAbsent %q: %w", when.CustomResourceFieldAbsent, err)
 	}
@@ -246,11 +246,11 @@ func bindLookupParameters(
 			}
 			raw = v
 		default:
-			segments, perr := pathparsing.ParsePath(p.InCustomResource)
+			segments, perr := pathparsing.ParseTyped(p.InCustomResource)
 			if perr != nil || len(segments) == 0 {
 				return nil, nil, fmt.Errorf("dependent lookup %q: invalid inCustomResource path %q", l.Name, p.InCustomResource)
 			}
-			v, found, gerr := pathparsing.GetNestedField(mg.Object, segments)
+			v, found, gerr := pathparsing.GetTyped(mg.Object, segments)
 			if gerr != nil || !found {
 				return nil, nil, fmt.Errorf("dependent lookup %q: %q not found on the custom resource", l.Name, p.InCustomResource)
 			}
@@ -334,11 +334,11 @@ func matchLookupItem(ctx context.Context, l getter.DependentLookup, body interfa
 		return nil, fmt.Errorf("dependent lookup %q: itemsAt %q did not yield an array", l.Name, itemsAt)
 	}
 
-	segments, perr := pathparsing.ParsePath(m.EqualsFromCustomResource)
+	segments, perr := pathparsing.ParseTyped(m.EqualsFromCustomResource)
 	if perr != nil || len(segments) == 0 {
 		return nil, fmt.Errorf("dependent lookup %q: invalid equalsFromCustomResource path %q", l.Name, m.EqualsFromCustomResource)
 	}
-	wantRaw, found, gerr := pathparsing.GetNestedField(mg.Object, segments)
+	wantRaw, found, gerr := pathparsing.GetTyped(mg.Object, segments)
 	if gerr != nil || !found {
 		return nil, fmt.Errorf("dependent lookup %q: %q not found on the custom resource", l.Name, m.EqualsFromCustomResource)
 	}
