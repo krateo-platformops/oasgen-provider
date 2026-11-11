@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -36,6 +37,17 @@ func Apply(ctx context.Context, kube client.Client, obj client.Object, opts Appl
 			}
 
 			obj.SetResourceVersion(tmp.GetResourceVersion())
+
+			// Hand the caller the version we are about to replace, so it can carry over a field that
+			// another writer owns. This sits INSIDE the retry on purpose: a conflict re-reads the live
+			// object and calls the hook again, so what the hook copies is never older than the object
+			// the Update actually replaces.
+			if opts.FromCurrent != nil {
+				if err := opts.FromCurrent(tmp, obj); err != nil {
+					return &permanentError{err: fmt.Errorf("FromCurrent on %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)}
+				}
+			}
+
 			updateOpts := &client.UpdateOptions{
 				DryRun:          opts.DryRun,
 				FieldManager:    opts.FieldManager,
@@ -44,6 +56,7 @@ func Apply(ctx context.Context, kube client.Client, obj client.Object, opts Appl
 			return kube.Update(ctx, obj, updateOpts)
 		},
 		retry.RetryIf(retryableAPIError),
+		retry.LastErrorOnly(true),
 	)
 }
 
@@ -63,7 +76,34 @@ func Apply(ctx context.Context, kube client.Client, obj client.Object, opts Appl
 //
 // Everything NOT listed here still retries exactly as before: conflicts, timeouts, server errors, "too
 // many requests" and connection failures are all transient and are what the retry was added for.
+// WHY retry.LastErrorOnly(true) IS SET ON ALL THREE retry.Do SITES.
+//
+// retry-go v3.0.0's `Error` is a `[]error` with a WrappedErrors() accessor and NO Unwrap(), so
+// `errors.Is` and `errors.As` cannot see through it. Without this option every error these three
+// functions return is therefore unmatchable by any caller, and reads in a log as
+// "All attempts fail:\n#1: <the actual error>" -- the real error indented under a header that says
+// nothing. No caller in the tree depends on that text.
+//
+// It became load-bearing with FromCurrent: a hook's error is the caller's own verdict, and a verdict the
+// caller cannot then match with errors.Is is only half returned.
+//
+// permanentError marks an error that retrying cannot change because it did not come from the apiserver
+// at all. Today that is a FromCurrent verdict: the caller judged the object it was shown, and showing it
+// the same object nine more times cannot change the answer.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
 func retryableAPIError(err error) bool {
+	// A caller's own verdict is never transient. Checked before the apierrors switch because a
+	// FromCurrent error may WRAP an apierrors value -- a hook that reads the live object can legitimately
+	// return a NotFound -- and the wrapper's judgement must win over what it wraps.
+	var perm *permanentError
+	if errors.As(err, &perm) {
+		return false
+	}
+
 	switch {
 	case apierrors.IsForbidden(err),
 		apierrors.IsUnauthorized(err),
@@ -111,6 +151,7 @@ func Uninstall(ctx context.Context, kube client.Client, obj client.Object, opts 
 			return nil
 		},
 		retry.RetryIf(retryableAPIError),
+		retry.LastErrorOnly(true),
 	)
 }
 
@@ -149,6 +190,7 @@ func UninstallFromReference(ctx context.Context, kube client.Client, ref v1.Obje
 			return nil
 		},
 		retry.RetryIf(retryableAPIError),
+		retry.LastErrorOnly(true),
 	)
 }
 
