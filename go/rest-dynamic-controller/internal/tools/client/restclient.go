@@ -123,6 +123,33 @@ func statusCodeError(code int) error {
 // assumption that what got through is safe.
 //
 // The body is consumed either way so connection reuse is not broken.
+// redactSnippet keeps resolved sensitive values out of the vendor's error text (#567).
+//
+// A SEPARATE CHANNEL FROM THE VERBOSE DUMP, and that is why it needs its own call. The dump goes through
+// debuggingRoundTripper and only when krateo.io/connector-verbose is on; this snippet reaches the log
+// through logVendorBody at INFO, on every failed call, with no flag at all -- and Info is deliberate so
+// that it is visible on a default install. So this was the WIDER of the two leaks while being the
+// narrower in content.
+//
+// VendorBodySnippet's own doc comment already stated the rule -- "never log a credential at any level:
+// Krateo exports logs to the platform's log store, so a log line is narrower than a condition but is not
+// private" -- and nothing enforced it.
+//
+// BOTH construction sites call this, Call and the pagination path. Fixing one of two parallel paths while
+// the issue reads as closed is exactly how the response-dump half of this hid: the report named
+// dumpResponseWithPrettyJSON and httputil.DumpResponse leaked identically.
+//
+// It closes the reconciled resource's OWN resolved values, which are known strings. It cannot reach
+// another object's secret echoed in an error body, for the same reason value-based redaction cannot reach
+// a collection response -- nothing ever resolved it. Much narrower here, since an error response is
+// rarely a collection.
+func redactSnippet(s string, sensitive []string) string {
+	if s == "" {
+		return s
+	}
+	return string(redact([]byte(s), sensitive))
+}
+
 func errorBodySnippet(body io.ReadCloser) string {
 	if body == nil {
 		return ""
@@ -330,7 +357,7 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 	//}
 
 	start := time.Now()
-	resp, err := u.do(cli, req, opts.SensitiveValues)
+	resp, err := u.do(cli, req, opts.SensitiveValues, opts.CollectionRead)
 	if err != nil {
 		recordOutboundCall(ctx, httpMethod, path, 0, start)
 		return Response{}, fmt.Errorf("making request: %w", err)
@@ -377,7 +404,7 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 			// The vendor's text goes on the field, NOT into Inner: Inner is what Error() renders and
 			// therefore what reaches a condition message (#433). The body is still READ either way, so
 			// connection reuse is unaffected -- what changed is where it is readable from.
-			BodySnippet: errorBodySnippet(resp.Body),
+			BodySnippet: redactSnippet(errorBodySnippet(resp.Body), opts.SensitiveValues),
 		}
 	}
 
@@ -440,6 +467,17 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 // It serves as the primary orchestrator for the `FindBy` action of the Rest Dynamic Controller,
 // delegating response parsing and item matching to helper functions: extractItemsFromResponse, findItemInList, and isItemMatch.
 func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration, findByAction *getter.VerbsDescription) (Response, error) {
+	// MARKED HERE, AND ONLY HERE. FindBy is the single entry point for a collection read: it either
+	// delegates to CallFindBySingle or runs the pagination loop, and both reach do() through this opts
+	// pointer. Setting it at either destination would be two places to keep in step; setting it in the
+	// generic Call would be wrong, since Call also serves get, create, update and delete (#566).
+	//
+	// Mutating the caller's struct is deliberate rather than incidental: opts describes THIS call, and the
+	// flag is a property of the call being made, not a preference the caller expressed.
+	if opts != nil {
+		opts.CollectionRead = true
+	}
+
 	// findByAction may legitimately be nil here (callers that do not have the verb to hand), in which
 	// case there is no declared itemsPath and inference applies.
 	var itemsPath string
@@ -860,7 +898,7 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 	}
 
 	start := time.Now()
-	resp, err := u.do(cli, req, opts.SensitiveValues)
+	resp, err := u.do(cli, req, opts.SensitiveValues, opts.CollectionRead)
 	if err != nil {
 		recordOutboundCall(ctx, httpMethod, path, 0, start)
 		return Response{}, nil, fmt.Errorf("making request: %w", err)
@@ -889,7 +927,7 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 			// The vendor's text goes on the field, NOT into Inner: Inner is what Error() renders and
 			// therefore what reaches a condition message (#433). The body is still READ either way, so
 			// connection reuse is unaffected -- what changed is where it is readable from.
-			BodySnippet: errorBodySnippet(resp.Body),
+			BodySnippet: redactSnippet(errorBodySnippet(resp.Body), opts.SensitiveValues),
 		}
 	}
 
@@ -1308,8 +1346,19 @@ type debuggingRoundTripper struct {
 	Out        io.Writer
 	PrettyJSON bool
 	// RedactValues are resolved sensitive values (e.g. a secretRef-resolved secret) that must never reach
-	// Out in cleartext. Every occurrence in the dumped request is replaced before writing.
+	// Out in cleartext. Every occurrence of each is replaced before writing, in BOTH directions.
+	//
+	// It used to be the request only. The response was dumped verbatim, so a vendor that echoes a secret
+	// back put it in the log in cleartext -- measured on 0.56.0 against Keycloak, where the resource's own
+	// resolved client secret appeared in a findby response (#566).
 	RedactValues []string
+	// SuppressResponseBody omits the response BODY from the dump, keeping the status line and the
+	// (redacted) headers.
+	//
+	// For a collection read, redaction cannot be enough: the other items' secrets were never resolved by
+	// anything, so they are not in RedactValues and no value-based rule can match them. The body is
+	// therefore not written at all. See RequestConfiguration.CollectionRead.
+	SuppressResponseBody bool
 }
 
 func (d *debuggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -1331,16 +1380,25 @@ func (d *debuggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 		return resp, err
 	}
 
-	// Dump the response: use pretty JSON if enabled, otherwise use httputil.DumpResponse
+	// Dump the response. BOTH branches redact, and both honour SuppressResponseBody: a fix applied to
+	// only one of them would close the reported case while leaving the other half leaking, and an operator
+	// who turned PrettyJSON off would be no safer. The two were measured separately for that reason.
+	dumpBody := req.URL.Query().Get("watch") != "true" && !d.SuppressResponseBody
 	if d.PrettyJSON {
-		err = d.dumpResponseWithPrettyJSON(resp, req.URL.Query().Get("watch") != "true")
+		err = d.dumpResponseWithPrettyJSON(resp, dumpBody)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		b, err := httputil.DumpResponse(resp, req.URL.Query().Get("watch") != "true")
+		b, err := httputil.DumpResponse(resp, dumpBody)
 		if err != nil {
 			return nil, err
+		}
+		// redact covers the response HEADERS too, which were previously emitted raw -- a Set-Cookie
+		// session token or an echoed credential header reached the log untouched.
+		b = redact(b, d.RedactValues)
+		if !dumpBody && d.SuppressResponseBody {
+			b = append(b, suppressedBodyNotice...)
 		}
 		d.Out.Write(b)
 		d.Out.Write([]byte{'\n'})
@@ -1373,7 +1431,7 @@ func (d *debuggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 // The caller's *http.Client is COPIED rather than mutated: callers construct their own and would not
 // expect this to reach into it. Its Timeout is preserved; its Transport and CheckRedirect are replaced,
 // because a caller-supplied Transport would bypass the dialer and is never set at any of the 14 sites.
-func (u *UnstructuredClient) do(cli *http.Client, req *http.Request, sensitive []string) (*http.Response, error) {
+func (u *UnstructuredClient) do(cli *http.Client, req *http.Request, sensitive []string, collectionRead bool) (*http.Response, error) {
 	if err := u.HostPolicy.PermitsURL(req.URL); err != nil {
 		return nil, err
 	}
@@ -1401,10 +1459,11 @@ func (u *UnstructuredClient) do(cli *http.Client, req *http.Request, sensitive [
 	if u.Debug {
 		// Wrapping the base, so the dialer stays underneath whatever is printing.
 		base = &debuggingRoundTripper{
-			Transport:    base,
-			Out:          os.Stdout,
-			PrettyJSON:   u.PrettyJSON,
-			RedactValues: sensitive,
+			Transport:            base,
+			Out:                  os.Stdout,
+			PrettyJSON:           u.PrettyJSON,
+			RedactValues:         sensitive,
+			SuppressResponseBody: collectionRead,
 		}
 	}
 
@@ -1493,8 +1552,12 @@ func (d *debuggingRoundTripper) dumpResponseWithPrettyJSON(resp *http.Response, 
 	b.WriteString("\r\n")
 
 	if !dumpBody || resp.Body == nil {
-		// No body to dump
-		d.Out.Write(b.Bytes())
+		// No body to dump. The headers still go through redact.
+		out := redact(b.Bytes(), d.RedactValues)
+		if d.SuppressResponseBody {
+			out = append(out, suppressedBodyNotice...)
+		}
+		d.Out.Write(out)
 		d.Out.Write([]byte{'\n'})
 		return nil
 	}
@@ -1519,11 +1582,17 @@ func (d *debuggingRoundTripper) dumpResponseWithPrettyJSON(resp *http.Response, 
 	}
 
 	b.WriteString("\r\n")
-	d.Out.Write(b.Bytes())
+	d.Out.Write(redact(b.Bytes(), d.RedactValues))
 	d.Out.Write([]byte{'\n'})
 
 	return nil
 }
+
+// suppressedBodyNotice replaces a collection response's body in a verbose dump. It states the REASON
+// rather than only the fact: a reader who finds a body missing and no explanation will reasonably assume
+// the response was empty, which is a different and misleading diagnosis.
+var suppressedBodyNotice = []byte("<body omitted: this is a collection read, and a collection response " +
+	"may carry other objects' secrets that no value-based redaction can match -- see issue 566>\r\n")
 
 // tryPrettyPrintJSON attempts to pretty-print JSON. Returns the formatted bytes and true if successful.
 func tryPrettyPrintJSON(data []byte) ([]byte, bool) {

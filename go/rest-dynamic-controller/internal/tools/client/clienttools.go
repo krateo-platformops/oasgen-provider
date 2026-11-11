@@ -164,6 +164,18 @@ type RequestConfiguration struct {
 	// verbose/debug request-dump output, even though they are sent to the external API. Call/FindBy redact
 	// every occurrence of these strings before writing a debug dump.
 	SensitiveValues []string
+	// CollectionRead marks a read that returns a COLLECTION of objects rather than the one being
+	// reconciled, which makes its response body unsafe to write to a log.
+	//
+	// A verbose dump redacts SensitiveValues, and that covers the reconciled resource's own
+	// secretRef-resolved values because they are known strings. The other items in a collection are not:
+	// a findby against a list endpoint returns every object the vendor will show, and a vendor that
+	// echoes secrets (Keycloak's admin client list returns every confidential client's `secret` in
+	// plaintext) puts all of them in the log. No value-based redaction can reach them, because nothing
+	// ever resolved them (#566).
+	//
+	// Set by FindBy rather than by a caller, so no call site has to remember it.
+	CollectionRead bool
 }
 
 // isInResource is a method used during a "FindBy" operation.
