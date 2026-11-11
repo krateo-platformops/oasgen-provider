@@ -3,7 +3,6 @@ package fieldmapping
 import (
 	"context"
 	"fmt"
-	"sort"
 
 	"github.com/krateo-platformops/plumbing/kubeutil/secretref"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
@@ -114,70 +113,31 @@ func ResolveRequestResolvers(ctx context.Context, dyn dynamic.Interface, mapping
 	return out, nil
 }
 
-// CollectSecretRefNames returns the deduped, sorted set of Secret names every secretRef resolver, across
-// ALL of the resource's verbs (not just the one currently being invoked), currently resolves to for this
-// CR instance. The RBAC self-provisioning grant must cover every verb's need: EnsureSecretRole fully
-// replaces the granted secret-name set on each call, so scoping this to only the current verb would drop
-// access another verb still needs (e.g. an Update call would revoke a secret only Create's resolvers use).
-// An entry whose name path is not yet resolvable on this instance is skipped rather than failing the
-// whole collection — a genuinely required-but-missing secretRef surfaces later, with a field-specific
-// error, when ResolveRequestResolvers actually resolves it for the verb being invoked.
-func CollectSecretRefNames(verbs []getter.VerbsDescription, mg *unstructured.Unstructured) []string {
-	seen := map[string]struct{}{}
-	for _, verb := range verbs {
-		for _, m := range verb.FieldMapping {
-			if m.Resolver == nil || m.Resolver.Type != "secretRef" || m.Resolver.SecretRef == nil {
-				continue
-			}
-			name, err := readStringPath(mg, m.Resolver.SecretRef.NameFromCustomResource)
-			if err != nil {
-				continue
-			}
-			seen[name] = struct{}{}
-		}
-	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// readAnyPath reads the raw value at path, whatever its JSON type. The path may index into an array
+// readStringPath reads the string at path from the custom resource. The path may index into an array
 // ("credentials[0].value") and select an element by field ("credentials[?type=otp].value") as well as
 // nest through maps.
 //
-// THE DOTTED INDEX FORM IS GONE, and this comment used to document it: "credentials.0.value" resolved
-// here for as long as this read went through the flat walker, which asks the DATA what "0" means and
-// indexes an array with it. The typed walker asks the PATH, and a bare dotted segment parses as a KEY --
-// indistinguishable from the explicitly quoted "credentials['0'].value", which was always meant to be
-// refused. So the two spellings cannot be separated after parsing and both are now refused on a custom
-// resource. The walker's own error states the migration: use [0] without quotes if you meant an index.
+// THE DOTTED INDEX FORM IS GONE. "credentials.0.value" resolved for as long as this read went through
+// the flat walker, which asks the DATA what "0" means and indexes an array with it. The typed walker
+// asks the PATH, and a bare dotted segment parses as a KEY -- indistinguishable from the explicitly
+// quoted "credentials['0'].value", which was always meant to be refused. The two spellings cannot be
+// separated after parsing, so both are refused on a custom resource now. The walker's own error states
+// the migration: use [0] without quotes if you meant an index. A body path is unaffected; those still
+// go through the flat walker. See pathparsing/typed.go.
 //
-// A body path is unaffected; those still go through the flat walker. See pathparsing/typed.go.
-func readAnyPath(mg *unstructured.Unstructured, path string) (interface{}, error) {
-	segments, err := pathparsing.ParseTyped(path)
-	if err != nil {
-		return nil, fmt.Errorf("invalid path %q: %w", path, err)
-	}
-	if len(segments) == 0 {
-		return nil, fmt.Errorf("invalid path %q: it names no field", path)
-	}
-	val, found, err := pathparsing.GetTyped(mg.Object, segments)
-	if err != nil {
-		// NOT "not found". The walker distinguishes "this path cannot apply here" from "nothing is
-		// there", and collapsing the two reported a duplicate [?key=value] match -- which matches
-		// MORE than one element -- as an absence. A consumer debugging that was told the path was
-		// not on the resource when it was on it twice.
-		return nil, fmt.Errorf("path %q cannot be read on the custom resource: %w", path, err)
-	}
-	if !found {
-		return nil, fmt.Errorf("path %q not found on the custom resource", path)
-	}
-	return val, nil
-}
-
+// An error is NOT "not found". The walker distinguishes "this path cannot apply here" from "nothing is
+// there", and collapsing the two reported a duplicate [?key=value] match -- which matches MORE than one
+// element -- as an absence. A consumer debugging that was told the path was not on the resource when it
+// was on it twice.
+//
+// TWO FUNCTIONS WERE DELETED FROM HERE (#540), and one of them had been unreachable for some time:
+//
+//	CollectSecretRefNames   collected the Secret names this controller's own per-CR Role had to grant.
+//	                        Its only caller was the self-provisioning this change removes;
+//	                        oasgen-provider has its own collector for the grant it now owns.
+//	readAnyPath             had NO caller at all, here or at origin/main before this branch -- yet its
+//	                        comment was the only place the dotted index form was ever documented. The
+//	                        form was advertised by a comment on a function nothing called.
 func readStringPath(mg *unstructured.Unstructured, path string) (string, error) {
 	segments, err := pathparsing.ParseTyped(path)
 	if err != nil {

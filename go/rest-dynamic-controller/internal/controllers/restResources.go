@@ -26,7 +26,6 @@ import (
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -91,10 +90,6 @@ type handler struct {
 	// snowplowClient resolves observeApiRef RESTActions via snowplow's /call endpoint. nil when snowplow is
 	// not configured; a resource that declares observeApiRef then fails Observe with a clear error.
 	snowplowClient *snowplow.Client
-	// selfServiceAccount is this controller's own identity, used as the RoleBinding subject when
-	// self-provisioning secretRef RBAC (issue #31). main.go hard-fails at startup if it is unset, so by
-	// the time Create/Update/Delete run it is always populated.
-	selfServiceAccount types.NamespacedName
 	// auditEmitter writes the canonical Krateo AuditEvent for each EXTERNAL write (C8, #253). Left nil
 	// when -otel-logs-enabled is off; audit.Emitter is nil-safe by design, so every call site is an
 	// unconditional Emit with no guard.
@@ -206,12 +201,6 @@ func (h *handler) SetSnowplowClient(c *snowplow.Client) {
 	if c != nil {
 		h.snowplowClient = c
 	}
-}
-
-// SetSelfServiceAccount records this controller's own ServiceAccount identity, used as the RoleBinding
-// subject when self-provisioning secretRef RBAC (issue #31).
-func (h *handler) SetSelfServiceAccount(sa types.NamespacedName) {
-	h.selfServiceAccount = sa
 }
 
 // VersionLabel records which served CRD version an instance belongs to.
@@ -1224,8 +1213,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		return nil
 	}
 
-	// First provisioning: a missing secretRef RBAC Role is normal here (expectExisting=false).
-	resolved, err := h.ensureSecretRefRBACAndResolve(ctx, cs, clientInfo, callInfo.FieldMapping, mg, false)
+	resolved, err := h.resolveRequestFields(ctx, cs, clientInfo, callInfo.FieldMapping, mg)
 	if err != nil {
 		// A match that found no item, on a lookup declaring onMissing: requeue, is the expected state while
 		// the CR defining the referent is still converging -- not a failure. Report Pending and return
@@ -1427,9 +1415,11 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		return nil
 	}
 
-	// The Role should already exist from Create (expectExisting=true): if it's unexpectedly missing, that's
-	// a hard error (decision D), not a silent recreate. Full replace of the granted secret-name set.
-	resolved, err := h.ensureSecretRefRBACAndResolve(ctx, cs, clientInfo, callInfo.FieldMapping, mg, true)
+	// THIS PATH USED TO DEMAND A ROLE THAT ONLY Create CREATES, which is why adoption never converged for
+	// any secretRef kind (#540): an adopted resource never runs Create, so Update hard-failed forever with
+	// "secretRef RBAC Role ... is missing but was expected to already exist". The grant is the provider's
+	// now, so there is nothing for Update to expect.
+	resolved, err := h.resolveRequestFields(ctx, cs, clientInfo, callInfo.FieldMapping, mg)
 	if err != nil {
 		// A match that found no item, on a lookup declaring onMissing: requeue, is the expected state while
 		// the CR defining the referent is still converging -- not a failure. Report Pending and return
@@ -1601,8 +1591,8 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 			log.Error(err, "Setting condition")
 			return err
 		}
-		// Teardown of RDC's own self-granted secretRef RBAC never depends on the RestDefinition existing.
-		// Best-effort: a failure here must not block releasing the CR's finalizer.
+		// Teardown of a per-CR secretRef Role left by an older release never depends on the RestDefinition
+		// existing. Best-effort: a failure here must not block releasing the CR's finalizer.
 		if derr := h.deleteSecretRefRBAC(ctx, mg); derr != nil {
 			log.Warn("secretRef RBAC teardown failed, continuing", "error", derr)
 		}
@@ -1681,17 +1671,14 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		return nil
 	}
 
-	// expectExisting=false: the Role may or may not exist yet (e.g. a CR deleted without ever having gone
-	// through Update), and either way EnsureSecretRole's create-or-update is correct here.
-	//
 	// A failure here is a WARNING on the delete path, not a hard stop. Resolver sources live on the CR's
 	// spec, and a CR that never created successfully routinely carries a spec the resolvers cannot read —
 	// making this fatal would hold the finalizer for a resource that does not exist. Whether the resource
 	// is still addressable is decided below, from the path parameters; if it is, the delete proceeds
 	// without the unresolved values, which for a delete request are almost never part of the call.
-	resolved, err := h.ensureSecretRefRBACAndResolve(ctx, cs, clientInfo, callInfo.FieldMapping, mg, false)
+	resolved, err := h.resolveRequestFields(ctx, cs, clientInfo, callInfo.FieldMapping, mg)
 	if err != nil {
-		log.Warn("Provisioning secretRef RBAC / resolving field mapping resolvers, continuing", "error", err)
+		log.Warn("Resolving dependent lookups / field mapping resolvers, continuing", "error", err)
 		resolved = nil
 	}
 

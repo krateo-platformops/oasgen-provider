@@ -126,7 +126,7 @@ func TestTheTwoWalkersAgreeExceptWhereStated(t *testing.T) {
 		// sniffing the typed dialect exists to remove.
 		"spec.credentials.0.type": "the DOTTED index against an ARRAY. Parses identically to " +
 			"spec.credentials['0'].type, so the typed walker refuses both; the flat walker indexed it. " +
-			"A documented form, removed on purpose -- see resolver.go's readAnyPath",
+			"A documented form, removed on purpose -- see resolver.go's readStringPath",
 	}
 
 	for _, p := range agree {
