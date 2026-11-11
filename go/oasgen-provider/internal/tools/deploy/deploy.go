@@ -411,7 +411,18 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", &PermanentRenderError{What: "the controller Deployment", Err: err}
 	}
 
-	err = kubecli.Apply(ctx, opts.KubeClient, &dep, applyOpts)
+	// The Deployment, and ONLY the Deployment, carries the restart annotation over from the live object.
+	// applyOpts is shared with the ClusterRole, Role, bindings, ServiceAccount and ConfigMap applies
+	// above, and this hook asserts its argument is a *appsv1.Deployment -- putting it on the shared
+	// options would make every one of those applies fail. So this is a copy, not a mutation of the
+	// shared value.
+	//
+	// Issue 595: without it, Apply's full Update removes the annotation the restart below writes, which
+	// costs a second, pointless rollout on the next reconcile.
+	depApplyOpts := applyOpts
+	depApplyOpts.FromCurrent = deployment.PreserveRestartAnnotation
+
+	err = kubecli.Apply(ctx, opts.KubeClient, &dep, depApplyOpts)
 	if err != nil {
 		opts.Log("Error installing deployment", "name", dep.Name, "namespace", dep.Namespace, "error", err)
 		return "", fmt.Errorf("error installing deployment: %v", err)
