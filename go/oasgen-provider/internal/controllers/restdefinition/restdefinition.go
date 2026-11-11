@@ -1766,21 +1766,92 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 
 	uli := unstructured.UnstructuredList{}
 	uli.SetGroupVersionKind(gvk)
-	err := kubecli.List(ctx, &uli)
-	if err != nil && !strings.Contains(err.Error(), "no matches for") {
 
-		// If the CRD is missing, we assume no resources exist
-		if strings.Contains(err.Error(), "the server could not find the requested resource") {
-			log("CRD not found, treating as no resources exist",
-				"Group", cr.Spec.ResourceGroup,
-				"Kind", cr.Spec.Resource.Kind,
-				"Version", observedVersion(cr),
-				"error", err.Error())
-			uli.Items = nil
-			err = nil
-		} else {
-			return fmt.Errorf("listing RestResources: %w", err)
+	// A FAILED LIST IS NOT A COUNT OF ZERO (#576).
+	//
+	// This count's only consumer removes the `restresources-still-exist` finalizer when it reads 0, so a
+	// list we could not perform must never reach it as 0 -- that deletes a RestDefinition while instances
+	// of its generated Kind are still live, which is the one thing the finalizer exists to prevent.
+	//
+	// The previous version classified by error TEXT and produced two silent zeros. One text nilled the
+	// items and cleared the error; the other skipped the whole block, so the error stayed non-nil, was
+	// never returned or logged, and was then OVERWRITTEN by the Update calls below, which reused `err`.
+	// Hence the distinct names from here on: a dropped error is now a compile error, not a silent one.
+	if lerr := kubecli.List(ctx, &uli); lerr != nil {
+		// A NO-MATCH IS NOT EVIDENCE THAT NO INSTANCES EXIST, but not for the reason it first appears.
+		//
+		// MEASURED AT THIS MODULE'S OWN PINS -- apimachinery v0.35.3, controller-runtime v0.23.3 -- by
+		// openstack-nova-operator-kog, driving a discovery server whose knowledge of the kind is flipped
+		// mid-test, offline, with the versions read back out of the built binary via `go version -m`
+		// rather than from go.mod (the two can disagree). Identical arms at v0.20.0 and at v0.22.3, the
+		// latter being what rest-dynamic-controller pins in this same repo.
+		//
+		// Corroborated independently: apiutil's `(*mapper).RESTMapping` is BYTE-IDENTICAL across
+		// v0.20.0..v0.23.3, so the result is insensitive to the version over that range. That function is
+		// the whole reload mechanism, quoted here so a reader can check it against their own vendored
+		// copy rather than trust the attribution:
+		//
+		//	kind genuinely absent from discovery   *meta.NoKindMatchError, IsNoMatchError true
+		//	CRD appears, mapper already stale      NO ERROR -- List SUCCEEDS after one discovery re-read
+		//	discovery unreachable                  *fmt.wrapError, IsNoMatchError FALSE
+		//
+		//	func (m *mapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+		//		res, err := m.getMapper().RESTMapping(gk, versions...)
+		//		if meta.IsNoMatchError(err) {
+		//			if err := m.addKnownGroupAndReload(gk.Group, versions...); err != nil { return nil, err }
+		//			res, err = m.getMapper().RESTMapping(gk, versions...)
+		//		}
+		//		return res, err
+		//	}
+		//
+		// So a stale mapper never reaches this code: it tests its inner error with IsNoMatchError and, on
+		// a miss, reloads discovery and retries. main.go passes no MapperProvider, so that is the mapper
+		// this controller gets. A NoKindMatchError here has ALREADY survived a discovery reload.
+		//
+		// If that function changes, this reasoning needs re-checking -- the conclusion rests on it being
+		// unchanged, not on the version the measurement was taken at.
+		//
+		// The reachable case is different and is this repo's own doing: "not served at observedVersion"
+		// is not "no instances". generation.RemoveStaleVersions drops entries from spec.versions while
+		// the CRD persists, so a pruned version yields a no-match from a CRD that still exists and still
+		// holds instances stored at another served version -- which this client cannot list through the
+		// version it asked for. Hence the CRD question below rather than a decision from the error alone.
+		//
+		// Note that generatedKindsServed treats an unknown kind as "definitely not served yet -- the one
+		// case that is an answer rather than a failure", and that is correct FOR ITS QUESTION. For this
+		// one it is not an answer at all: "not served" says nothing about whether instances exist. The
+		// same error means different things to the two callers, which is why there is no shared
+		// classifier here.
+		//
+		// And the generic branch below is where an UNREACHABLE DISCOVERY lands -- IsNoMatchError is false
+		// on it -- which is the error most worth wording carefully, and is not a race at all.
+		if !apimeta.IsNoMatchError(lerr) && !apierrors.IsNotFound(lerr) {
+			return fmt.Errorf("listing RestResources: %w", lerr)
 		}
+
+		// The kind is unknown to the mapper or the apiserver. Ask the authority -- the CRD itself.
+		crdName := plurals.ToGroupVersionResource(gvk).Resource + "." + gvk.Group
+		crdPresent, cerr := crdExists(ctx, kubecli, crdName)
+		if cerr != nil {
+			// Could not determine. Refusing is the safe half: it cannot delete anything, and the next
+			// pass re-decides with a working read.
+			return fmt.Errorf("the generated kind %s could not be listed (%v), and checking whether its CRD %q exists also failed: %w",
+				gvk.String(), lerr, crdName, cerr)
+		}
+		if crdPresent {
+			return fmt.Errorf("the generated kind %s is not yet discoverable (%v) although its CRD %q exists, so its instances cannot be counted; not deciding the finalizer from an unknown count",
+				gvk.String(), lerr, crdName)
+		}
+
+		// The CRD is genuinely absent, so no instances CAN exist -- deleting a CRD deletes its custom
+		// resources. This is the only path on which an unlistable kind legitimately means zero.
+		log("The generated Kind's CRD is absent, so no instances can exist",
+			"Group", cr.Spec.ResourceGroup,
+			"Kind", cr.Spec.Resource.Kind,
+			"Version", observedVersion(cr),
+			"crd", crdName,
+			"listError", lerr.Error())
+		uli.Items = nil
 	}
 
 	restResourceCount := len(uli.Items)
@@ -1791,18 +1862,16 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 			log("Existing RestResources found", "Group", cr.Spec.ResourceGroup, "Kind", cr.Spec.Resource.Kind, "Count", restResourceCount)
 			log("Adding finalizer to RestDefinition", "name", cr.Name, "finalizer", restresourcesStillExistFinalizer)
 			meta.AddFinalizer(cr, restresourcesStillExistFinalizer)
-			err = kubecli.Update(ctx, cr)
-			if err != nil {
-				return fmt.Errorf("adding restresources finalizer: %w", err)
+			if uerr := kubecli.Update(ctx, cr); uerr != nil {
+				return fmt.Errorf("adding restresources finalizer: %w", uerr)
 			}
 		}
 	} else {
 		if meta.FinalizerExists(cr, restresourcesStillExistFinalizer) {
 			log("No RestResources found, removing finalizer", "name", cr.Name, "finalizer", restresourcesStillExistFinalizer)
 			meta.RemoveFinalizer(cr, restresourcesStillExistFinalizer)
-			err = kubecli.Update(ctx, cr)
-			if err != nil {
-				return fmt.Errorf("removing restresources finalizer: %w", err)
+			if uerr := kubecli.Update(ctx, cr); uerr != nil {
+				return fmt.Errorf("removing restresources finalizer: %w", uerr)
 			}
 		}
 	}
