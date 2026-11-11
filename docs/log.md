@@ -47,12 +47,21 @@ The second is answered differently: **a collection read does not have its body w
 The provider's RBAC collector and the controller's read walked the same paths with different walkers, so a grant and a read could select different elements. rest-dynamic-controller now uses plumbing's typed walker, and three spellings change behaviour (#540, #544):
 
 ```
-a['0']  against an ARRAY   -> now REFUSED (was resolved)
-a.0     against an ARRAY   -> now REFUSED (was resolved)
-a[0]    against a MAP      -> now REFUSED (was resolved)
+a.0      against an ARRAY  -> REFUSED (was resolved).  The dotted index.
+a['0']   against an ARRAY  -> REFUSED (was resolved).  A quoted KEY, used to index.
+a[0]     against a MAP     -> REFUSED (was resolved).  An index, against something with no indices.
+
+a[0]     against an ARRAY  -> STILL WORKS, unchanged
+a['0']   against a MAP     -> STILL WORKS, unchanged
+spec.a.b plain map traversal, any depth -> STILL WORKS, unchanged
+[?key=value] predicate selectors        -> STILL WORKS, unchanged
 ```
 
+**So a bracketed index is NOT in itself a problem, and plain dotted paths are untouched.** Only two of the three refusals can be spotted from the path alone — the **dotted numeric segment** (`a.0`) and the **quoted numeric key** (`a['0']`). The third, `a[0]` against a map, depends on the shape of the data at that point and cannot be decided from the text; a screen flagging every `[N]` will report paths that are fine.
+
 `a.0` and `a['0']` parse to byte-identical segments, so this could not be fixed without dropping the dotted index.
+
+**What to look for: a dotted numeric segment (`a.0`) or a quoted numeric key (`a['0']`) — not every bracketed index.** An earlier version of this note said "a dotted numeric segment or a bracketed index", which is over-broad: `a[0]` against an array is unaffected, and a screen keyed on it sends readers to inspect working paths.
 
 **Before upgrading, screen every value that is a path INTO the custom resource — and screen it BY KEY NAME anywhere in the document, not by walking a list of locations.** The complete key set, derived from the API types rather than written by hand:
 
