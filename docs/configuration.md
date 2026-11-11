@@ -266,6 +266,84 @@ kubectl get pods -n kube-system -o \
 The live control is the half worth keeping: a restart count of zero is equally consistent with "healthy"
 and with "this cluster is four minutes old", and only one of those tells you a duration is safe to quote.
 
+## Finding out who last wrote a field
+
+When a value on a generated object is not what you expect, the first question is whether this provider
+wrote it at all. `managedFields` answers that per field, and it is usually faster than reading any
+controller's logs.
+
+```bash
+kubectl get cm <kind>-controller-configmap -n <namespace> \
+  -o jsonpath='{range .metadata.managedFields[*]}{.manager}{"  "}{.operation}{"  "}{.time}{"\n"}{end}'
+```
+
+A generated ConfigMap's `data` is written by the provider's own field manager. The provider's *template
+source* — `oasgen-provider-rdc-configmap`, which the chart renders `rdc.env` into — is written by `helm`.
+Seeing the two is how one session established that no third party was rewriting a generated ConfigMap,
+which eliminated a whole class of explanation in a single call.
+
+> **`kubectl` strips `managedFields` unless you ask for them.** With `-o json` or `-o yaml` and no
+> `--show-managed-fields`, the field is removed from the output. A probe that omits the flag sees no
+> managers and concludes the fields were *cleared* — a wrong answer that looks like a finding. Measured by
+> `azuredevops-provider-kog`, 2026-11-11, while diagnosing issue 599.
+>
+> It is the same shape as every other instrument trap in this file: the query was wrong, the output was
+> empty, and the emptiness read as a fact about the world.
+
+## Did the generated controller actually restart?
+
+Three of the obvious signals do not answer this, and two of them are actively misleading.
+
+| signal | what it actually tells you |
+|---|---|
+| `metadata.generation` | **not a rollout count.** It increments on any `spec` change — `replicas`, `strategy`, `revisionHistoryLimit` — and a no-op update does not bump it at all |
+| `kubectl.kubernetes.io/restartedAt` | what something *wrote*. Before 0.60.0 the apply strips it, so it can be absent even when a roll did happen |
+| `status.observedGeneration` | that the Deployment controller has seen the spec, not that any pod changed |
+
+Measured on 25 generated controllers across two ConfigMap changes: `generation` went `1 → 2 → 3` while
+`deployment.kubernetes.io/revision` stayed at `1`, there was exactly one ReplicaSet per Deployment created
+at install time, and **no pod was created after either change**. Generation moved twice and nothing rolled.
+One session had to withdraw a 25-of-25 "pass" for counting a generation bump as a roll.
+
+**Ask the two ground-truth channels, and require both to agree:**
+
+```bash
+# 1. a new ReplicaSet — each distinct pod template gets one; the annotation orders them
+kubectl get rs -n <namespace> -l app.kubernetes.io/name=<kind>-controller \
+  -o custom-columns=NAME:.metadata.name,REV:.metadata.annotations.'deployment\.kubernetes\.io/revision',CREATED:.metadata.creationTimestamp
+
+# 2. pod identity and age — what a user actually experiences
+kubectl get pods -n <namespace> -l app.kubernetes.io/name=<kind>-controller \
+  -o custom-columns=NAME:.metadata.name,CREATED:.metadata.creationTimestamp,RESTARTS:.status.containerStatuses[0].restartCount
+```
+
+A new ReplicaSet with no change in pod identity is not a roll anyone experiences. A change in pod identity
+with no new ReplicaSet is an eviction or a node event, not a roll caused by whatever you changed. Only both
+together establish that your change rolled the controller.
+
+`restartCount` is worth reading separately: it counts container restarts *within* a pod, so
+`restartCount 0` on a pod whose `creationTimestamp` falls inside your change window means the pod was
+**recreated** rather than restarted — which is Kubernetes rolling the Deployment itself, for instance
+after an `rdc.image.tag` change alters the pod template.
+
+## Which changes reach a running controller, and which need a restart
+
+The generated controller receives its configuration through `envFrom: configMapRef`, which is read **once
+at container start** and referenced by name. So a change to the ConfigMap's *data* leaves the pod template
+untouched and cannot reach a running process by itself.
+
+| what you change | how it reaches the controller |
+|---|---|
+| `rdc.image.tag` | changes the pod template, so **Kubernetes** rolls the Deployment. Nothing provider-specific is involved |
+| `rdc.env`, and anything else in the generated ConfigMap | nothing changes the pod template, so **the provider must restart the Deployment explicitly** |
+| a `secretRef` Secret's *name set* | RBAC only. Authorization is evaluated by the apiserver per request and the controller caches no decision, so this needs **no** restart and must not cause one |
+
+> **On 0.59.0 the second row does not work.** The restart never fires, so an `rdc.env` change updates the
+> ConfigMap, reports success through `helm upgrade`, and never reaches the running controller — with no
+> error, event or condition anywhere (issue 599). The workaround on that release is to delete the generated
+> controller's pods yourself; they read the updated ConfigMap at start. Fixed in 0.60.0. The first row is
+> unaffected on every version, so an image upgrade on 0.59.0 did take effect.
+
 ## Inspecting a running controller — there is no shell in either image
 
 Both images run on `gcr.io/distroless/static:nonroot`: `rest-dynamic-controller` since **0.20.0**, and
