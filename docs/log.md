@@ -52,11 +52,25 @@ a.0     against an ARRAY   -> now REFUSED (was resolved)
 a[0]    against a MAP      -> now REFUSED (was resolved)
 ```
 
-`a.0` and `a['0']` parse to byte-identical segments, so this could not be fixed without dropping the dotted index. **Check `fieldMapping`, `identifiers`, `additionalStatusFields` and `requestFieldMapping` for a dotted numeric segment or a bracketed index before upgrading** — and parse the rendered definitions rather than grepping, because `[0]` inside a `responseTransform` jq body is not a path and is not affected.
+`a.0` and `a['0']` parse to byte-identical segments, so this could not be fixed without dropping the dotted index.
+
+**Before upgrading, screen every field that carries a path INTO the custom resource. That surface is wider than it looks, and the obvious four keys miss two of it:**
+
+```
+fieldMapping[].inCustomResource
+requestFieldMapping[].inCustomResource                     deprecated but LIVE (helper.go:46)
+fieldMapping[].resolver.secretRef.nameFromCustomResource
+fieldMapping[].resolver.secretRef.keyFromCustomResource
+fieldMapping[].resolver.when.customResourceFieldPresent
+dependentLookups[].parameters[].inCustomResource           <- a SEPARATE top-level subtree
+identifiers[]     additionalStatusFields[]
+```
+
+**`dependentLookups` is not inside `fieldMapping`** — it is its own field on `spec.resource`, and a chained lookup's parameters routinely read the CR. A screen told to walk "fieldMapping, identifiers, additionalStatusFields and requestFieldMapping" never reaches it, and four consumer corpora were screened against exactly that list, including this release's own advice. Parse the rendered definitions rather than grepping, because `[0]` inside a `responseTransform` jq body is not a path and is not affected.
 
 **And give that screen a control hit planted inside `verbsDescription`, not only at the resource level.** A consumer's first screen reported a clean it had not measured: it excluded jq subtrees with a *substring* match on `transform|jq|script|body`, and **`script` matches `verbsDescription`** — "De-**script**-ion". The whole `verbsDescription` subtree was therefore skipped, which is where every `requestFieldMapping` in that corpus lives, so the screen printed zero hits while never looking at the key most likely to carry the dotted form. It was caught only because a planted control hit sat *inside* `requestFieldMapping` and the run returned 2 of 3. Anchor the exclusion (`^(.*transform|jq|script|.*body)$`), and plant the control where the real risk is.
 
-Four consumer corpora measured clean: 24 of 24 kinds live, 0 of 669 path-valued strings, 0 across 25 definitions, and 0 across 10 documents including path-item-level parameters.
+Four consumer corpora measured clean against the narrower list — 24 of 24 kinds live, 0 of 669 path-valued strings, 0 across 25 definitions, and 0 across 10 documents including path-item-level parameters — **and all four were screened before `dependentLookups[].parameters[].inCustomResource` was identified as part of the surface.** Treat those cleans as covering the `fieldMapping` family only, and re-screen the lookup subtree.
 
 ### rest-dynamic-controller stops granting itself RBAC — BREAKING
 
