@@ -4,7 +4,7 @@ title: oasgen-provider — log
 description: Curated chronological history of oasgen-provider — notable changes and decisions, newest first.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, history]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-11T00:00:00Z
 ---
 
 # Log
@@ -12,6 +12,117 @@ timestamp: 2026-11-09T00:00:00Z
 Curated history (notable changes, decisions); release notes stay in GitHub Releases.
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
+
+## 2026-11-11 — 0.57.0
+
+**Two credential leaks into the controller log, one of which needed no opt-in flag; two breaking changes to how a path is read and where RBAC comes from; and an upgrade that could record a regeneration it had skipped.** Both leaks were found by consumers on published releases, and the regeneration defect was reproduced on demand by one.
+
+### A verbose dump no longer writes the vendor's response to the log
+
+`redact` had exactly **one** call site, on the request. The response was written verbatim, so a vendor that echoes a secret back put it in the controller log in cleartext. Measured on published 0.56.0: a client with a `clientSecretRef` showed `***REDACTED***` in the request and its resolved secret in the findby response — and because that vendor's admin API returns every confidential client's `secret` in plaintext, so would every **other** client's in the realm (#566).
+
+**Wider than reported, in two ways.** The report named the pretty-JSON dump; `httputil.DumpResponse` leaked identically, so an operator who turned pretty JSON off was no safer and a fix to one branch would have looked complete. And `redact` also matches credential **header names**, so response headers came back untouched — a `Set-Cookie` session token or an echoed credential header reached the log.
+
+Three leaks, and only two are value-redactable:
+
+```
+the resource's OWN resolved secretRef value, echoed back   -> in RedactValues; now redacted
+OTHER objects' secrets in a collection response            -> NOT known values. No value-based
+                                                              rule can ever match them.
+response headers                                           -> now redacted
+```
+
+The second is answered differently: **a collection read does not have its body written at all.** `FindBy` marks the call — the single entry point for both the paginated and single-call paths, and never `Call`, which also serves get, create, update and delete. The omitted body leaves a notice stating the **reason**, because a body missing without explanation reads as an empty response, which is a different and misleading diagnosis.
+
+### And the vendor's error text is redacted too — a channel that needed no flag
+
+`logVendorBody` writes the vendor's error body at **INFO on every failed call**, with no `krateo.io/connector-verbose` required, and Info is deliberate so that it is visible on a default install. **So this was the wider of the two leaks while being the narrower in content.** `VendorBodySnippet`'s own comment already stated the rule — *"never log a credential at any level: Krateo exports logs to the platform's log store, so a log line is narrower than a condition but is not private"* — and nothing enforced it. Both construction sites now redact, `Call` and the pagination path (#567).
+
+**Neither leak is a regression.** Both are as old as the code paths they sit in. **For anyone upgrading from 0.56.0 or earlier: logs captured while `connector-verbose` was on, and logs containing vendor error bodies from any version, should be treated as containing whatever those responses carried.**
+
+**What redaction still does not cover**, stated so it is not over-read: a value is redactable only if a `secretRef` resolver produced it. A credential that reaches the request any other way is not in the list. Redaction is a backstop for the mechanism that keeps credentials out of the CR, not a general-purpose scrubber — and the stronger mitigation, confirmed by a consumer, is that a secret parameter absent from the generated schema cannot be carried in cleartext by a CR at all.
+
+### One walker for custom-resource reads — BREAKING
+
+The provider's RBAC collector and the controller's read walked the same paths with different walkers, so a grant and a read could select different elements. rest-dynamic-controller now uses plumbing's typed walker, and three spellings change behaviour (#540, #544):
+
+```
+a.0      against an ARRAY  -> REFUSED (was resolved).  The dotted index.
+a['0']   against an ARRAY  -> REFUSED (was resolved).  A quoted KEY, used to index.
+a[0]     against a MAP     -> REFUSED (was resolved).  An index, against something with no indices.
+
+a[0]     against an ARRAY  -> STILL WORKS, unchanged
+a['0']   against a MAP     -> STILL WORKS, unchanged
+spec.a.b plain map traversal, any depth -> STILL WORKS, unchanged
+[?key=value] predicate selectors        -> STILL WORKS, unchanged
+```
+
+**So a bracketed index is NOT in itself a problem, and plain dotted paths are untouched.** Only two of the three refusals can be spotted from the path alone — the **dotted numeric segment** (`a.0`) and the **quoted numeric key** (`a['0']`). The third, `a[0]` against a map, depends on the shape of the data at that point and cannot be decided from the text; a screen flagging every `[N]` will report paths that are fine.
+
+`a.0` and `a['0']` parse to byte-identical segments, so this could not be fixed without dropping the dotted index.
+
+**What to look for: a dotted numeric segment (`a.0`) or a quoted numeric key (`a['0']`) — not every bracketed index.** An earlier version of this note said "a dotted numeric segment or a bracketed index", which is over-broad: `a[0]` against an array is unaffected, and a screen keyed on it sends readers to inspect working paths.
+
+**Before upgrading, screen every value that is a path INTO the custom resource — and screen it BY KEY NAME anywhere in the document, not by walking a list of locations.** The complete key set, derived from the API types rather than written by hand:
+
+```
+inCustomResource              customResourceFieldPresent     (resolver.when)
+nameFromCustomResource        customResourceFieldAbsent      (resolver.dependentLookup.when,
+keyFromCustomResource                                         and dependentLookups[].when)
+equalsFromCustomResource      plus the identifiers[] and additionalStatusFields[] lists
+```
+
+`inPath`, `inQuery`, `inBody` and `inResponse` are API-side and are NOT affected — a useful negative control for any screen.
+
+**Screen by key name because the locations are the part everyone gets wrong.** These keys live in at least five places: inside `fieldMapping[]`, inside the deprecated-but-live `requestFieldMapping[]`, under a `secretRef` resolver, under **two different** `when` shapes with **different key names** (`ResolverWhen.customResourceFieldPresent` at `resolver.when`; `LookupWhen.customResourceFieldAbsent` at `resolver.dependentLookup.when`), and inside `dependentLookups[]`, which is its own field on `spec.resource` and not nested in `fieldMapping` at all.
+
+**The location list in this note was wrong three times before it was replaced by the rule above** — it initially named four keys and missed the whole `dependentLookups` subtree, then missed `equalsFromCustomResource`, then missed `customResourceFieldAbsent` and the second `when` position. Each gap was found by a consumer measuring their own corpus, not by reading it again. A key-name screen cannot have that failure mode, because it does not need to know where the key lives.
+
+**And plant the positive control inside the subtree you are worried about.** One corpus's first screen printed zero hits while never looking at the key most likely to carry the dotted form: it excluded jq subtrees with a *substring* match on `transform|jq|script|body`, and `script` matches **`verbsDescription`** — "De-**script**-ion" — so the subtree holding every `requestFieldMapping` was skipped. It was caught only because a planted hit sat inside `requestFieldMapping` and the run returned 2 of 3. Anchor the exclusion (`^(.*transform|jq|script|.*body)$`), and plant the control where the risk is, not at the top level.
+
+Parse the rendered definitions rather than grepping for paths, because `[0]` inside a `responseTransform` jq body is not a path — though note a bare grep for a key NAME is immune to the subtree-skipping bug above, and one corpus's grep was the more honest instrument for exactly that reason.
+
+Consumer corpora measured clean: 24 of 24 kinds live, 0 of 669 path-valued strings, 0 across 10 documents including path-item-level parameters, and **one corpus re-screened against the complete key set above** — 25 definitions, its single `dependentLookups` entry walked (all CR paths plainly dotted, 0 indexed forms), `customResourceFieldPresent` unused, with controls planted inside both `dependentLookups[].parameters` and a `resolver.when` returning 2 of 2. The other cleans predate the complete key set and cover the `fieldMapping` family only.
+
+### rest-dynamic-controller stops granting itself RBAC — BREAKING
+
+**A subject cannot grant itself less than nothing.** Self-imposed least privilege needs a broader grant to narrow *from*, and 0.54.0 removed exactly that. The controller's self-provisioning of per-CR `secretRef` Roles is gone; the provider does it from the generated Kind's instances, as shipped in 0.56.0. Teardown of Roles left by older releases is kept, so an upgrade still cleans up after itself (#540, #571).
+
+### An upgrade can no longer record a regeneration it skipped
+
+`status.generatorBuild` was stamped **before** the CRDs were rendered. So a reconcile that took the not-yet-deployed path stamped the new build, `generatorChanged` then compared equal forever, and the CRD kept the old schema with no error anywhere — a provider reporting the new build while serving the old schema. Reproduced on demand by a consumer (delete the per-kind controller Deployment, then upgrade) and confirmed on two corpora. The stamp now happens only after a successful render (#541, #549).
+
+**Do not reproduce it by scaling those Deployments to zero**: `*Spec.Replicas == Status.ReadyReplicas` makes `0 == 0`, so a scaled-to-zero Deployment reads as **ready**, not absent (#550).
+
+### Verifying the upgrade
+
+`status.generatorBuild` should read `0.57.0-<sha>` on every RestDefinition afterwards — the tag joined to the merge commit, since `BUILD_VERSION` is `<ref_name>-<sha>`.
+
+**Do not read the render half off the CRD's `resourceVersion`.** None of this release's changes touch the generator, so a correct render produces byte-identical CRDs and the apiserver does not persist a no-op update — every `resourceVersion` legitimately stays put. The channel that does carry it is the provider's own per-kind `Applying CRD` / `Applied CRD` log pair, which is emitted on a default install because the chart hardcodes `--debug`. A kind with neither line is the defect; a kind with `Applying` and no `Applied` is a failed apply. Count provider restarts too — a restart discards earlier lines, and "no line because nothing rendered" and "no line because the log was truncated" are otherwise indistinguishable.
+
+### What this release does NOT contain
+
+```
+#555   a resolver-supplied path or query parameter is still REQUIRED in the generated spec
+#548   a CR deleted inside the create window can still leave an enabled orphaned external resource
+#543   AUDIT-4 conformance for rest-dynamic-controller and oasgen's RBAC/admission writes
+#568   no test asserts that every client reaching the network carries its credential
+#569   nothing screens tracked text for conflict markers
+#564   a 69 MiB compiled binary is still tracked on main
+```
+
+### Upgrade notes
+
+```
+forward-only       two breaking changes; a downgrade after upgrading is not a supported path
+order              CRDs chart first, then the provider
+the dotted index   check your path-valued fields BEFORE upgrading (see above)
+self-granted RBAC  if anything relied on the controller provisioning its own per-CR Roles,
+                   that is gone; the provider's grant is now the only one
+#545               the secretRef-RBAC change shipped as #571, not #545: GitHub closed #545
+                   irreversibly when its base branch was deleted by #544's squash merge, and
+                   the same commit was reopened as #571 rebased onto main
+```
 
 ## 2026-11-09 — 0.56.0
 
