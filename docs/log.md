@@ -15,6 +15,34 @@ provider and the rest-dynamic-controller together.
 
 ## 2026-11-11 — 0.59.0
 
+> **Correction (2026-11-11, issue 595).** This section says a generated controller is restarted "only when
+> its ConfigMap data changed", which is true, and implies that is the only pod-template change a reconcile
+> produces. **It is not.** `kube.Apply` performs a full `Update` with the *rendered* Deployment, and the
+> rendered asset carries **no annotations at all** — so every `Deploy` call strips whatever
+> `kubectl.kubernetes.io/restartedAt` the live object holds. The annotation therefore **oscillates**: set on
+> the reconcile that sees the ConfigMap change, stripped by the next one, and each is a pod-template change
+> that rolls the pods.
+>
+> **So a single ConfigMap change produces TWO rolls, not one.** Measured by a consumer across 25
+> controllers: every ConfigMap hash changed and returned to its pre-flip value, every controller rolled, and
+> `restartedAt` read absent both before *and* after — because their snapshots bracketed the stripping roll
+> rather than the setting one.
+>
+> **The improvement in this release is real and larger than the remaining defect.** Before it, the restart
+> was unconditional, so a roll happened on *every* reconcile reaching `Deploy` — and the annotation was
+> re-set each time, which is why the strip was a silent no-op and was never observed. This change removed
+> what was masking it rather than causing it, which is the same pattern as the defect it fixes.
+>
+> ```
+> 0.58.0 and earlier   a roll on EVERY reconcile that reached Deploy
+> 0.59.0               two rolls per ConfigMap change, none otherwise
+> intended             one roll per ConfigMap change, none otherwise
+> ```
+>
+> The fix is to copy the live Deployment's `restartedAt` onto the rendered object before applying, so the
+> apply cannot strip it — the same shape as preserving `spec.replicas` for #550, and the second place in
+> this repo where an apply from a rendered template destroys state another writer owns.
+
 **Two defects that made an upgrade noisy and a controller's logs unreadable.** Neither is new in 0.57.0 — both predate it — but 0.57.0 gave each a reason to fire often enough to be noticed, and both were found by consumers measuring their own upgrades rather than by any check of ours.
 
 ### A successful reconcile no longer reports an error
