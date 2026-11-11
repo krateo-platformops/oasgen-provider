@@ -1780,11 +1780,16 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 	if lerr := kubecli.List(ctx, &uli); lerr != nil {
 		// A NO-MATCH IS NOT EVIDENCE THAT NO INSTANCES EXIST, but not for the reason it first appears.
 		//
-		// MEASURED by openstack-nova-operator-kog at controller-runtime v0.20.0 / apimachinery v0.32.4,
-		// driving a discovery server whose knowledge of the kind can be flipped mid-test. THAT IS NOT
-		// THIS MODULE'S PINS -- we are on v0.23.3 / v0.35.3, three minors ahead on both. The result
-		// carries anyway because apiutil's `(*mapper).RESTMapping` is BYTE-IDENTICAL between those two
-		// controller-runtime versions (verified), and that function is the whole reload mechanism:
+		// MEASURED AT THIS MODULE'S OWN PINS -- apimachinery v0.35.3, controller-runtime v0.23.3 -- by
+		// openstack-nova-operator-kog, driving a discovery server whose knowledge of the kind is flipped
+		// mid-test, offline, with the versions read back out of the built binary via `go version -m`
+		// rather than from go.mod (the two can disagree). Identical arms at v0.20.0 and at v0.22.3, the
+		// latter being what rest-dynamic-controller pins in this same repo.
+		//
+		// Corroborated independently: apiutil's `(*mapper).RESTMapping` is BYTE-IDENTICAL across
+		// v0.20.0..v0.23.3, so the result is insensitive to the version over that range. That function is
+		// the whole reload mechanism, quoted here so a reader can check it against their own vendored
+		// copy rather than trust the attribution:
 		//
 		//	kind genuinely absent from discovery   *meta.NoKindMatchError, IsNoMatchError true
 		//	CRD appears, mapper already stale      NO ERROR -- List SUCCEEDS after one discovery re-read
