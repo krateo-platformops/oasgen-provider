@@ -64,9 +64,34 @@ Mutation testing against those two suites showed two mutations that disable the 
 
 So this release adds an end-to-end test that drives the real `Deploy` against the real renderer with a fake client, and changes the ConfigMap's data **the way a `helm upgrade` does — by rewriting the template file**, since Helm ranges `rdc.env` into the asset at chart-render time and the provider's input is a file on disk. It asserts three passes: a first deploy must not roll, a data change must, and an unchanged reconcile must leave the stamp untouched. It kills both surviving mutations and four more.
 
-### Runtime evidence is outstanding
+### Runtime evidence: measured, paired, on one cluster in one sitting
 
-No pod has started from this code at the time of writing. PR builds do not publish images, so a release is the earliest point at which any of this can be exercised on a cluster. A consumer will verify on a fresh disposable cluster with the criterion **revision delta plus new pod creation time** — never `generation` or `restartedAt` alone, both of which describe what something *wrote* rather than what happened. `generation` in particular is not a rollout count: it increments on any `spec` change and a no-op update does not bump it, which is how a 25-of-25 "pass" came to be withdrawn during this investigation.
+Measured by `azuredevops-provider-kog` on a fresh disposable GKE cluster, **25 generated controllers**, with the before and after arms on the **same corpus in the same sitting** — which no earlier measurement of this behaviour had. The criterion throughout was **revision delta plus pod creation time**, never `generation` or `restartedAt` alone.
+
+Every arm carried a gate that had to hold for the arm to count: on a flip, all 25 ConfigMap data hashes must *change*; on the upgrade-only arm, all 25 must stay *unchanged*. A gate failure voids the arm rather than reporting a pass.
+
+| # | arm | result |
+|---|---|---|
+| 1 | **0.59.0**, add an `rdc.env` key | gate OK, **0 of 25 rolled** — the defect reproduced |
+| 2 | bare upgrade to **0.60.0**, no flip | hashes unchanged 0/25, **25/25 rolled on the rdc image bump alone**, 0 restart lines in either provider pod |
+| 3 | **0.60.0**, remove the key | **25/25 rolled exactly once** (rev 2→3), `restartedAt` `None → T`, no rev 4 |
+| 4 | **0.60.0**, add it back | **25/25 rolled exactly once** (rev 3→4), `restartedAt` `T → T'`, no rev 5 |
+
+**Arm 1 is the one that makes the rest mean something.** It reproduces the defect on a fresh install with a gate proving the flip landed — so "0 rolled" is a measurement rather than an absent signal, which the original report could not distinguish.
+
+**`"Restarting the generated controller"` went from 0 occurrences to 25, one per controller.** On every released version before this one that line had never appeared at all.
+
+**Arm 4 separates the two halves of `FromCurrent`,** which no other arm can: an existing stamp is carried over *and* a fresh one is still written on top (`21:22:03Z → 21:30:35Z`). Preserving a field and letting its owner rewrite it are different behaviours, and only a second consecutive restart distinguishes them.
+
+**That the annotation survives is evidenced by the absence of a further ReplicaSet,** not only by its value. A strip is necessarily a pod-template change, so it would necessarily leave another revision behind; across two polls at the default 3-minute interval there was none.
+
+**Not measured: the RBAC-only path on 0.60.0.** A `secretRef` Secret-name-set change must roll nothing, and that arm did not run — the cluster lacked the vendor credential it needs. The evidence for it is an earlier arm on **0.59.0** (revision 1→1, no new pod). Nothing in this release touches that path, but it is untested *on this version* and is recorded as such rather than inferred.
+
+### Every version bump rolls every generated controller, once, by design
+
+Arm 2 measured this and it is worth stating plainly, because it is easy to mistake for a restart bug: the generated controller's image tag defaults to `.Chart.AppVersion`, which the release process substitutes into the chart. So a provider upgrade changes the rendered pod template and **Kubernetes** rolls each controller once — nothing provider-specific is involved, and it happens on every upgrade. Note that `git diff` between two tags shows no chart change at all, because the substitution happens at package time.
+
+So "the controllers rolled after an upgrade" is never by itself evidence that the restart gate fired. Read the provider log, or the template diff: an image-driven roll carries no `restartedAt`, a restart-driven one does.
 
 ### Also in this release, with no behaviour change
 
