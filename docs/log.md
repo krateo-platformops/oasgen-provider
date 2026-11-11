@@ -13,6 +13,51 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-11 — 0.59.0
+
+**Two defects that made an upgrade noisy and a controller's logs unreadable.** Neither is new in 0.57.0 — both predate it — but 0.57.0 gave each a reason to fire often enough to be noticed, and both were found by consumers measuring their own upgrades rather than by any check of ours.
+
+### A successful reconcile no longer reports an error
+
+Every reconcile that persisted status logged `cannot update managed resource status: ... the object has been modified`, on a pass that had succeeded (#579).
+
+provider-runtime reads the managed object **once** at the top of a reconcile, hands that same pointer to `Update`, and after we return writes its own status onto it — through a helper that calls its function once and does **not** retry on conflict. Our `persistStatusWithRetry` wrote through a freshly read object, so the server's `resourceVersion` moved and the runtime was left holding the one it had read. Its write then failed, the reconcile returned an error, and its condition write for that pass was lost.
+
+**Deterministic, not racy, which is how it was found: one conflict per definition, every time.** Measured on the 0.57.0 upgrade as **25 of 25** kinds by one consumer and **4 of 4** by another. An exact one-to-one ratio is the signature of something structural.
+
+```
+persistStatusWithRetry occurrences in restdefinition.go
+  0.54.0  6      0.55.0  6      0.56.0  6      0.57.0  6
+```
+
+Unchanged, so this is not a 0.57.0 regression. #549's `generatorBuild` stamp is only what made **every** kind take the status-writing path at once on an upgrade.
+
+**If you built tooling that tolerates this, you can retire it after upgrading** — but retire the *tolerance*, not the check. The benign signature was that message **plus** a preceding `Updated RestDefinition` for the same definition; "any other error is a failure" is the half doing the work.
+
+### A generated controller is no longer restarted on every reconcile
+
+Each change to the set of Secret names a kind's `secretRef` resolvers reference restarted that kind's controller, losing its logs (#588).
+
+The restart was **unconditional**. Its comment said *"Deployment needs to be restarted if the hash changes to get the new configmap"* and no hash was ever consulted. Once #510/#527 made a secretRef Secret-name change a reason to redeploy, that became one restart per CR referencing a new Secret, or per CR that was the last to reference one — **a per-CR action with a per-Kind blast radius.**
+
+A consumer measured **8 Deployment revisions in 15 seconds**, against 2 across a full day on 0.56.0. Their falsifier then confirmed it in both directions with the ConfigMap's resourceVersion **and** data hash provably identical across the restarts — which refutes the comment using the comment's own stated justification.
+
+**Only the ConfigMap's data can require a restart**, and the mount style is why: the generated controller reads it through `envFrom: configMapRef`, so the values are fixed at container start *and* the reference is by name. A data change therefore leaves the pod template untouched, and the Deployment has nothing to roll on. Everything else the pod consumes — the image, explicit `env:`, volumes, resources — is *in* the pod template, which a Deployment rolls by itself. RBAC needs no restart at all: authorization is evaluated by the apiserver on every request and the controller caches no decision.
+
+**The readiness check is removed deliberately.** `if dep.Status.ReadyReplicas == dep.Status.Replicas` was written as a guard against restarting something already broken, but with an unconditional restart above it, it was the only brake on a restart storm — and it braked *less* the healthier the controller was, since a mid-roll pod is not ready. A ConfigMap change arriving while a pod is still rolling is exactly when a restart is required, because that pod may have started before the change.
+
+**What still restarts, so this is not read as "restarts stopped":** a `rdc.env` change such as `REST_CONTROLLER_DEBUG`, which renders into the ConfigMap's `data`. That is a real environment change and every generated controller must roll to pick it up.
+
+### Runtime evidence for #588 is outstanding
+
+Stated rather than left to be inferred from a green release. The defect was measured on a cluster; **the fix has not been.** It is supported by unit tests — six table rows with both outcomes present, a mutation run killing both a revert-to-always-restart and an over-fix-to-never-restart, and a structural test that RBAC cannot reach the decision — and by nothing that has executed against an apiserver.
+
+The arm that matters is not the one confirming the defect is gone. It is the opposite: **a real ConfigMap change must still roll every controller.** If it does not, this release silently leaves controllers with stale environment, which produces no error and no restart to notice. That arm runs on these released images.
+
+### Also in this release, with no behaviour change
+
+`docs/configuration.md` gains two sections: how to force a reconcile when measuring something — the poll interval is **3 minutes** by default, so a shorter wait measures your own patience — and why any timed measurement needs the cluster's control plane checked first, since object reads stay correct under a starved `kube-controller-manager` while timing and garbage collection do not.
+
 ## 2026-11-11 — 0.58.0
 
 **A parameter the controller supplies is no longer demanded from the author — and a `secretRef` whose value would land in a request URL is now refused at generation rather than warned about.** One behaviour change, cut as its own release because a consumer's test run was blocked on it.
