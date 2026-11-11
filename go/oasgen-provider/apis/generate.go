@@ -11,7 +11,7 @@
 //
 // ../crds is the generated output, but it is not what reaches a cluster. The CRDs are VERSIONED AND
 // SHIPPED by helm/oasgen-provider-crds (version: CHART_VERSION, substituted to the release tag), and
-// they are the schema rest-dynamic-controller's envtest suite validates fixtures against. Both used to
+// they are the schema rest-dynamic-controller's kind-cluster suite validates fixtures against. Both used to
 // be hand-copied, and only ../crds was drift-checked, so the copy that users install could silently
 // fall behind the generated one -- which is precisely what happened while fixing #51: `make generate`
 // updated ../crds alone and the shipped chart kept the stale compareScope enum, with CI green. The

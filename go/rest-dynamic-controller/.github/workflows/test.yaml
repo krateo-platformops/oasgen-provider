@@ -12,7 +12,7 @@
 # released with zero CI. rest-dynamic-controller 0.16.0 and 0.16.1 shipped that way — including a
 # regression test written the same day that had never executed in CI.
 #
-# -tags=unit,integration is deliberate: the envtest/kind suite in internal/controllers is only
+# -tags=unit,integration is deliberate: the kind-cluster suites are only
 # compiled under the `integration` tag, and dropping it silently skips those tests rather than
 # failing. -p 1 keeps packages that stand up clusters from racing each other.
 name: test
