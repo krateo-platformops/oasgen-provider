@@ -91,6 +91,23 @@ helm upgrade ... --set rdc.env.REST_CONTROLLER_DEBUG=true
 helm upgrade ... --set-string rdc.env.REST_CONTROLLER_DEBUG=true
 ```
 
+**To REMOVE an `rdc.env` key, `--set-string` is not enough** — a bare `helm upgrade` reuses the previous
+release's values, so the key survives and nothing changes:
+
+```bash
+# wrong: the key is still there afterwards, and the ConfigMap is unchanged
+helm upgrade ...
+
+# correct: either reset to the chart defaults and re-supply what you want
+helm upgrade ... --reset-values
+# or pass a values file with the key absent
+helm upgrade ... -f values-without-the-key.yaml
+```
+
+This cost a consumer session a 25-controller test run: their probe flipped the key off, every value still
+read `"true"` afterwards, and the run was correctly reported as **void** rather than as a pass — the
+question "did removing the key roll the controllers?" has no answer when the key was never removed.
+
 The error names the type rather than the fix, so it reads like the field does not work. It does;
 this is the only spelling of it. (`REST_CONTROLLER_DEBUG` is also the supported way to turn on the
 generated controllers' Debug logging — the `-debug` flag is the same switch but lives on the
