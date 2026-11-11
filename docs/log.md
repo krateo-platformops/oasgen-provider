@@ -13,6 +13,60 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-11 — 0.58.0
+
+**A parameter the controller supplies is no longer demanded from the author — and a `secretRef` whose value would land in a request URL is now refused at generation rather than warned about.** One behaviour change, cut as its own release because a consumer's test run was blocked on it.
+
+### A resolver-supplied path or query parameter is no longer required — BREAKING for a CR that set one
+
+A path or query parameter whose value comes from a resolver — a `dependentLookup`, a `secretRef` — and which declares **no** `inCustomResource` stayed `required` in the generated CRD. The author was asked to supply a value the controller supplies, and a CR that correctly omitted it was rejected at admission (#555).
+
+Measured by keycloak-provider-kog on a real Keystone kind, `PUT/DELETE /projects/{project_id}/groups/{group_id}/roles/{role_id}` with all three ids from `dependentLookups`:
+
+```
+released 0.57.0   spec.required = configurationRef, group, groupDomain, group_id,
+                                  project, projectDomain, project_id, role, role_id
+0.58.0            spec.required = configurationRef, group, groupDomain,
+                                  project, projectDomain, role
+                  project_id / group_id / role_id gone from `properties` too, not only
+                  from `required`; a names-only CR is admitted by server-side dry-run
+```
+
+**The field is removed from `properties`, which is where the upgrade consequence lives.** A CR that previously set one of these values does not get an error — the apiserver **prunes** the value silently, because the field is no longer in the schema. The same class of change already produced that warning text for `fieldMapping`-supplied parameters; this extends it to resolver-supplied ones.
+
+**Before upgrading, check whether any live CR sets a parameter its resolver supplies.** The generated CRD's `status.schemaWarnings` names every parameter that was omitted and why, so the list to screen against comes from the definition itself rather than from guesswork. One consumer screened five affected kinds and found none setting a pruned field; that is the expected result, since such a value was never read.
+
+**A resolver with a `when` guard is deliberately NOT treated as supplying the value.** The guard means it may not fire, so the parameter stays settable. That distinction is the whole reason the generator now carries the guard's presence rather than inferring from the resolver's type alone.
+
+### A `secretRef` bound to a path or query parameter is refused at generation — BREAKING
+
+A `secretRef` resolver whose destination is a path or query parameter puts a secret **into the request URL**, where it reaches access logs, proxies and `Referer` headers. There is no safe way to generate that, so generation now fails, listing every offending entry sorted rather than stopping at the first.
+
+**Refusal rather than a warning, deliberately.** A warning would leave a RestDefinition that looks like it works and leaks on every request. If generation now fails on a definition that previously generated, the parameter was carrying a credential in a URL and the fix is to move it into the request body or a header.
+
+### Also in this release, with no behaviour change
+
+A 68.91 MiB compiled binary was tracked at `go/rest-dynamic-controller/rest-dynamic-controller` — the default output of `go build` run in its own package directory, which no `*.ext` ignore pattern could match. It is untracked and the in-place build outputs are now ignored by exact anchored path (#564, Part 1). Verified unreferenced first, with three controls, because "0 references" is the claim that licenses deleting it; both images build their own binaries inside their Dockerfiles. **This removes it from the tip, not from history**, so a shallow checkout is smaller while a full clone and any `git log -S` credential sweep still reach the blob. The history rewrite is a separate, deliberate decision.
+
+And the request-body suppression rule is now asserted (#582). `Call` declines to send an empty **map** as a body — which a consumer's Keystone kind depends on, via `requestTransform: '{}'` — while deliberately sending an empty **array**, because `[]` is a well-formed no-op JSON Patch that a vendor expects to receive. Before this, that asymmetry existed in one file and in zero tests, one tidy-up away from breaking either consumer.
+
+### What was and was not exercised
+
+```
+EXERCISED  two real fixtures on a live cluster, against a control on released 0.57.0
+           an 11-kind regression: 11/11 Ready, 18/18 CRD schemas identical to 0.57.0
+NOT        the `when`-guarded arm (a guarded resolver leaves the parameter settable)
+NOT        the secretRef-in-URL refusal
+NOT        any vendor call -- the verdict was the generated CRD, so no Keystone or
+           Keycloak request was made
+```
+
+The two unexercised behaviours have unit tests and nothing more. Stated here rather than left to be inferred from a green release.
+
+### Known cosmetic issue
+
+The informational omissions above surface in `status.schemaWarnings` prefixed `generation error: …`, which reads as a failure on a RestDefinition that is `Ready=True` and working as intended. The prefix, not the warning, is wrong.
+
 ## 2026-11-11 — 0.57.0
 
 **Two credential leaks into the controller log, one of which needed no opt-in flag; two breaking changes to how a path is read and where RBAC comes from; and an upgrade that could record a regeneration it had skipped.** Both leaks were found by consumers on published releases, and the regeneration defect was reproduced on demand by one.
