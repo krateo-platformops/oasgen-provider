@@ -356,22 +356,18 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		Namespace: opts.NamespacedName.Namespace,
 		Name:      opts.NamespacedName.Name + ControllerResourceSuffix,
 	}
-	// READ THE LIVE ConfigMap BEFORE APPLYING, because the apply overwrites it and its previous data is
-	// the only thing that can tell us whether the generated controller needs restarting (#588). An
-	// absent ConfigMap is not an error here: it means this is the first deploy, and a pod that has not
-	// started yet does not need restarting.
-	liveCM := corev1.ConfigMap{}
-	liveCM.SetName(cmNSName.Name)
-	liveCM.SetNamespace(cmNSName.Namespace)
-	cmExisted := true
-	if gerr := kubecli.Get(ctx, opts.KubeClient, &liveCM); gerr != nil {
-		if !apierrors.IsNotFound(gerr) {
-			logError(opts.Log, "Error reading the existing configmap", gerr)
-			return "", gerr
-		}
-		cmExisted = false
-	}
-
+	// RENDER FIRST, then read the live object AT THE RENDERED OBJECT'S OWN KEY.
+	//
+	// The order is the fix for #599 and it is not cosmetic. cmNSName.Name is "<rd>-controller", but the
+	// ConfigMap asset renders its name as `{{ .name }}-configmap` while the Deployment asset renders
+	// `{{ .name }}` -- so the live read used to ask for a ConfigMap at the DEPLOYMENT's name, got
+	// NotFound on every reconcile of every kind, and set cmExisted=false forever. restartNeeded then
+	// returned false unconditionally and the generated controller was never restarted: an rdc.env
+	// change reached its ConfigMap and never reached the running process, silently, because envFrom is
+	// read once at container start.
+	//
+	// Keying from `cm` makes the two names ONE VALUE rather than two that must agree. Re-deriving the
+	// suffix in Go would restore the same defect the next time an asset's name expression changes.
 	cm := corev1.ConfigMap{}
 	err = templates.CreateK8sObject(&cm, opts.GVR, cmNSName, opts.ConfigmapTemplatePath,
 		"composition_controller_sa_name", sa.Name,
@@ -381,7 +377,13 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", &PermanentRenderError{What: "the controller ConfigMap", Err: err}
 	}
 
-	mustRestart := restartNeeded(liveCM.Data, cm.Data, cmExisted)
+	liveData, cmExisted, err := liveConfigMapData(ctx, opts.KubeClient, &cm)
+	if err != nil {
+		logError(opts.Log, "Error reading the existing configmap", err)
+		return "", err
+	}
+
+	mustRestart := restartNeeded(liveData, cm.Data, cmExisted)
 
 	err = kubecli.Apply(ctx, opts.KubeClient, &cm, applyOpts)
 	if err != nil {
@@ -724,6 +726,36 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	opts.Log("Deployment successfully fetched", "gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace, "digest", hsh.GetHash())
 
 	return hsh.GetHash(), nil
+}
+
+// liveConfigMapData reads the data of the ConfigMap that `rendered` is about to replace.
+//
+// IT IS KEYED FROM `rendered` ON PURPOSE. The rendered object is the only authority on the name the
+// apply will write, because that name comes from the asset's own `metadata.name` expression and not from
+// any NamespacedName the caller holds. #599 was exactly this: the caller passed "<rd>-controller" while
+// the asset renders "<rd>-controller-configmap", so the read missed by a suffix and the miss was
+// indistinguishable from a first deploy.
+//
+// An absent ConfigMap really is not an error -- it means this is the first deploy, and a pod that has not
+// started yet does not need restarting. That tolerance is why #599 was silent for a whole release, so the
+// one thing this must never do is treat a lookup it could not perform as an absence: a rendered object
+// with no name is a bug in the asset, not an absent object, and it is refused.
+func liveConfigMapData(ctx context.Context, kube client.Client, rendered *corev1.ConfigMap) (map[string]string, bool, error) {
+	if rendered.GetName() == "" {
+		return nil, false, fmt.Errorf("the rendered ConfigMap has no name, so the live one cannot be located")
+	}
+
+	live := corev1.ConfigMap{}
+	live.SetName(rendered.GetName())
+	live.SetNamespace(rendered.GetNamespace())
+
+	if gerr := kubecli.Get(ctx, kube, &live); gerr != nil {
+		if apierrors.IsNotFound(gerr) {
+			return nil, false, nil
+		}
+		return nil, false, gerr
+	}
+	return live.Data, true, nil
 }
 
 // restartNeeded reports whether the generated controller must be rolled to pick up a change.
