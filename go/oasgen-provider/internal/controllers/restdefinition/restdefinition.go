@@ -1778,17 +1778,35 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 	// never returned or logged, and was then OVERWRITTEN by the Update calls below, which reused `err`.
 	// Hence the distinct names from here on: a dropped error is now a compile error, not a silent one.
 	if lerr := kubecli.List(ctx, &uli); lerr != nil {
-		// THE OBVIOUS FIX IS WRONG, and this repo had already measured why. A no-match is NOT evidence
-		// that no instances exist: an unknown kind is indistinguishable from a missing CRD (#314), and on
-		// a fresh cluster the RESTMapper lags CRD creation -- five RestDefinitions reported Ready at
-		// t+148s while five of their CRDs appeared at t+149s. So the kind can be undiscoverable while its
-		// CRD exists and holds instances, and this client cannot list them to find out.
+		// A NO-MATCH IS NOT EVIDENCE THAT NO INSTANCES EXIST, but not for the reason it first appears.
+		//
+		// MEASURED against this module's own pins (apimachinery v0.32.4, controller-runtime v0.20.0) by
+		// openstack-nova-operator-kog, driving a discovery server whose knowledge of the kind can be
+		// flipped mid-test:
+		//
+		//	kind genuinely absent from discovery   *meta.NoKindMatchError, IsNoMatchError true
+		//	CRD appears, mapper already stale      NO ERROR -- List SUCCEEDS after one discovery re-read
+		//	discovery unreachable                  *fmt.wrapError, IsNoMatchError FALSE
+		//
+		// So a stale mapper never reaches this code: controller-runtime's dynamic mapper tests its inner
+		// error with IsNoMatchError and, on a miss, calls addKnownGroupAndReload and retries. main.go
+		// passes no MapperProvider, so that is the mapper this controller gets. A NoKindMatchError here
+		// has ALREADY survived a discovery reload.
+		//
+		// The reachable case is different and is this repo's own doing: "not served at observedVersion"
+		// is not "no instances". generation.RemoveStaleVersions drops entries from spec.versions while
+		// the CRD persists, so a pruned version yields a no-match from a CRD that still exists and still
+		// holds instances stored at another served version -- which this client cannot list through the
+		// version it asked for. Hence the CRD question below rather than a decision from the error alone.
 		//
 		// Note that generatedKindsServed treats an unknown kind as "definitely not served yet -- the one
 		// case that is an answer rather than a failure", and that is correct FOR ITS QUESTION. For this
 		// one it is not an answer at all: "not served" says nothing about whether instances exist. The
 		// same error means different things to the two callers, which is why there is no shared
 		// classifier here.
+		//
+		// And the generic branch below is where an UNREACHABLE DISCOVERY lands -- IsNoMatchError is false
+		// on it -- which is the error most worth wording carefully, and is not a race at all.
 		if !apimeta.IsNoMatchError(lerr) && !apierrors.IsNotFound(lerr) {
 			return fmt.Errorf("listing RestResources: %w", lerr)
 		}
