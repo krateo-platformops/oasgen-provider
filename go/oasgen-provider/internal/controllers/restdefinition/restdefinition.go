@@ -1766,21 +1766,56 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 
 	uli := unstructured.UnstructuredList{}
 	uli.SetGroupVersionKind(gvk)
-	err := kubecli.List(ctx, &uli)
-	if err != nil && !strings.Contains(err.Error(), "no matches for") {
 
-		// If the CRD is missing, we assume no resources exist
-		if strings.Contains(err.Error(), "the server could not find the requested resource") {
-			log("CRD not found, treating as no resources exist",
-				"Group", cr.Spec.ResourceGroup,
-				"Kind", cr.Spec.Resource.Kind,
-				"Version", observedVersion(cr),
-				"error", err.Error())
-			uli.Items = nil
-			err = nil
-		} else {
-			return fmt.Errorf("listing RestResources: %w", err)
+	// A FAILED LIST IS NOT A COUNT OF ZERO (#576).
+	//
+	// This count's only consumer removes the `restresources-still-exist` finalizer when it reads 0, so a
+	// list we could not perform must never reach it as 0 -- that deletes a RestDefinition while instances
+	// of its generated Kind are still live, which is the one thing the finalizer exists to prevent.
+	//
+	// The previous version classified by error TEXT and produced two silent zeros. One text nilled the
+	// items and cleared the error; the other skipped the whole block, so the error stayed non-nil, was
+	// never returned or logged, and was then OVERWRITTEN by the Update calls below, which reused `err`.
+	// Hence the distinct names from here on: a dropped error is now a compile error, not a silent one.
+	if lerr := kubecli.List(ctx, &uli); lerr != nil {
+		// THE OBVIOUS FIX IS WRONG, and this repo had already measured why. A no-match is NOT evidence
+		// that no instances exist: an unknown kind is indistinguishable from a missing CRD (#314), and on
+		// a fresh cluster the RESTMapper lags CRD creation -- five RestDefinitions reported Ready at
+		// t+148s while five of their CRDs appeared at t+149s. So the kind can be undiscoverable while its
+		// CRD exists and holds instances, and this client cannot list them to find out.
+		//
+		// Note that generatedKindsServed treats an unknown kind as "definitely not served yet -- the one
+		// case that is an answer rather than a failure", and that is correct FOR ITS QUESTION. For this
+		// one it is not an answer at all: "not served" says nothing about whether instances exist. The
+		// same error means different things to the two callers, which is why there is no shared
+		// classifier here.
+		if !apimeta.IsNoMatchError(lerr) && !apierrors.IsNotFound(lerr) {
+			return fmt.Errorf("listing RestResources: %w", lerr)
 		}
+
+		// The kind is unknown to the mapper or the apiserver. Ask the authority -- the CRD itself.
+		crdName := plurals.ToGroupVersionResource(gvk).Resource + "." + gvk.Group
+		crdPresent, cerr := crdExists(ctx, kubecli, crdName)
+		if cerr != nil {
+			// Could not determine. Refusing is the safe half: it cannot delete anything, and the next
+			// pass re-decides with a working read.
+			return fmt.Errorf("the generated kind %s could not be listed (%v), and checking whether its CRD %q exists also failed: %w",
+				gvk.String(), lerr, crdName, cerr)
+		}
+		if crdPresent {
+			return fmt.Errorf("the generated kind %s is not yet discoverable (%v) although its CRD %q exists, so its instances cannot be counted; not deciding the finalizer from an unknown count",
+				gvk.String(), lerr, crdName)
+		}
+
+		// The CRD is genuinely absent, so no instances CAN exist -- deleting a CRD deletes its custom
+		// resources. This is the only path on which an unlistable kind legitimately means zero.
+		log("The generated Kind's CRD is absent, so no instances can exist",
+			"Group", cr.Spec.ResourceGroup,
+			"Kind", cr.Spec.Resource.Kind,
+			"Version", observedVersion(cr),
+			"crd", crdName,
+			"listError", lerr.Error())
+		uli.Items = nil
 	}
 
 	restResourceCount := len(uli.Items)
@@ -1791,18 +1826,16 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 			log("Existing RestResources found", "Group", cr.Spec.ResourceGroup, "Kind", cr.Spec.Resource.Kind, "Count", restResourceCount)
 			log("Adding finalizer to RestDefinition", "name", cr.Name, "finalizer", restresourcesStillExistFinalizer)
 			meta.AddFinalizer(cr, restresourcesStillExistFinalizer)
-			err = kubecli.Update(ctx, cr)
-			if err != nil {
-				return fmt.Errorf("adding restresources finalizer: %w", err)
+			if uerr := kubecli.Update(ctx, cr); uerr != nil {
+				return fmt.Errorf("adding restresources finalizer: %w", uerr)
 			}
 		}
 	} else {
 		if meta.FinalizerExists(cr, restresourcesStillExistFinalizer) {
 			log("No RestResources found, removing finalizer", "name", cr.Name, "finalizer", restresourcesStillExistFinalizer)
 			meta.RemoveFinalizer(cr, restresourcesStillExistFinalizer)
-			err = kubecli.Update(ctx, cr)
-			if err != nil {
-				return fmt.Errorf("removing restresources finalizer: %w", err)
+			if uerr := kubecli.Update(ctx, cr); uerr != nil {
+				return fmt.Errorf("removing restresources finalizer: %w", uerr)
 			}
 		}
 	}
