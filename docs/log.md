@@ -52,7 +52,11 @@ a.0     against an ARRAY   -> now REFUSED (was resolved)
 a[0]    against a MAP      -> now REFUSED (was resolved)
 ```
 
-`a.0` and `a['0']` parse to byte-identical segments, so this could not be fixed without dropping the dotted index. **Check `fieldMapping`, `identifiers`, `additionalStatusFields` and `requestFieldMapping` for a dotted numeric segment or a bracketed index before upgrading** — and parse the rendered definitions rather than grepping, because `[0]` inside a `responseTransform` jq body is not a path and is not affected. Three consumer corpora measured clean: 24 of 24 kinds live, 0 of 669 path-valued strings, and 0 across 25 definitions.
+`a.0` and `a['0']` parse to byte-identical segments, so this could not be fixed without dropping the dotted index. **Check `fieldMapping`, `identifiers`, `additionalStatusFields` and `requestFieldMapping` for a dotted numeric segment or a bracketed index before upgrading** — and parse the rendered definitions rather than grepping, because `[0]` inside a `responseTransform` jq body is not a path and is not affected.
+
+**And give that screen a control hit planted inside `verbsDescription`, not only at the resource level.** A consumer's first screen reported a clean it had not measured: it excluded jq subtrees with a *substring* match on `transform|jq|script|body`, and **`script` matches `verbsDescription`** — "De-**script**-ion". The whole `verbsDescription` subtree was therefore skipped, which is where every `requestFieldMapping` in that corpus lives, so the screen printed zero hits while never looking at the key most likely to carry the dotted form. It was caught only because a planted control hit sat *inside* `requestFieldMapping` and the run returned 2 of 3. Anchor the exclusion (`^(.*transform|jq|script|.*body)$`), and plant the control where the real risk is.
+
+Four consumer corpora measured clean: 24 of 24 kinds live, 0 of 669 path-valued strings, 0 across 25 definitions, and 0 across 10 documents including path-item-level parameters.
 
 ### rest-dynamic-controller stops granting itself RBAC — BREAKING
 
