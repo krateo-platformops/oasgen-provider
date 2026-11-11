@@ -2122,18 +2122,45 @@ func (cs statusSnapshot) applyTo(target *definitionv1alpha1.RestDefinition) {
 func (e *external) persistStatusWithRetry(ctx context.Context, cr *definitionv1alpha1.RestDefinition, mutate func(*definitionv1alpha1.RestDefinition)) error {
 	key := client.ObjectKeyFromObject(cr)
 
+	// written holds the resourceVersion the SUCCESSFUL write produced, so it can be mirrored onto the
+	// caller's copy below. Assigned only after Status().Update returns nil: an attempt that read the
+	// object and then failed to write it must not stamp the caller with a version that was never
+	// persisted. A stale resourceVersion conflicts loudly; a wrong one succeeds against the wrong
+	// generation, which is worse.
+	var written string
+
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &definitionv1alpha1.RestDefinition{}
 		if gerr := e.kube.Get(ctx, key, cur); gerr != nil {
 			return gerr
 		}
 		mutate(cur)
-		return e.kube.Status().Update(ctx, cur)
+		if uerr := e.kube.Status().Update(ctx, cur); uerr != nil {
+			return uerr
+		}
+		written = cur.GetResourceVersion()
+		return nil
 	}); err != nil {
 		return err
 	}
 
 	mutate(cr)
+
+	// THE CALLER IS NOT THE ONLY WRITER, and the other one does not retry.
+	//
+	// provider-runtime reads the managed object once at the top of a reconcile, hands this same pointer to
+	// Update as `mg`, and after we return writes its OWN status onto it (reconciler.go:745 calls its status
+	// function once, with no RetryOnConflict). Because the write above went through a freshly read object,
+	// the server moved on and the runtime was left holding the version it read -- so its write failed with
+	// "cannot update managed resource status: the object has been modified", the reconcile returned an
+	// error, and its condition write for that pass was lost. On a pass that had succeeded.
+	//
+	// Deterministic rather than racy, which is how it was found: one conflict per definition, every time.
+	// Measured on the 0.57.0 upgrade as 25 of 25 kinds by one consumer and 4 of 4 by another (#579).
+	//
+	// Mirroring the status fields alone was not enough, and the existing mirror test still passed --
+	// the fields were there. The metadata the next writer depends on was not.
+	cr.SetResourceVersion(written)
 	return nil
 }
 
