@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path"
 	"strings"
 
@@ -355,6 +356,22 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		Namespace: opts.NamespacedName.Namespace,
 		Name:      opts.NamespacedName.Name + ControllerResourceSuffix,
 	}
+	// READ THE LIVE ConfigMap BEFORE APPLYING, because the apply overwrites it and its previous data is
+	// the only thing that can tell us whether the generated controller needs restarting (#588). An
+	// absent ConfigMap is not an error here: it means this is the first deploy, and a pod that has not
+	// started yet does not need restarting.
+	liveCM := corev1.ConfigMap{}
+	liveCM.SetName(cmNSName.Name)
+	liveCM.SetNamespace(cmNSName.Namespace)
+	cmExisted := true
+	if gerr := kubecli.Get(ctx, opts.KubeClient, &liveCM); gerr != nil {
+		if !apierrors.IsNotFound(gerr) {
+			logError(opts.Log, "Error reading the existing configmap", gerr)
+			return "", gerr
+		}
+		cmExisted = false
+	}
+
 	cm := corev1.ConfigMap{}
 	err = templates.CreateK8sObject(&cm, opts.GVR, cmNSName, opts.ConfigmapTemplatePath,
 		"composition_controller_sa_name", sa.Name,
@@ -363,6 +380,8 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		opts.Log("Error creating configmap object", "error", err)
 		return "", &PermanentRenderError{What: "the controller ConfigMap", Err: err}
 	}
+
+	mustRestart := restartNeeded(liveCM.Data, cm.Data, cmExisted)
 
 	err = kubecli.Apply(ctx, opts.KubeClient, &cm, applyOpts)
 	if err != nil {
@@ -411,14 +430,36 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			opts.Log("Error creating deployment object", "error", err)
 			return "", err
 		}
-		// Deployment needs to be restarted if the hash changes to get the new configmap
-		err = kubecli.Get(ctx, opts.KubeClient, &dep)
-		if err != nil {
-			logError(opts.Log, "Error getting deployment", err)
-			return "", err
-		}
-		// restart only if deployment is presently running
-		if dep.Status.ReadyReplicas == dep.Status.Replicas {
+		// RESTART ONLY WHEN THE ConfigMap's DATA CHANGED, which is the only change the pod cannot pick
+		// up by itself (#588).
+		//
+		// The ConfigMap reaches the container through `envFrom: configMapRef`, so its values are fixed at
+		// container start AND the reference is by NAME -- the pod template does not change when the data
+		// does. That is the one case needing an explicit roll. Everything else the pod consumes (the
+		// image, env, volumes, resources) lives in the pod template, and a Deployment whose pod template
+		// changes rolls its pods on its own.
+		//
+		// This block used to restart UNCONDITIONALLY. Its comment said "if the hash changes" and no hash
+		// was ever consulted, so every reconcile that reached here rolled the controller. Once #510/#527
+		// made a secretRef Secret-name change a reason to redeploy, a consumer measured 8 Deployment
+		// revisions in 15 seconds where the previous release had 2 in a day -- with the ConfigMap's
+		// resourceVersion and data hash provably identical across the restarts, which is what refuted the
+		// comment's own justification.
+		//
+		// THE READINESS CHECK IS GONE DELIBERATELY. `if dep.Status.ReadyReplicas == dep.Status.Replicas`
+		// was written as a guard against restarting something already broken, but with an unconditional
+		// restart above it it was the only brake on a restart storm -- and it braked LESS the healthier
+		// the controller was, since a mid-roll pod is not ready. Keeping it now would be worse than
+		// removing it: a ConfigMap change arriving while a pod is still rolling is exactly when a restart
+		// is REQUIRED, because that pod may have started before the change.
+		if mustRestart {
+			err = kubecli.Get(ctx, opts.KubeClient, &dep)
+			if err != nil {
+				logError(opts.Log, "Error getting deployment", err)
+				return "", err
+			}
+			opts.Log("Restarting the generated controller: its ConfigMap data changed",
+				"name", dep.Name, "namespace", dep.Namespace)
 			err = deployment.RestartDeployment(ctx, opts.KubeClient, &dep)
 			if err != nil {
 				logError(opts.Log, "Error restarting deployment", err)
@@ -672,4 +713,25 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	opts.Log("Deployment successfully fetched", "gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace, "digest", hsh.GetHash())
 
 	return hsh.GetHash(), nil
+}
+
+// restartNeeded reports whether the generated controller must be rolled to pick up a change.
+//
+// ONLY the ConfigMap's data can require this, and the reason is the mount style: the generated
+// controller reads it through `envFrom: configMapRef`, so the values are fixed at container start and
+// the reference is by NAME. A data change therefore leaves the pod template untouched, which means the
+// Deployment has nothing to roll on and the running container keeps its old environment indefinitely.
+//
+// Everything else the pod consumes -- the image, explicit `env:` entries, volumes, resources -- is part
+// of the pod template, and a Deployment whose pod template changes rolls its pods without being asked.
+// Restarting for those would be redundant; restarting for RBAC would be meaningless, since authorization
+// is evaluated by the apiserver on every request and the controller caches no decision.
+//
+// `cmExisted` false means this is the first deploy: there is no running pod with stale environment, and
+// the Deployment being created alongside starts with the new ConfigMap already in place.
+func restartNeeded(liveData, renderedData map[string]string, cmExisted bool) bool {
+	if !cmExisted {
+		return false
+	}
+	return !maps.Equal(liveData, renderedData)
 }
