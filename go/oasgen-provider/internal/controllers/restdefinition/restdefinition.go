@@ -1780,18 +1780,31 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 	if lerr := kubecli.List(ctx, &uli); lerr != nil {
 		// A NO-MATCH IS NOT EVIDENCE THAT NO INSTANCES EXIST, but not for the reason it first appears.
 		//
-		// MEASURED against this module's own pins (apimachinery v0.32.4, controller-runtime v0.20.0) by
-		// openstack-nova-operator-kog, driving a discovery server whose knowledge of the kind can be
-		// flipped mid-test:
+		// MEASURED by openstack-nova-operator-kog at controller-runtime v0.20.0 / apimachinery v0.32.4,
+		// driving a discovery server whose knowledge of the kind can be flipped mid-test. THAT IS NOT
+		// THIS MODULE'S PINS -- we are on v0.23.3 / v0.35.3, three minors ahead on both. The result
+		// carries anyway because apiutil's `(*mapper).RESTMapping` is BYTE-IDENTICAL between those two
+		// controller-runtime versions (verified), and that function is the whole reload mechanism:
 		//
 		//	kind genuinely absent from discovery   *meta.NoKindMatchError, IsNoMatchError true
 		//	CRD appears, mapper already stale      NO ERROR -- List SUCCEEDS after one discovery re-read
 		//	discovery unreachable                  *fmt.wrapError, IsNoMatchError FALSE
 		//
-		// So a stale mapper never reaches this code: controller-runtime's dynamic mapper tests its inner
-		// error with IsNoMatchError and, on a miss, calls addKnownGroupAndReload and retries. main.go
-		// passes no MapperProvider, so that is the mapper this controller gets. A NoKindMatchError here
-		// has ALREADY survived a discovery reload.
+		//	func (m *mapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+		//		res, err := m.getMapper().RESTMapping(gk, versions...)
+		//		if meta.IsNoMatchError(err) {
+		//			if err := m.addKnownGroupAndReload(gk.Group, versions...); err != nil { return nil, err }
+		//			res, err = m.getMapper().RESTMapping(gk, versions...)
+		//		}
+		//		return res, err
+		//	}
+		//
+		// So a stale mapper never reaches this code: it tests its inner error with IsNoMatchError and, on
+		// a miss, reloads discovery and retries. main.go passes no MapperProvider, so that is the mapper
+		// this controller gets. A NoKindMatchError here has ALREADY survived a discovery reload.
+		//
+		// If that function changes, this reasoning needs re-checking -- the conclusion rests on it being
+		// unchanged, not on the version the measurement was taken at.
 		//
 		// The reachable case is different and is this repo's own doing: "not served at observedVersion"
 		// is not "no instances". generation.RemoveStaleVersions drops entries from spec.versions while
