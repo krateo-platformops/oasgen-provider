@@ -211,11 +211,11 @@ func SyncAuthSecretRBAC(ctx context.Context, kube client.Client, roleName string
 	nowProvisioned := make([]string, 0, len(bySecretNamespace))
 	for ns, secretNames := range bySecretNamespace {
 		role := rbacgen.BuildRoleForSecret(ns, roleName, secretNames, authSecretVerbs)
-		if err := kubecli.Apply(ctx, kube, role, kubecli.ApplyOptions{}); err != nil {
+		if _, err := kubecli.Apply(ctx, kube, role, kubecli.ApplyOptions{}); err != nil {
 			return nil, fmt.Errorf("applying Role %q in namespace %s: %w", roleName, ns, err)
 		}
 		binding := rbacgen.BuildRoleBindingForRole(ns, roleName, roleName, sa)
-		if err := kubecli.Apply(ctx, kube, binding, kubecli.ApplyOptions{}); err != nil {
+		if _, err := kubecli.Apply(ctx, kube, binding, kubecli.ApplyOptions{}); err != nil {
 			return nil, fmt.Errorf("applying RoleBinding %q in namespace %s: %w", roleName, ns, err)
 		}
 		nowProvisioned = append(nowProvisioned, ns)
@@ -245,14 +245,14 @@ func DeleteAuthSecretRBAC(ctx context.Context, kube client.Client, roleName, ns 
 		TypeMeta:   metav1.TypeMeta{Kind: "Role", APIVersion: rbacv1.SchemeGroupVersion.String()},
 		ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: ns},
 	}
-	if err := kubecli.Uninstall(ctx, kube, role, kubecli.UninstallOptions{}); err != nil {
+	if _, err := kubecli.Uninstall(ctx, kube, role, kubecli.UninstallOptions{}); err != nil {
 		return fmt.Errorf("deleting Role %q: %w", roleName, err)
 	}
 	binding := &rbacv1.RoleBinding{
 		TypeMeta:   metav1.TypeMeta{Kind: "RoleBinding", APIVersion: rbacv1.SchemeGroupVersion.String()},
 		ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: ns},
 	}
-	if err := kubecli.Uninstall(ctx, kube, binding, kubecli.UninstallOptions{}); err != nil {
+	if _, err := kubecli.Uninstall(ctx, kube, binding, kubecli.UninstallOptions{}); err != nil {
 		return fmt.Errorf("deleting RoleBinding %q: %w", roleName, err)
 	}
 	return nil

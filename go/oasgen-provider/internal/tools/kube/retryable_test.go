@@ -126,7 +126,7 @@ func TestRetryIfIsWiredIntoEveryRetryDoSite(t *testing.T) {
 				},
 			}).Build()
 
-		if err := Apply(context.Background(), kube, newCM("a"), ApplyOptions{}); err == nil {
+		if _, err := Apply(context.Background(), kube, newCM("a"), ApplyOptions{}); err == nil {
 			t.Fatal("premise: the injected Forbidden must surface as an error")
 		}
 		if calls != 1 {
@@ -146,7 +146,7 @@ func TestRetryIfIsWiredIntoEveryRetryDoSite(t *testing.T) {
 				},
 			}).Build()
 
-		if err := Uninstall(context.Background(), kube, newCM("b"), UninstallOptions{}); err == nil {
+		if _, err := Uninstall(context.Background(), kube, newCM("b"), UninstallOptions{}); err == nil {
 			t.Fatal("premise: the injected Forbidden must surface as an error")
 		}
 		if calls != 1 {
@@ -194,7 +194,7 @@ func TestRetryIfIsWiredIntoEveryRetryDoSite(t *testing.T) {
 				},
 			}).Build()
 
-		if err := Uninstall(context.Background(), kube, newCM("d"), UninstallOptions{}); err != nil {
+		if _, err := Uninstall(context.Background(), kube, newCM("d"), UninstallOptions{}); err != nil {
 			t.Fatalf("a Conflict must be retried and the second attempt must succeed, got: %v", err)
 		}
 		if calls != 2 {

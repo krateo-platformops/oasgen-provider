@@ -52,7 +52,7 @@ func TestFromCurrentRunsOnUpdateAndIsHandedTheObjectAboutToBeReplaced(t *testing
 	calls := 0
 	desired := fcCM("cm", map[string]string{"RENDERED": "yes"})
 
-	err := Apply(ctx, kube, desired, ApplyOptions{
+	_, err := Apply(ctx, kube, desired, ApplyOptions{
 		FromCurrent: func(current *unstructured.Unstructured, d client.Object) error {
 			calls++
 			// The hook must see the LIVE object, not the render it is about to replace.
@@ -84,7 +84,7 @@ func TestFromCurrentIsNotCalledOnCreate(t *testing.T) {
 	kube := fake.NewClientBuilder().WithScheme(fcScheme(t)).Build()
 
 	calls := 0
-	err := Apply(ctx, kube, fcCM("fresh", map[string]string{"A": "1"}), ApplyOptions{
+	_, err := Apply(ctx, kube, fcCM("fresh", map[string]string{"A": "1"}), ApplyOptions{
 		FromCurrent: func(_ *unstructured.Unstructured, _ client.Object) error {
 			calls++
 			return nil
@@ -115,7 +115,7 @@ func TestAFromCurrentErrorIsPermanentAndTheUpdateIsNeverSent(t *testing.T) {
 			}).Build()
 
 		calls := 0
-		err := Apply(ctx, kube, fcCM("a", nil), ApplyOptions{
+		_, err := Apply(ctx, kube, fcCM("a", nil), ApplyOptions{
 			FromCurrent: func(_ *unstructured.Unstructured, _ client.Object) error {
 				calls++
 				return boom
@@ -153,8 +153,8 @@ func TestAFromCurrentErrorIsPermanentAndTheUpdateIsNeverSent(t *testing.T) {
 				},
 			}).Build()
 
-		require.NoError(t, Apply(ctx, kube, fcCM("b", nil), ApplyOptions{}),
-			"a conflict must be retried to success, not returned")
+		_, bErr := Apply(ctx, kube, fcCM("b", nil), ApplyOptions{})
+		require.NoError(t, bErr, "a conflict must be retried to success, not returned")
 		assert.Equal(t, 2, updates,
 			"a conflict was attempted %d time(s); want 2 (one conflict, one success). If it is 1, this "+
 				"package's retry is not retrying and the permanence assertion above is vacuous", updates)
@@ -177,12 +177,13 @@ func TestAFromCurrentErrorIsPermanentAndTheUpdateIsNeverSent(t *testing.T) {
 			}).Build()
 
 		calls := 0
-		require.NoError(t, Apply(ctx, kube, fcCM("c", nil), ApplyOptions{
+		_, cErr := Apply(ctx, kube, fcCM("c", nil), ApplyOptions{
 			FromCurrent: func(_ *unstructured.Unstructured, _ client.Object) error {
 				calls++
 				return nil
 			},
-		}))
+		})
+		require.NoError(t, cErr)
 		assert.Equal(t, attempts, calls,
 			"the hook ran %d times across %d update attempts; it must run once per attempt, from the "+
 				"version that attempt is about to replace", calls, attempts)
@@ -195,7 +196,8 @@ func TestANilFromCurrentChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	kube := fake.NewClientBuilder().WithScheme(fcScheme(t)).WithObjects(fcCM("d", map[string]string{"OLD": "1"})).Build()
 
-	require.NoError(t, Apply(ctx, kube, fcCM("d", map[string]string{"NEW": "2"}), ApplyOptions{}))
+	_, dErr := Apply(ctx, kube, fcCM("d", map[string]string{"NEW": "2"}), ApplyOptions{})
+	require.NoError(t, dErr)
 
 	stored := &corev1.ConfigMap{}
 	require.NoError(t, kube.Get(ctx, client.ObjectKey{Name: "d", Namespace: "krateo-system"}, stored))
