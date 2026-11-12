@@ -54,7 +54,8 @@ func TestApplyUnchangedComesFromTheApiserver(t *testing.T) {
 				// THE SUBJECT: the same desired object again, built fresh exactly as a reconcile would.
 				same, err := Apply(ctx, kube, arCM("unchanged-cm", map[string]string{"K": "v"}), ApplyOptions{})
 				require.NoError(t, err)
-				assert.Equal(t, ApplyUnchanged, same.Op,
+				assert.Equal(t, ApplyUpdated, same.Op, // CONTROL: DELIBERATELY WRONG, see commit message
+					
 					"a byte-identical re-apply reported %q. If this is `updated`, the apiserver assigned a NEW "+
 						"resourceVersion for a write that changed nothing, which means Apply's Op detection is "+
 						"INVALID and #543's predicate must move back to a content comparison at the caller. "+
@@ -92,7 +93,8 @@ func TestApplyUnchangedComesFromTheApiserver(t *testing.T) {
 
 				same, err := Apply(ctx, kube, role(), ApplyOptions{})
 				require.NoError(t, err)
-				assert.Equal(t, ApplyUnchanged, same.Op,
+				assert.Equal(t, ApplyUpdated, same.Op, // CONTROL: DELIBERATELY WRONG, see commit message
+					
 					"re-applying an identical Role reported %q. This is the kind the audit contract is about, "+
 						"so if `unchanged` is unreachable here the design is useless even if it works for a "+
 						"ConfigMap: every reconcile would report a change and emit a record.", same.Op)
