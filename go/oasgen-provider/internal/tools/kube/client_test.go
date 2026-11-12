@@ -6,6 +6,7 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"github.com/krateo-platformops/oasgen-provider/internal/testutil/clusterguard"
 	"os"
 	"testing"
 
@@ -33,6 +34,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// Only CI provisions kind. See internal/testutil/clusterguard.
+	clusterguard.RequireProvisioningAllowed("internal/tools/kube")
+
 	xenv.SetTestMode(true)
 
 	namespace = "demo-system"
