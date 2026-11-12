@@ -13,6 +13,114 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-13 — 0.63.0
+
+**One breaking change for consumers, shipped deliberately alone.** A `not` in an OpenAPI document now
+generates an enforced constraint where it previously generated nothing, so a CR value that was accepted
+can be rejected at admission. A census of six consumer corpora found zero affected documents, but the
+change is real elsewhere, and this release carries nothing else that could be confused with it.
+
+### A `not` subschema now carries more than `const`/`enum`
+
+The provider's CRD generator moved from plumbing v1.33.0 to **v1.60.0**. `(*transpiler).emitNot` used to
+hand-build its subschema as `&JSONSchemaProps{Enum: forbidden}` and drop any `not` carrying no `const` or
+`enum`. It now calls `junctorMemberSchema`, the shared builder every other junctor member already used, so
+`pattern`, `minimum`, `maximum`, `multipleOf`, `minLength`, `maxLength`, `format` and `required` reach a
+`not` for the first time.
+
+```yaml
+# this document
+not:
+  type: string
+  pattern: "^prod-"
+```
+
+generated **no constraint at all** before — no `const` or `enum`, so the whole `not` was dropped — and now
+generates `not: {pattern: "^prod-"}`, which the apiserver enforces. **A field value of `prod-eu` that was
+accepted is now rejected on the next write to the CR**, not at generation time, so a CRD that generates
+cleanly can still reject objects that already exist.
+
+**None of the machinery is new.** `junctorMemberSchema`, `isVacuousJunctorMember` and
+`copyScalarValidation` all exist at v1.33.0. A hand-built literal was bypassing them, so what a `not` *can*
+express did not change — only what `emitNot` bothered to put in one.
+
+Measured rather than assumed:
+
+- **Which nodes produce a `not` at all did not change.** `isScalarOnly`'s body is byte-identical at
+  v1.33.0 and v1.56.0 and re-checked at v1.60.0, verified by diffing the two with a control proving the
+  diff detects an altered copy. A `not` on an object, an array or an untyped node is still dropped.
+- **Six consumer corpora, 96 documents: zero affected.** plumbing#102 names one document that *is*
+  affected (`agentgateway-policies` 0.2.20, four sampling fields unenforced), so this is not theoretical —
+  just not ours.
+- **`exclusiveMinimum`/`exclusiveMaximum` are emitted nowhere**, so a `not` built only from those is still
+  vacuous and still dropped.
+- **A dropped `not` is visible.** The generator's warnings reach `status.schemaWarnings` and a
+  `SchemaWarnings` Warning Event, so `kubectl get restdefinition <name> -o jsonpath='{.status.schemaWarnings}'`
+  says what was dropped.
+
+`docs/upgrade-crd-not-schemas.md` carries the keyword-by-keyword table and what to check before upgrading.
+
+**Nothing in CI could have caught this.** The `CRDs drift guard` covers the hand-written `RestDefinition`
+CRD, which comes from `controller-gen`; `crdgen` generates *consumers'* CRDs at runtime from their
+documents. There is no in-repo artifact whose change would have signalled it, which is why the census was
+run against real documents instead.
+
+**The bump also broke rest-dynamic-controller, found by building rather than by comparing version
+numbers:** `objectclient.Uninstall` returns two values from plumbing v1.55.0. Both call sites in
+`internal/tools/secretrbac/secretrbac.go` are updated. RDC was already an `objectclient` and `audit`
+consumer, so `audit` came along as plumbing's own requirement rather than as a new dependency of ours.
+
+> **Note on the git history.** The squash commit for the bump reads *"plumbing v1.33.0 -> v1.56.0"*. The
+> code is **v1.60.0** in both modules — v1.56.0 was the first version carrying the content comparison the
+> audit work needs, and v1.60.0 was taken instead so the dry-run ops came with it, in a follow-up commit
+> whose subject never reached the PR title. Read `go.mod` at the tag, not the log subject.
+
+### `Apply` and `Uninstall` report what they did
+
+Internal, with no behaviour change for any caller: both now return what the write did —
+`created`/`updated`/`unchanged`/`dryRun`, and the object as it was before and after — so the audit
+contract's "did this write change anything" question is answered once in the write layer instead of by
+each caller. All 15 production call sites are updated and every one still only checks the error.
+
+`unchanged` is **read from the apiserver** rather than decided locally: a write that changes nothing is not
+persisted, so the resourceVersion the apiserver returns is the one that was sent. That keeps per-kind
+semantics — RBAC rules compared as sets, a Secret's `stringData` folded into `data` — out of a generic
+apply helper.
+
+**That premise was measured, and measuring it took a deliberately failing run.** controller-runtime's fake
+client bumps the resourceVersion even for a byte-identical Update, so the arm that covers `unchanged` can
+only run against a real apiserver — and CI runs without `-v`, so a passing run prints no per-test output
+and cannot tell you the test executed. Inverting the assertion made one run fail and record the answer:
+
+```
+--- FAIL: TestApplyUnchangedComesFromTheApiserver/.../ConfigMap
+        expected: "updated"   actual: "unchanged"
+--- FAIL: TestApplyUnchangedComesFromTheApiserver/.../RBAC_Role
+        expected: "updated"   actual: "unchanged"
+```
+
+So a byte-identical Update against a real apiserver returns the resourceVersion it was sent, for an RBAC
+Role as well as a ConfigMap — which was the case that mattered, because `unchanged` working for a
+ConfigMap and not for the kind this audits would have been a design that was sound and useless at once.
+
+**A dry run needed its own op, and in this provider that is not hypothetical.** A dry-run Update returns
+the stored resourceVersion untouched — exactly the signature of a genuine no-op — so without `dryRun` it
+would have been reported as `unchanged`; a dry-run Create would have been reported as `created`. And in
+oasgen, dry-run **is** the Observe path: `Observe` dry-runs the five RBAC applies on every poll, so a
+write op there would have had an audit caller recording writes that never happened, every three minutes,
+per definition. The literal matches plumbing's `objectclient` so the two writers' records read as one set.
+
+### Documentation
+
+- `docs/upgrade-crd-not-schemas.md` — the `not` change above, with its measurement and what to check.
+- `docs/provider-runtime-create-markers.md` — the external-create marker annotations are an **ordering**,
+  not a presence check, so their precision is load-bearing. This provider pins provider-runtime v1.8.2,
+  which writes all three at second precision, so two markers written in the same second cannot be ordered;
+  v1.18.0 writes RFC3339Nano. Parsing is compatible in both directions, but the older writer's truncation
+  is lossy, so "compare parsed times, not strings" is necessary and **not** sufficient. The note also
+  records that this does **not** explain the wedge this log describes at 0.60.0 — that was diagnosed and
+  fixed, twice, and a reader would otherwise conclude a version bump addresses it.
+
 ## 2026-11-12 — 0.62.0
 
 **Four defects, three of them found by consumers running the thing rather than reading it.** Two are on
@@ -77,6 +185,28 @@ cannot go away, and the usual response to a stuck finalizer is to remove it by h
 cascade. openstack-ironic-operator-kog had raised that hazard about the discovery branch; this was a
 second route to the same state. Not adding the finalizer loses nothing, because the delete path has its
 own check against the live cluster at the moment of the destructive act (#612, #614).
+
+> **Runtime verification (2026-11-13, issues 612 and 614).** Verified on the released artifacts by
+> github-provider-kog, with the before/after on one cluster and a control, which is the only shape that
+> distinguishes a fix from a coincidence.
+>
+> ```
+> 0.61.0 (0.61.0-05546c0e672f), before the fix
+>   finalizers at delete: [finalizer.managedresource.krateo.io] only   <- the issue-612 path IS taken
+>   2 "no new finalizers can be added" apiserver errors within 60 s
+>   no "Refusing to uninstall CRD" line;  CRD and CR intact;  RD stuck Terminating
+>
+> 0.62.0 (0.62.0-8d6143fce7b7, chart sha256:4c7815db…), with the fix
+>   finalizers at delete: the same, so the same path
+>   23:05:25  "Refusing to uninstall CRD: live instances exist" repositories.github.krateo.io
+>   0 "no new finalizers" errors;  CRD and CR intact;  RD stays Terminating
+>   CONTROL (no live CR):  RD and CRD ABSENT, "CRD successfully uninstalled"
+> ```
+>
+> So the operator now sees the live-instance refusal **and its remedy text** instead of an apiserver
+> message about finalizers, and the definition is still kept. The arm recorded the RD's finalizers at
+> delete time deliberately: with `restresources-still-exist` already present the run would have proved
+> nothing about this path, and would have been discarded as void rather than counted as a pass.
 
 ### A reordered set-typed array is no longer reported as drift forever
 
