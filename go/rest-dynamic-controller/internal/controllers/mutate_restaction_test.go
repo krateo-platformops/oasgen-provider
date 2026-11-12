@@ -245,6 +245,12 @@ func TestResolveDeleteOutcomeHoldsWhenResourceIsStillThere(t *testing.T) {
 	assert.Contains(t, err.Error(), "still present")
 }
 
+// SetTypedArrayPaths: this fake declares no set-typed arrays, so the drift comparison stays
+// positional for it -- the behaviour every test in this file was written against (#617).
+func (m *mockGetClient) SetTypedArrayPaths(httpMethod string, path string) ([]string, error) {
+	return nil, nil
+}
+
 func (m *mockGetClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
 	return nil, nil
 }
