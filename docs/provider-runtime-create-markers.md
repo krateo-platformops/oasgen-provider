@@ -74,6 +74,32 @@ because both are about these annotations; they are not the same bug.
 second has an unresolvable ordering, and that is a real reason to want v1.18.0 — independently of the
 recorded incident.
 
+### The wedge IS diagnosed, in this file's own source
+
+Not an open question, and worth stating here so nobody re-investigates it. Two instances, both recorded in
+`internal/controllers/restdefinition/restdefinition.go` with measurements, and both the same shape: **our
+Observe reported `ResourceExists: false` for a resource that existed**, so the runtime re-entered the
+create handshake on an already-created resource.
+
+| instance | our error | gap measured |
+|---|---|---|
+| comment at `:577-600` | `ResourceExists: false` while the generated controller's Deployment existed but was still rolling out — *"EXISTS BUT NOT READY IS NOT 'DOES NOT EXIST'"* | pending re-set **75 s** after succeeded, on a 34-RestDefinition install where exactly one wedged |
+| comment at `:2119-2131` | a status update conflicted 70 ms after the CRDs were applied, `observedVersion` fell back to `resourceVersion`, and the next Observe looked the CRD up at the **wrong version** | pending re-set **97 s** after succeeded, on a second cluster |
+
+The runtime's side is ordinary and documented: after the creation grace period (`defaultGracePeriod = 30s`,
+provider-runtime v1.8.2 `pkg/reconciler/reconciler.go:33`) a pass that still sees `ResourceExists: false`
+takes the create branch and calls `SetExternalCreatePending(now)` (`:1120-1128`). That is why the gap is
+always *a bit over* 30 seconds plus backoff.
+
+**So the cause was ours both times, and the fix was ours both times** — `resourceExistsForController(deployOk,
+deployReady)` for the first, recording the applied version for the second. A provider-runtime bump would not
+have changed either. Readiness belongs in a condition; `ResourceExists` answers only whether the thing is
+there.
+
+Still open and in the same family: **oasgen-provider#446**, *"RestDefinition Ready=True does not mean the
+apiserver is serving the new CRD schema"* — readiness signals that describe the writer rather than whether
+the apiserver serves the schema.
+
 ## Practical guidance
 
 1. **Never compare these annotations as strings.** Parse them.
