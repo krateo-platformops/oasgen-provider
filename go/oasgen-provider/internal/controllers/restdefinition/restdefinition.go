@@ -1811,11 +1811,32 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 		// If that function changes, this reasoning needs re-checking -- the conclusion rests on it being
 		// unchanged, not on the version the measurement was taken at.
 		//
-		// The reachable case is different and is this repo's own doing: "not served at observedVersion"
-		// is not "no instances". generation.RemoveStaleVersions drops entries from spec.versions while
-		// the CRD persists, so a pruned version yields a no-match from a CRD that still exists and still
-		// holds instances stored at another served version -- which this client cannot list through the
-		// version it asked for. Hence the CRD question below rather than a decision from the error alone.
+		// I HAVE PROPOSED TWO REACHABLE TRIGGERS FOR THIS AND BOTH WERE WRONG. Recording that, because a
+		// third guess would be worse than an admission.
+		//
+		//	(1) the #314 RESTMapper-lag race    -- refuted: the dynamic mapper reloads and retries, so a
+		//	                                       stale mapper never surfaces here (see above)
+		//	(2) a PRUNED served version         -- refuted: prunableServedVersions skips `gvk.Version`,
+		//	                                       which at its Observe call site IS observedVersion
+		//	                                       (restdefinition.go:421), AND skips any version with
+		//	                                       n > 0 instances. So neither the version we list at nor
+		//	                                       a version holding instances can be pruned. The
+		//	                                       invariant at the listGVK comment below -- "the observed
+		//	                                       one is guaranteed to exist on the CRD" -- holds.
+		//
+		// WHAT IS ESTABLISHED, and it is enough to justify the shape:
+		//
+		//	discovery unreachable  -> *fmt.wrapError, IsNoMatchError FALSE -> the generic branch below
+		//	                          returns it and the finalizer is HELD. Measured.
+		//	the CRD is absent      -> no instances CAN exist, because deleting a CRD deletes its custom
+		//	                          resources. Removal is correct and is the only path that permits it.
+		//
+		// So this guard is DEFENSIVE: no reachable path is known that delivers a no-match while the CRD
+		// is present. That is not a reason to decide from the error alone -- the cost of asking the CRD is
+		// one Get on a path that already failed, and the cost of being wrong is deleting a
+		// RestDefinition whose instances are live. Asking is right even when the question is academic.
+		//
+		// If anyone finds a trigger, put it here and delete this paragraph.
 		//
 		// Note that generatedKindsServed treats an unknown kind as "definitely not served yet -- the one
 		// case that is an answer rather than a failure", and that is correct FOR ITS QUESTION. For this
