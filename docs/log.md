@@ -13,6 +13,150 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-12 — 0.62.0
+
+**Four defects, three of them found by consumers running the thing rather than reading it.** Two are on
+paths that destroy external resources; one made a resource never converge.
+
+### A failed instance list no longer uninstalls a CRD that has instances
+
+`liveInstanceCount` answered a no-match or NotFound list with a bare zero, and that zero authorises
+`crd.Uninstall` — which cascade-deletes every CR of the kind and runs each one's external-resource
+finalizer. The listing failure has two causes with **opposite** correct outcomes, and only the CRD's
+presence separates them: a CRD that is gone means the kind cannot have instances, while a CRD that is
+present means instances may exist and merely be unlistable by this client.
+
+The branch now asks `crd.Get` — a plain Get on an apiextensions type, so it does not depend on the
+RESTMapper knowing the generated kind, which is the very thing in doubt. CRD absent means zero; CRD
+present refuses; an unanswerable question refuses with a distinguishable message.
+
+**This was reachable and destructive one release ago, and it was measured.** github-provider-kog
+reproduced it on 0.60.0 by patching the generated CRD's only version to `served: false`, restarting the
+provider so its RESTMapper never saw the kind served, then deleting the RestDefinition with one live CR:
+
+```
+10:26:37   the Milestone RestDefinition is deleted, 1 live Milestone CR
+10:26:42   "CRD successfully uninstalled" name=milestones.github.krateo.io
+then       CRD  deletionTimestamp=10:26:42Z  Terminating=True
+                reason=InstanceDeletionInProgress
+           CR   deletionTimestamp=10:26:42Z  finalizers=[composition.krateo.io/finalizer]
+```
+
+The apiserver began cascade-deleting the instance. It stalls only because `Undeploy` had already deleted
+the generated controller in the same call, so nothing remains to run the CR's finalizer — **the external
+DELETE is pending, not cancelled.** A follow-up arm measured what happens when the controller returns:
+one DELETE for an unannotated CR, zero for one annotated `krateo.io/deletion-policy=orphan`. So a CRD
+stuck `Terminating` after this chain is a delayed charge, and the remedy is to annotate every surviving
+CR **before** anything restores the controller. That annotation is honoured on generated kinds, by
+`unstructured-runtime`; `management-policy: observe-delete` overrides it (#609, #611, and see #616).
+
+On 0.61.0 and later the branch is unreachable from the RestDefinition delete path, because #576's
+discovery guard refuses one layer earlier — both read `observedVersion(cr)` and `deploy.Undeploy` has one
+caller. That is cover, not correctness: `Undeploy` is exported and the contract "a zero means there is
+nothing to protect" was false.
+
+### A RestDefinition deleted before its next reconcile no longer sticks in Terminating
+
+`manageFinalizers` added the `restresources-still-exist` finalizer whenever it counted instances, with no
+check for whether the object was already being deleted. The apiserver forbids that, and the rejection was
+returned as an error — so `observe` failed on **every** later pass and nothing downstream ran, including
+the live-instance guard that exists to refuse the uninstall.
+
+```
+metadata.finalizers: Forbidden: no new finalizers can be added if the object is being deleted,
+found new finalizers [composition.krateo.io/restresources-still-exist-finalizer]
+```
+
+The window is ordinary: a CR created after that function's previous pass and before the RestDefinition was
+deleted. Measured by github-provider-kog on 0.60.0 with the CR created 10 seconds after the previous
+reconcile and the RestDefinition deleted 32 seconds later.
+
+**The operator saw the wrong reason, and the obvious response was the destructive one.** An apiserver
+message about finalizers says nothing about the live instances that are the actual reason the object
+cannot go away, and the usual response to a stuck finalizer is to remove it by hand — which unblocks the
+cascade. openstack-ironic-operator-kog had raised that hazard about the discovery branch; this was a
+second route to the same state. Not adding the finalizer loses nothing, because the delete path has its
+own check against the live cluster at the moment of the destructive act (#612, #614).
+
+### A reordered set-typed array is no longer reported as drift forever
+
+`compareSlices` walked both slices by index. A vendor that stores a field as an unordered set returns its
+members in an arbitrary order, so the comparison reported drift on every resync, the controller issued an
+update, and the resource never converged. Measured by keycloak-provider-kog on Keycloak 26.6.3 with a
+`KeycloakRealm` whose `enabledEventTypes` holds 23 names: `Ready=False`/`Updating` forever, one PUT every
+three minutes. **With two elements the order happened to match**, which is why it took a 23-element realm
+to find.
+
+An array whose OAS schema declares `uniqueItems: true` with **scalar** items is now compared as a
+multiset. Everything else stays positional.
+
+```
+uniqueItems: true  +  scalar items (string/integer/number/boolean)  ->  multiset
+everything else                                                     ->  positional, unchanged
+```
+
+**Nothing changes for a document that does not declare `uniqueItems`.** Scalar items only: a multiset of
+objects needs a key to match elements by, which is `identifiersMatchPolicy`'s question, and it is the same
+line plumbing's crdgen draws between `x-kubernetes-list-type: set` and a CEL uniqueness rule — so a
+document that generates a native Kubernetes set produces a multiset comparison here (#617, #618).
+
+### A CR deleted inside the create window no longer leaves an orphan
+
+The delete path re-derives the identifier through findby before releasing the finalizer, so a resource
+created but not yet recorded in status is still found and deleted. A 500 on the DELETE decides nothing and
+defers to the observe verb (#548, #593).
+
+### Test suites refuse to provision kind outside CI
+
+Five TestMains create a kind cluster, once per `go test` invocation. On a developer machine that daemon is
+shared, and a full build has filled its disk before now. The suites now allow CI — gated on the runner's
+own `CI`/`GITHUB_ACTIONS` — and an explicit `KRATEO_ALLOW_LOCAL_KIND` opt-in, and otherwise print what to
+run instead and exit **non-zero**. Non-zero is load-bearing and was measured: with a zero exit `go test`
+prints nothing for a package it considers passing, so the explanation never reached the terminal and the
+run reported `ok` for a suite that had executed no tests (#613).
+
+### Upgrade notes
+
+```
+#617   a declared set-typed array is now compared as a MULTISET. A document that does not
+       declare `uniqueItems: true` is unaffected; one that does will stop reporting a
+       reordering as drift. If you relied on order mattering in an array you also declared
+       unique, that combination was already contradictory -- but check it.
+#612   a RestDefinition that is ALREADY stuck in Terminating from this defect is not healed
+       by upgrading: the finalizer it could not add is not the one holding it. Delete the
+       instances, and the delete path's own guard will then release it with a message naming
+       the count.
+#609   a CRD left stuck `Terminating` with `InstanceDeletionInProgress` by an earlier release
+       holds PENDING deletions. Annotate every surviving CR
+       `krateo.io/deletion-policy=orphan` BEFORE re-creating the RestDefinition or running a
+       helm upgrade that restores the kind, or the external DELETEs fire.
+#613   `go test -tags=unit,integration` now FAILS locally instead of provisioning kind. Use
+       `-tags=unit`, or set KRATEO_ALLOW_LOCAL_KIND=1 if the Docker daemon is yours.
+```
+
+### Verifying the upgrade
+
+`status.generatorBuild` should read `0.62.0-<sha>` on every RestDefinition afterwards. Nothing in this
+release touches the generator, so a correct render produces byte-identical CRDs and every
+`resourceVersion` legitimately stays put — read the provider's `Applying CRD` / `Applied CRD` log pair
+instead, and count provider restarts, since a restart discards earlier lines.
+
+**An `rdc.env` change is eventually consistent with a ~5-minute worst case**, newly documented in
+`docs/configuration.md`: kubelet volume propagation before the provider's mounted asset carries the value,
+then each RestDefinition's next poll. Every definition has its own phase, so a fleet updates in
+instalments and a partial result is the expected intermediate state. Measure in poll intervals of
+**running** cluster time; a stopped cluster does not poll (#619).
+
+### What this release does NOT contain
+
+```
+#543   AUDIT-4 conformance for rest-dynamic-controller and oasgen's RBAC/admission writes
+#598   rotating a secretRef Secret's content still never reaches the vendor
+#512   the configuration generator still accepts offset/limit/filter/sort/projection
+#616   krateo.io/deletion-policy on generated kinds is honoured but undocumented
+#555   a resolver-supplied path or query parameter is still REQUIRED in the generated spec
+```
+
 ## 2026-11-12 — 0.61.0
 
 **A failed instance list is no longer read as zero instances.** One fix, and an honest note about the half of it that is still open.
