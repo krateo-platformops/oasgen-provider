@@ -1,13 +1,13 @@
 ---
 type: Runbook
-title: The `not` keyword in generated CRDs changes with plumbing 1.56.0
-description: What the plumbing v1.33.0 to v1.56.0 bump changes about `not` subschemas in CRDs generated from an OpenAPI document, what it leaves alone, how a dropped constraint surfaces, and the census that found zero affected documents across six consumer corpora.
+title: The `not` keyword in generated CRDs changes with plumbing 1.60.0
+description: What the plumbing v1.33.0 to v1.60.0 bump changes about `not` subschemas in CRDs generated from an OpenAPI document, what it leaves alone, how a dropped constraint surfaces, and the census that found zero affected documents across six consumer corpora.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
 tags: [kog, upgrade, crd, generation]
 timestamp: 2026-11-12T00:00:00Z
 ---
 
-# The `not` keyword in generated CRDs changes with plumbing 1.56.0
+# The `not` keyword in generated CRDs changes with plumbing 1.60.0
 
 **No operator action is required for any document we have seen, and that is measured rather than expected.**
 A census of six consumer corpora — 96 OpenAPI documents — found zero documents whose generated CRD changes.
@@ -42,7 +42,7 @@ if len(values) == 0 {
 out.Not = &apiextensionsv1.JSONSchemaProps{Enum: forbidden}
 ```
 
-At **v1.56.0** it calls the shared junctor builder that every other junctor member already used, adds
+At **v1.60.0** it calls the shared junctor builder that every other junctor member already used, adds
 `format`, then appends the forbidden values:
 
 ```go
@@ -64,7 +64,7 @@ did not change; what `emitNot` bothered to put in one did.
 
 ### Which keywords now reach a `not`
 
-| Keyword | v1.33.0 | v1.56.0 | via |
+| Keyword | v1.33.0 | v1.60.0 | via |
 |---|---|---|---|
 | `const`, `enum` | yes | yes | `emitNot` directly |
 | `pattern` | no | yes | `copyScalarValidation` |
@@ -85,7 +85,7 @@ not:
 ```
 
 generated **no constraint at all** at v1.33.0: there is no `const` or `enum`, so `len(values) == 0` and the
-whole `not` was dropped. At v1.56.0 it generates:
+whole `not` was dropped. At v1.60.0 it generates:
 
 ```yaml
 not:
@@ -99,7 +99,7 @@ reject objects that already exist.
 ## 2. What did NOT change
 
 - **Which nodes produce a `not` at all.** The gate is `isScalarOnly`, and its body is byte-identical at
-  v1.33.0 (line 342) and v1.56.0 (line 355) — verified by diffing the two, with a control proving the diff
+  v1.33.0 (line 342) and v1.56.0 (line 355), re-checked at v1.60.0 — verified by diffing the two, with a control proving the diff
   detects an altered copy:
 
   ```go
