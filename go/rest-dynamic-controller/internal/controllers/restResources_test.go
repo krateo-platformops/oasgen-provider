@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/testutil/clusterguard"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
 	"net/http"
 	"os"
@@ -436,6 +437,9 @@ func lookupState(t *testing.T) (map[string]int, map[string]interface{}) {
 }
 
 func TestMain(m *testing.M) {
+	// Only CI provisions kind. See internal/testutil/clusterguard.
+	clusterguard.RequireProvisioningAllowed("internal/controllers")
+
 	xenv.SetTestMode(true)
 
 	clusterName = "krateo-rest-resources-test"

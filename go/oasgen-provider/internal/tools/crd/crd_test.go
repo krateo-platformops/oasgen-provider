@@ -5,6 +5,7 @@ package crd
 
 import (
 	"context"
+	"github.com/krateo-platformops/oasgen-provider/internal/testutil/clusterguard"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,6 +41,9 @@ const (
 )
 
 func TestMain(m *testing.M) {
+	// Only CI provisions kind. See internal/testutil/clusterguard.
+	clusterguard.RequireProvisioningAllowed("internal/tools/crd")
+
 	xenv.SetTestMode(true)
 
 	namespace = "demo-system"
