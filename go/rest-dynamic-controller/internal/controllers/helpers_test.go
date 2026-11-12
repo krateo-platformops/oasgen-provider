@@ -260,7 +260,9 @@ func TestIsCRUpdated(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := isCRUpdated(tt.mg, tt.rm, tt.compareScope, tt.scopeFields)
+			// nil set paths: every array compared positionally, which is what this table has always
+			// asserted and must keep asserting (#617).
+			result, err := isCRUpdated(tt.mg, tt.rm, tt.compareScope, tt.scopeFields, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("isCRUpdated() error = %v, wantErr %v", err, tt.wantErr)
 				return

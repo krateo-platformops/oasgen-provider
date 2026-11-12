@@ -1,0 +1,377 @@
+# VENDORED, NOT WRITTEN HERE. Source: krateo-blueprints/krateo-keycloak-operator-kog,
+# branch feat/realm-set-arrays, helm/keycloak-config-kog/assets/realm.yaml.
+#
+# It is a real third-party document describing a real vendor, which is the entire reason it is
+# here: the other fixture in this package was written by the same hand as the walker it tests, so
+# it cannot show that the walker reads documents rather than its own author's expectations.
+#
+# ONE modification: servers[0].url was the Helm placeholder {{ .Values.keycloak.baseUrl }} and is
+# now a literal, so the file is a self-contained valid document. Nothing else is changed.
+#
+# Checked before vendoring: no credentials, no live values, no internal hostnames. Every
+# occurrence of password/secret/token is a Keycloak field name or a schema description, and the
+# two URLs in descriptions are Microsoft's public documentation endpoints.
+openapi: 3.0.3
+info:
+  title: Keycloak Admin API - Realm (KOG subset)
+  version: v1
+  description: Hand-curated OpenAPI 3.0 subset of the Keycloak Admin REST API for the Realm resource,
+    sufficient to manage it through the Krateo Operator Generator (KOG). Declares the http/bearer security
+    scheme that the upstream Keycloak OAS omits.
+servers:
+- url: 'https://keycloak.example.com'
+  description: Keycloak base URL (no trailing slash).
+security:
+- bearer: []
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: Keycloak admin access token (OAuth2 Bearer).
+  schemas:
+    SmtpCredentialsRef:
+      type: object
+      description: The SMTP credentials, as keys of ONE Secret in the custom resource's OWN namespace.
+        The controller writes userKey into smtpServer.user (the SMTP/SASL user, both modes), passwordKey
+        into smtpServer.password (authType basic) and clientSecretKey into
+        smtpServer.authTokenClientSecret (authType token) on create and update; each key is sent only
+        when declared. The custom resource carries only this reference. Not a Keycloak field.
+      required:
+      - name
+      - userKey
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 253
+          pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+        userKey:
+          type: string
+          minLength: 1
+          maxLength: 253
+          pattern: '^[-._a-zA-Z0-9]+$'
+        passwordKey:
+          type: string
+          minLength: 1
+          maxLength: 253
+          pattern: '^[-._a-zA-Z0-9]+$'
+        clientSecretKey:
+          type: string
+          minLength: 1
+          maxLength: 253
+          pattern: '^[-._a-zA-Z0-9]+$'
+    RealmRepresentation:
+      type: object
+      required:
+      - realm
+      properties:
+        realm:
+          type: string
+          description: Realm name. Immutable natural key.
+        enabled:
+          type: boolean
+        displayName:
+          type: string
+        displayNameHtml:
+          type: string
+        sslRequired:
+          type: string
+          description: 'one of: all, external, none'
+        loginTheme:
+          type: string
+        loginWithEmailAllowed:
+          type: boolean
+        registrationAllowed:
+          type: boolean
+        resetPasswordAllowed:
+          type: boolean
+        verifyEmail:
+          type: boolean
+          description: Require users to verify their email address (the VERIFY_EMAIL required action at first login).
+        actionTokenGeneratedByAdminLifespan:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Lifetime in seconds of action links an administrator sends (execute-actions email,
+            e.g. the set-password link of a new account). Keycloak's default is 43200 (12 hours).
+        actionTokenGeneratedByUserLifespan:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Lifetime in seconds of action links a user triggers (e.g. forgot password).
+        smtpServer:
+          type: object
+          description: Outgoing mail server for this realm (set-password, verify-email and forgot-password
+            emails). All values are strings, as Keycloak stores them. The SMTP user and password are NOT
+            set here; reference them with smtpCredentialsRef so they never sit in the custom resource.
+          additionalProperties: false
+          properties:
+            host:
+              type: string
+              minLength: 1
+            port:
+              type: string
+              pattern: '^[0-9]{1,5}$'
+            from:
+              type: string
+              minLength: 3
+              description: Envelope and header From address.
+            fromDisplayName:
+              type: string
+            replyTo:
+              type: string
+            replyToDisplayName:
+              type: string
+            envelopeFrom:
+              type: string
+            auth:
+              type: string
+              enum:
+              - "true"
+              - "false"
+              description: '"true" to authenticate (both authType modes need it).'
+            authType:
+              type: string
+              enum:
+              - basic
+              - token
+              description: 'basic (default): SMTP AUTH with the password from smtpCredentialsRef.passwordKey.
+                token: XOAUTH2 (Keycloak >= 26.2) with an OAuth2 client-credentials access token
+                fetched from authTokenUrl, the client secret from smtpCredentialsRef.clientSecretKey.
+                Required by providers that disable password SMTP AUTH (e.g. Microsoft 365).'
+            authTokenUrl:
+              type: string
+              description: Token endpoint for authType token, e.g.
+                https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token
+            authTokenClientId:
+              type: string
+              description: OAuth2 client id for authType token (not secret).
+            authTokenScope:
+              type: string
+              description: OAuth2 scope for authType token, e.g. https://outlook.office365.com/.default
+            starttls:
+              type: string
+              enum:
+              - "true"
+              - "false"
+            ssl:
+              type: string
+              enum:
+              - "true"
+              - "false"
+        smtpCredentialsRef:
+          $ref: '#/components/schemas/SmtpCredentialsRef'
+        eventsEnabled:
+          type: boolean
+          description: Store user events (LOGIN, LOGIN_ERROR, UPDATE_CREDENTIAL, ...).
+        enabledEventTypes:
+          type: array
+          # A set: Keycloak keeps it as a Java Set and returns it in its own order.
+          uniqueItems: true
+          description: |
+            The user event types to store: Keycloak EventType names, e.g. LOGIN, LOGIN_ERROR, UPDATE_CREDENTIAL
+            (the Admin API's /admin/serverinfo lists them under enums.eventType). Keycloak accepts an unknown
+            name without complaint and records nothing for it.
+          items:
+            type: string
+        eventsListeners:
+          type: array
+          # A set, like enabledEventTypes.
+          uniqueItems: true
+          description: Event listener providers, e.g. jboss-logging (events in the server log).
+          items:
+            type: string
+        eventsExpiration:
+          type: integer
+          format: int64
+          minimum: 1
+          description: How long stored user events are kept, in seconds.
+        adminEventsEnabled:
+          type: boolean
+        adminEventsDetailsEnabled:
+          type: boolean
+        rememberMe:
+          type: boolean
+        accessTokenLifespan:
+          type: integer
+        ssoSessionIdleTimeout:
+          type: integer
+          description: Shared-SSO idle timeout (seconds).
+        ssoSessionMaxLifespan:
+          type: integer
+          description: Shared-SSO max session lifespan (seconds).
+        internationalizationEnabled:
+          type: boolean
+        defaultLocale:
+          type: string
+        otpPolicyType:
+          type: string
+          description: totp or hotp.
+        otpPolicyAlgorithm:
+          type: string
+          description: e.g. HmacSHA1, HmacSHA256, HmacSHA512.
+        otpPolicyDigits:
+          type: integer
+          description: Number of digits in the OTP (6 or 8).
+        otpPolicyPeriod:
+          type: integer
+          description: TOTP time step in seconds (e.g. 30).
+        otpPolicyLookAheadWindow:
+          type: integer
+        otpPolicyInitialCounter:
+          type: integer
+          description: HOTP initial counter.
+        otpPolicyCodeReusable:
+          type: boolean
+        webAuthnPolicyRpEntityName:
+          type: string
+        webAuthnPolicyRpId:
+          type: string
+        webAuthnPolicySignatureAlgorithms:
+          type: array
+          items:
+            type: string
+        webAuthnPolicyAttestationConveyancePreference:
+          type: string
+          description: none, indirect or direct.
+        webAuthnPolicyAuthenticatorAttachment:
+          type: string
+          description: platform or cross-platform.
+        webAuthnPolicyRequireResidentKey:
+          type: string
+          description: Yes/No/not specified.
+        webAuthnPolicyUserVerificationRequirement:
+          type: string
+          description: required, preferred or discouraged.
+        webAuthnPolicyCreateTimeout:
+          type: integer
+        webAuthnPolicyAvoidSameAuthenticatorRegister:
+          type: boolean
+        webAuthnPolicyAcceptableAaguids:
+          type: array
+          items:
+            type: string
+        webAuthnPolicyPasswordlessRpEntityName:
+          type: string
+        webAuthnPolicyPasswordlessRpId:
+          type: string
+        webAuthnPolicyPasswordlessSignatureAlgorithms:
+          type: array
+          items:
+            type: string
+        webAuthnPolicyPasswordlessAttestationConveyancePreference:
+          type: string
+        webAuthnPolicyPasswordlessAuthenticatorAttachment:
+          type: string
+        webAuthnPolicyPasswordlessRequireResidentKey:
+          type: string
+        webAuthnPolicyPasswordlessUserVerificationRequirement:
+          type: string
+        webAuthnPolicyPasswordlessCreateTimeout:
+          type: integer
+        webAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister:
+          type: boolean
+        webAuthnPolicyPasswordlessAcceptableAaguids:
+          type: array
+          items:
+            type: string
+        browserFlow:
+          type: string
+          description: Alias of the realm browser flow (e.g. a managed step-up flow).
+        directGrantFlow:
+          type: string
+          description: Alias of the realm direct-grant flow.
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+        id:
+          type: string
+          description: Server-generated identifier (read-only).
+          readOnly: true
+paths:
+  /admin/realms:
+    post:
+      operationId: createRealm
+      summary: Create Realm
+      tags:
+      - realm
+      parameters: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RealmRepresentation'
+      responses:
+        '201':
+          description: Created. Identifier returned via Location header.
+    get:
+      operationId: listRealm
+      summary: List/find Realm
+      tags:
+      - realm
+      parameters: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RealmRepresentation'
+  /admin/realms/{realm}:
+    get:
+      operationId: getRealm
+      summary: Get Realm
+      tags:
+      - realm
+      parameters:
+      - name: realm
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RealmRepresentation'
+    put:
+      operationId: updateRealm
+      summary: Update Realm
+      tags:
+      - realm
+      parameters:
+      - name: realm
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RealmRepresentation'
+      responses:
+        '204':
+          description: Updated.
+    delete:
+      operationId: deleteRealm
+      summary: Delete Realm
+      tags:
+      - realm
+      parameters:
+      - name: realm
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Deleted.

@@ -80,7 +80,81 @@ func childPath(path []string, seg string) []string {
 	return out
 }
 
+// Comparer compares a CR's spec against a remote body.
+//
+// ITS ZERO VALUE IS THE HISTORICAL BEHAVIOUR: every array compared element-by-element and in order. The
+// only thing it can carry is a set of paths whose arrays are declared sets in the OAS document, and those
+// are compared as multisets instead. Nothing else about the comparison changes, and a caller that does
+// not supply any paths gets exactly what this package did before.
+//
+// WHY THIS TYPE EXISTS AT ALL. The schema is not available where the decision has to be made:
+// `compareSlices` receives two `[]interface{}` and a path, and its entry point receives two maps. So
+// "compare this array as a set" cannot be a branch inside the comparison -- it is a change to what the
+// comparison is given, and the recursion has to carry it. `CompareExisting` ends in a variadic `path`,
+// so nothing can be appended to its signature; a receiver is the one place left.
+//
+// Keycloak stores a realm's `enabledEventTypes` as a Java Set and returns it in hash order, so a
+// positional comparison of 23 unchanged names reported drift on every resync and the controller re-PUT
+// the realm every three minutes, forever (#617). With two elements the order happened to match, which is
+// why it took a 23-element realm to find.
+type Comparer struct {
+	// setPaths holds dot-notation paths, with array indices removed, of arrays whose schema declares
+	// `uniqueItems: true` with scalar items.
+	setPaths map[string]struct{}
+}
+
+// NewComparer returns a Comparer that treats the given dot-notation paths as sets.
+//
+// The paths come from the OAS document via UnstructuredClient.SetTypedArrayPaths, which only emits
+// arrays with SCALAR items. An empty or nil list yields a Comparer identical to the zero value.
+func NewComparer(setTypedPaths []string) *Comparer {
+	c := &Comparer{}
+	if len(setTypedPaths) == 0 {
+		return c
+	}
+	c.setPaths = make(map[string]struct{}, len(setTypedPaths))
+	for _, p := range setTypedPaths {
+		if p == "" {
+			continue
+		}
+		c.setPaths[p] = struct{}{}
+	}
+	return c
+}
+
+// isSetPath reports whether the array at this path is a declared set.
+//
+// ARRAY INDICES ARE STRIPPED FIRST, and that is load-bearing rather than tidy. The walk appends the
+// element index as its own path segment, so a set nested inside an array of objects arrives here as
+// `rules.0.types` while the schema-derived path is `rules.types`. Looking up the unstripped path matches
+// nothing, and the failure is silent: every array falls back to positional, which is exactly the
+// behaviour this change exists to remove, with no error anywhere to say so.
+func (c *Comparer) isSetPath(path []string) bool {
+	if len(c.setPaths) == 0 || len(path) == 0 {
+		return false
+	}
+	kept := make([]string, 0, len(path))
+	for _, seg := range path {
+		if _, err := strconv.Atoi(seg); err == nil {
+			continue
+		}
+		kept = append(kept, seg)
+	}
+	if len(kept) == 0 {
+		return false
+	}
+	_, ok := c.setPaths[strings.Join(kept, ".")]
+	return ok
+}
+
+// CompareExisting compares a CR's spec against a remote body, positionally. It is the historical entry
+// point and is kept so that every existing caller and test is unaffected by #617: the set-aware
+// behaviour is reachable only through NewComparer.
 func CompareExisting(mg map[string]interface{}, rm map[string]interface{}, path ...string) (ComparisonResult, error) {
+	return (&Comparer{}).CompareExisting(mg, rm, path...)
+}
+
+func (c *Comparer) CompareExisting(mg map[string]interface{}, rm map[string]interface{}, path ...string) (ComparisonResult, error) {
 	// A populated CR object against an EMPTY remote object is a difference, not an absence.
 	//
 	// Without this, the loop below looks up every one of mg's keys in an empty rm, finds none of them,
@@ -201,7 +275,7 @@ func CompareExisting(mg map[string]interface{}, rm map[string]interface{}, path 
 					},
 				}, fmt.Errorf("type assertion failed for map at %s", pathStr)
 			}
-			res, err := CompareExisting(mgMap, rmMap, currentPath...)
+			res, err := c.CompareExisting(mgMap, rmMap, currentPath...)
 			if err != nil {
 				return ComparisonResult{
 					IsEqual: false,
@@ -244,7 +318,7 @@ func CompareExisting(mg map[string]interface{}, rm map[string]interface{}, path 
 					},
 				}, fmt.Errorf("type assertion failed for slice at %s", pathStr)
 			}
-			res, err := compareSlices(valueSlice, rmSlice, currentPath)
+			res, err := c.compareSlices(valueSlice, rmSlice, currentPath)
 			if err != nil {
 				return res, err
 			}
@@ -287,7 +361,7 @@ func CompareExisting(mg map[string]interface{}, rm map[string]interface{}, path 
 //     inside arrays even though scalar fields already normalized them;
 //   - a nested slice element panicked, because `!=` on []interface{} is a runtime panic, and a nil
 //     element panicked on reflect.TypeOf(nil).Kind().
-func compareSlices(valueSlice, rmSlice []interface{}, path []string) (ComparisonResult, error) {
+func (c *Comparer) compareSlices(valueSlice, rmSlice []interface{}, path []string) (ComparisonResult, error) {
 	pathStr := fmt.Sprintf("%v", path)
 
 	// Lengths must match. The previous rule only rejected a CR slice LONGER than the remote one and
@@ -300,6 +374,17 @@ func compareSlices(valueSlice, rmSlice []interface{}, path []string) (Comparison
 			IsEqual: false,
 			Reason:  &Reason{Reason: "slice lengths differ", FirstValue: valueSlice, SecondValue: rmSlice, Path: path},
 		}, nil
+	}
+
+	// A DECLARED SET IS COMPARED AS A MULTISET, not in order.
+	//
+	// Only when the schema says so, and only for scalar elements. A multiset of objects needs a key to
+	// match elements by, which is a different question that this repo already answers elsewhere with
+	// identifiersMatchPolicy; inventing a second answer here would be worse than the ordering bug. If the
+	// data disagrees with the schema -- objects where scalars were declared -- this falls back to the
+	// positional walk rather than guessing.
+	if c.isSetPath(path) && allScalar(valueSlice) && allScalar(rmSlice) {
+		return compareAsMultiset(valueSlice, rmSlice, path), nil
 	}
 
 	for i, v := range valueSlice {
@@ -338,7 +423,7 @@ func compareSlices(valueSlice, rmSlice []interface{}, path []string) (Comparison
 			}
 			// elemPath, not path: without the index every element of the array reported the same
 			// location, so two different elements differing produced the same message.
-			res, err := CompareExisting(mgMap, rmMap, elemPath...)
+			res, err := c.CompareExisting(mgMap, rmMap, elemPath...)
 			if err != nil {
 				return ComparisonResult{
 					IsEqual: false,
@@ -363,7 +448,7 @@ func compareSlices(valueSlice, rmSlice []interface{}, path []string) (Comparison
 					Reason:  &Reason{Reason: "values are not both slices or type assertion failed", FirstValue: v, SecondValue: rmv, Path: elemPath},
 				}, fmt.Errorf("type assertion failed for nested slice at %s", pathStr)
 			}
-			res, err := compareSlices(nestedV, nestedRM, elemPath)
+			res, err := c.compareSlices(nestedV, nestedRM, elemPath)
 			if err != nil {
 				return res, err
 			}
@@ -593,4 +678,59 @@ func normalizeAny(value any) any {
 	default:
 		return value
 	}
+}
+
+// allScalar reports whether every element is a scalar, so a multiset comparison can match elements by
+// value alone. nil counts as a scalar: two nils are equal and a nil against a value is a difference,
+// which CompareAny already expresses.
+func allScalar(s []interface{}) bool {
+	for _, v := range s {
+		if v == nil {
+			continue
+		}
+		switch reflect.TypeOf(v).Kind() {
+		case reflect.Map, reflect.Slice, reflect.Array:
+			return false
+		}
+	}
+	return true
+}
+
+// compareAsMultiset reports whether the two slices hold the same elements with the same multiplicities,
+// ignoring order. Callers have already established that the lengths match.
+//
+// MULTIPLICITIES, NOT MEMBERSHIP. Each right-hand element is consumed by at most one match, so
+// {a, a, b} and {a, b, b} are correctly different despite having equal lengths and identical member
+// sets. A containment check would call them equal and is the obvious wrong implementation here.
+//
+// Elements are matched with CompareAny rather than ==, because the two sides arrive from different
+// decoders: a JSON number from the vendor and an int64 from the unstructured CR are the same value with
+// different dynamic types, which this package already normalises everywhere else.
+func compareAsMultiset(valueSlice, rmSlice []interface{}, path []string) ComparisonResult {
+	used := make([]bool, len(rmSlice))
+	for _, v := range valueSlice {
+		found := false
+		for j, rmv := range rmSlice {
+			if used[j] {
+				continue
+			}
+			if CompareAny(v, rmv) {
+				used[j] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ComparisonResult{
+				IsEqual: false,
+				Reason: &Reason{
+					Reason:      "set member missing from the remote value",
+					FirstValue:  valueSlice,
+					SecondValue: rmSlice,
+					Path:        path,
+				},
+			}
+		}
+	}
+	return ComparisonResult{IsEqual: true}
 }

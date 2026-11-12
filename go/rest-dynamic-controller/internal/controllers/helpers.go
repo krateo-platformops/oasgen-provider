@@ -30,7 +30,7 @@ const (
 // compareScope selects which spec fields participate: "" / "fullSpec" compares the whole spec;
 // "identifiersAndStatus" and "updatable" both restrict the comparison to scopeFields, which the caller has
 // populated accordingly (identifiers + additionalStatusFields, or the update body's expressible paths).
-func isCRUpdated(mg *unstructured.Unstructured, rm map[string]interface{}, compareScope string, scopeFields []string) (comparison.ComparisonResult, error) {
+func isCRUpdated(mg *unstructured.Unstructured, rm map[string]interface{}, compareScope string, scopeFields []string, setTypedPaths []string) (comparison.ComparisonResult, error) {
 	//log.Print("isCRUpdated - starting comparison between mg spec and rm")
 	if mg == nil {
 		return comparison.ComparisonResult{
@@ -65,8 +65,10 @@ func isCRUpdated(mg *unstructured.Unstructured, rm map[string]interface{}, compa
 		}
 	}
 
-	//log.Print("isCRUpdated - performing comparison")
-	return comparison.CompareExisting(m, rm)
+	// setTypedPaths names the arrays the OAS declares as sets (`uniqueItems: true` with scalar items).
+	// Those are compared as multisets; every other array stays positional, and an empty list yields a
+	// comparer identical to the historical one (#617).
+	return comparison.NewComparer(setTypedPaths).CompareExisting(m, rm)
 }
 
 // projectSpecFields returns a new map containing only the given dot-notation paths that are present in spec,

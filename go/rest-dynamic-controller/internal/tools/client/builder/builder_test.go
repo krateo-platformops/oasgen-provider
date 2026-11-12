@@ -1813,6 +1813,12 @@ func TestBuildCallConfig_QueriesInjected(t *testing.T) {
 	}
 }
 
+// SetTypedArrayPaths: this fake declares no set-typed arrays, so the drift comparison stays
+// positional for it -- the behaviour every test in this file was written against (#617).
+func (m *mockUnstructuredClient) SetTypedArrayPaths(httpMethod string, path string) ([]string, error) {
+	return nil, nil
+}
+
 func (m *mockUnstructuredClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
 	return nil, nil
 }

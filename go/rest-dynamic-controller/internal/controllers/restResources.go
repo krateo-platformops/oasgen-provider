@@ -695,7 +695,41 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			// fixable by an update -- so nothing should be reported as drift.
 			scopeFields = updatable
 		}
-		res, err := isCRUpdated(mg, b, clientInfo.Resource.CompareScope, scopeFields)
+		// Set-typed arrays: one declared `uniqueItems: true` with scalar items IS a set, so a vendor
+		// returning its members in a different order is not drift. Keycloak stores a realm's
+		// enabledEventTypes as a Java Set and returns it in hash order, which made 23 unchanged names
+		// report drift on every resync and re-PUT the realm every three minutes (#617).
+		//
+		// Read from the UPDATE verb's document, for the same reason compareScope=updatable is (#220):
+		// that is the operation whose request body declares what the spec's writable fields look like.
+		//
+		// DERIVED UNCONDITIONALLY, unlike scopeFields: whether an array is a set does not depend on the
+		// compareScope, and gating it on one would have made the fix invisible for every resource that
+		// does not narrow its drift scope.
+		//
+		// A FAILURE HERE DOES NOT FAIL THE RECONCILE. Without these paths every array is compared
+		// positionally, which is what this code did before -- so the cost of a derivation error is the
+		// old behaviour rather than a stalled resource. It is logged rather than swallowed, because the
+		// old behaviour includes the re-PUT loop and nobody should have to infer that from silence.
+		var setTypedPaths []string
+		for _, v := range clientInfo.Resource.VerbsDescription {
+			if !strings.EqualFold(v.Action, string(apiaction.Update)) {
+				continue
+			}
+			ucli, serr := cs.For(ctx, string(apiaction.Update))
+			if serr != nil {
+				log.Error(serr, "Deriving set-typed array paths for drift comparison; every array will be compared positionally")
+				break
+			}
+			setTypedPaths, serr = ucli.SetTypedArrayPaths(v.Method, v.Path)
+			if serr != nil {
+				log.Error(serr, "Deriving set-typed array paths for drift comparison; every array will be compared positionally")
+				setTypedPaths = nil
+			}
+			break
+		}
+
+		res, err := isCRUpdated(mg, b, clientInfo.Resource.CompareScope, scopeFields, setTypedPaths)
 		if err != nil {
 			log.Error(err, "Checking if CR is updated")
 			return controller.ExternalObservation{}, err

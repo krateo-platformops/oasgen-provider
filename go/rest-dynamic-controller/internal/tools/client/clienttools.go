@@ -95,6 +95,10 @@ type UnstructuredClientInterface interface {
 	// concrete type, which forced Observe to hold one, which is what stood in the way of resolving a
 	// client per verb (#220).
 	UpdatableBodyPaths(httpMethod string, path string) ([]string, error)
+	// SetTypedArrayPaths belongs here for exactly the reason UpdatableBodyPaths does: it is document
+	// introspection that a caller holding the interface needs, in this case to know which arrays the
+	// document declares as sets so the drift comparison does not report a reordered set as drift (#617).
+	SetTypedArrayPaths(httpMethod string, path string) ([]string, error)
 	FindBy(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration, findByAction *getter.VerbsDescription) (Response, error)
 	Call(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration) (Response, error)
 	// ServerURL is the EXTERNAL endpoint this client calls -- the document's servers[0].url. Here for the
@@ -493,6 +497,128 @@ func (u *UnstructuredClient) UpdatableBodyPaths(httpMethod string, path string) 
 	var out []string
 	collectLeafPaths(schema, "", &out, 0)
 	return out, nil
+}
+
+// SetTypedArrayPaths returns the dot-notation paths, within the given operation's request body, of every
+// array whose schema declares `uniqueItems: true` with SCALAR items.
+//
+// Those arrays are sets, and a set returned by a vendor in an arbitrary order is not drift. The drift
+// comparison uses this to compare exactly those arrays as multisets; every other array stays positional
+// (#617). Keycloak stores a realm's `enabledEventTypes` as a Java Set and returns it in hash order, so 23
+// unchanged names were reported as drift on every resync and the realm was re-PUT every three minutes.
+//
+// SCALAR ITEMS ONLY, because that is what can be matched by value. A multiset of objects needs a key to
+// match elements by, which is a different question answered elsewhere by identifiersMatchPolicy. It also
+// matches where the CRD lands: plumbing's crdgen turns `uniqueItems` plus scalar items into
+// `x-kubernetes-list-type: set` and gives non-scalar arrays a CEL rule instead, so the scalar arm is the
+// one that is actually a declared set on both sides.
+//
+// Mirrors UpdatableBodyPaths deliberately -- same document resolution, same media-type handling, same
+// "no schema is a true answer rather than a dropped one" -- so the two cannot drift apart in how they
+// find an operation's body.
+func (u *UnstructuredClient) SetTypedArrayPaths(httpMethod string, path string) ([]string, error) {
+	if u.DocScheme == nil || u.DocScheme.Model.Paths == nil {
+		return nil, fmt.Errorf("document scheme or model is nil")
+	}
+	pathItem, ok := u.DocScheme.Model.Paths.PathItems.Get(path)
+	if !ok {
+		return nil, fmt.Errorf("path not found: %s", path)
+	}
+	op, ok := pathItem.GetOperations().Get(strings.ToLower(httpMethod))
+	if !ok {
+		return nil, fmt.Errorf("operation not found: %s", httpMethod)
+	}
+	if op.RequestBody == nil || op.RequestBody.Content == nil {
+		return nil, nil
+	}
+	bodySchema, _, mErr := resolveRequestBodyMedia(op.RequestBody)
+	if mErr != nil {
+		return nil, fmt.Errorf("resolving request body media type for %s %s: %w", httpMethod, path, mErr)
+	}
+	if bodySchema == nil {
+		return nil, nil
+	}
+	schema, err := bodySchema.Schema.BuildSchema()
+	if err != nil {
+		return nil, fmt.Errorf("building schema for %s: %w", path, err)
+	}
+	var out []string
+	collectSetTypedArrayPaths(schema, "", &out, 0)
+	return out, nil
+}
+
+// collectSetTypedArrayPaths walks a request-body schema and appends the dot-notation path of every
+// set-typed scalar array. allOf is flattened at each level via populateFromAllOf, as everywhere else in
+// this package, and depth bounds the walk so a self-referential schema cannot loop.
+//
+// IT DESCENDS INTO ARRAY ITEMS, which collectLeafPaths does not. That is the one deliberate difference
+// and it is required rather than tidy: collectLeafPaths treats any array as a leaf, so a set nested
+// inside an array of objects -- `rules[].types` -- would be invisible to a straight mirror of it, and
+// that is a shape real documents have.
+//
+// Item paths carry NO index segment. `rules[].types` is emitted as `rules.types`, and the comparison
+// strips numeric segments from the runtime path before looking it up, so the two representations meet.
+// Emitting an index here instead would require knowing element counts at schema time, which is not a
+// thing a schema knows.
+func collectSetTypedArrayPaths(schema *base.Schema, prefix string, out *[]string, depth int) {
+	if schema == nil || depth > 20 {
+		return
+	}
+	populateFromAllOf(schema)
+
+	if len(schema.Type) > 0 && schema.Type[0] == "array" {
+		if schema.Items == nil || schema.Items.N != 0 {
+			// Items.N != 0 is the boolean form (`items: true/false`), which declares no element schema,
+			// so there is nothing to call scalar or otherwise.
+			return
+		}
+		items, err := schema.Items.A.BuildSchema()
+		if err != nil || items == nil {
+			return
+		}
+		if isScalarSchema(items) {
+			if prefix != "" && schema.UniqueItems != nil && *schema.UniqueItems {
+				*out = append(*out, prefix)
+			}
+			return
+		}
+		// Object (or deeper) items: keep the prefix and descend, so a set declared inside them is found.
+		collectSetTypedArrayPaths(items, prefix, out, depth+1)
+		return
+	}
+
+	if schema.Properties == nil || schema.Properties.Len() == 0 {
+		// A scalar, or an object with no declared properties. Neither can be a set-typed array.
+		return
+	}
+	for prop := schema.Properties.First(); prop != nil; prop = prop.Next() {
+		child, err := prop.Value().BuildSchema()
+		if err != nil {
+			continue
+		}
+		next := prop.Key()
+		if prefix != "" {
+			next = prefix + "." + prop.Key()
+		}
+		collectSetTypedArrayPaths(child, next, out, depth+1)
+	}
+}
+
+// isScalarSchema reports whether a schema describes a value that can be compared by value alone.
+//
+// The same four types plumbing's crdgen accepts for `x-kubernetes-list-type: set`, so a document that
+// generates a native Kubernetes set here produces a multiset comparison there, and the two agree about
+// which arrays are sets.
+func isScalarSchema(schema *base.Schema) bool {
+	if schema == nil || len(schema.Type) == 0 {
+		return false
+	}
+	switch schema.Type[0] {
+	case "string", "integer", "number", "boolean":
+		return true
+	default:
+		return false
+	}
 }
 
 // collectLeafPaths walks a request-body schema and appends the dot-notation path of every

@@ -124,6 +124,12 @@ func (r *recordingClient) RequestedParams(httpMethod, path string) (stringset.St
 	return stringset.NewStringSet(r.pathParams...), nil, nil, nil, nil
 }
 
+// SetTypedArrayPaths: this fake declares no set-typed arrays, so the drift comparison stays
+// positional for it -- the behaviour every test in this file was written against (#617).
+func (r *recordingClient) SetTypedArrayPaths(httpMethod string, path string) ([]string, error) {
+	return nil, nil
+}
+
 func (r *recordingClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
 	return nil, nil
 }
