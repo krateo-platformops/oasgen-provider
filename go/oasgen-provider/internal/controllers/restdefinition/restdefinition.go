@@ -1879,7 +1879,41 @@ func manageFinalizers(ctx context.Context, kubecli client.Client, cr *definition
 
 	// Manage restresources-still-exist finalizer
 	if restResourceCount > 0 {
-		if !meta.FinalizerExists(cr, restresourcesStillExistFinalizer) {
+		switch {
+		case meta.FinalizerExists(cr, restresourcesStillExistFinalizer):
+			// Already held. Nothing to do, and in particular no Update: the common case must not
+			// write on every reconcile.
+
+		case cr.GetDeletionTimestamp() != nil:
+			// AN OBJECT ALREADY BEING DELETED CANNOT GAIN A FINALIZER, and trying is not a harmless
+			// no-op -- the apiserver rejects it with
+			//
+			//	metadata.finalizers: Forbidden: no new finalizers can be added if the object is
+			//	being deleted, found new finalizers [composition.krateo.io/restresources-still-exist-finalizer]
+			//
+			// which this function used to return as an error. `observe` then failed on every pass, so
+			// nothing downstream ever ran: not the delete path, and therefore not the live-instance
+			// guard that exists to refuse the uninstall. The RestDefinition sat in Terminating forever
+			// while the operator was shown an apiserver message about finalizers, which says nothing
+			// about the instances that are the actual reason it cannot go away.
+			//
+			// The window is ordinary: a CR created after this function's previous pass and before the
+			// RestDefinition was deleted. Measured by github-provider-kog on 0.60.0 (#612).
+			//
+			// Not adding it loses nothing. The finalizer's whole job is to stop the delete path from
+			// proceeding, and the delete path has its own check against the live cluster at the moment
+			// of the destructive act -- `liveInstanceCount` in deploy.Undeploy, which refuses with
+			// ErrLiveInstances and names the count. Letting this pass succeed is what allows that
+			// refusal to be reached and reported.
+			log("Cannot add the restresources finalizer: the RestDefinition is already being deleted. "+
+				"The uninstall will be refused by the live-instance check instead",
+				"name", cr.Name,
+				"Group", cr.Spec.ResourceGroup,
+				"Kind", cr.Spec.Resource.Kind,
+				"Count", restResourceCount,
+				"deletionTimestamp", cr.GetDeletionTimestamp().String())
+
+		default:
 			log("Existing RestResources found", "Group", cr.Spec.ResourceGroup, "Kind", cr.Spec.Resource.Kind, "Count", restResourceCount)
 			log("Adding finalizer to RestDefinition", "name", cr.Name, "finalizer", restresourcesStillExistFinalizer)
 			meta.AddFinalizer(cr, restresourcesStillExistFinalizer)
