@@ -38,6 +38,20 @@ func restDefinitionWithASecretRefResolver(t *testing.T) *definitionv1alpha1.Rest
 
 	cr.Spec.Resource.VerbsDescription = []definitionv1alpha1.VerbsDescription{{
 		Action: "create",
+		// POINTED AT THE HARNESS OAS'S ONLY OPERATION, deliberately (#627).
+		//
+		// This verb used to carry no path and no method, because no test here had ever needed the
+		// generator to RUN -- the CRD is hand-seeded so Observe can get past the CRD gate. That was only
+		// survivable while Create stamped status.oasHash without rendering: the false stamp made Update's
+		// regeneration gate go quiet, so the generator was never asked to do anything. Three tests in this
+		// harness were therefore passing BECAUSE of that defect, and removing it made them ask the
+		// generator to render a verb with no path.
+		//
+		// A fixture that cannot generate is a fixture that cannot exercise the reconcile loop it is named
+		// for, so the path and method belong here rather than being patched in by the one helper that
+		// happened to need them.
+		Path:   "/prs",
+		Method: "post",
 		FieldMapping: []definitionv1alpha1.FieldMappingItem{{
 			InBody: "credentials.value",
 			Resolver: &definitionv1alpha1.FieldResolver{

@@ -130,14 +130,14 @@ func (l *secretRefLoop) removeTheControllerDeployment() {
 // settleAt brings the loop to steady state with a given build stamped, which is every arm's starting
 // point: a cluster that is converged and consistent before the upgrade.
 //
-// IT ALSO HAS TO MAKE THE FIXTURE GENERATABLE, and that is worth saying rather than hiding in a setup
-// line. The shared RestDefinition fixture declares a verb with no `path` and no `method`, because no test
-// in this harness has ever needed the generator to RUN -- the CRD is hand-seeded so Observe can get past
-// the CRD gate. These tests are the first here that make Create render, so the verb is pointed at the
-// only operation the harness OAS declares.
+// THE FIXTURE IS GENERATABLE AT SOURCE NOW (#627). It used to declare a verb with no `path` and no
+// `method`, and this helper patched one in, because these were the first tests here that made Create
+// render. That patch has moved into the shared fixture itself: once Create stopped stamping
+// status.oasHash without rendering, every reconcile test in this harness could reach the generator, so a
+// fixture that cannot generate is a trap for the next one rather than a saving.
 //
-// The edit goes through the CLUSTER, not just the in-memory copy, because reconcile() re-reads the object
-// at the top of every pass exactly as provider-runtime does.
+// The re-read below still goes through the CLUSTER rather than the in-memory copy, because reconcile()
+// re-reads the object at the top of every pass exactly as provider-runtime does.
 func settleAt(t *testing.T, build string, regenerate bool) *secretRefLoop {
 	t.Helper()
 	ctx := context.Background()
@@ -146,8 +146,9 @@ func settleAt(t *testing.T, build string, regenerate bool) *secretRefLoop {
 	live := &definitionv1alpha1.RestDefinition{}
 	require.NoError(t, l.e.kube.Get(ctx, client.ObjectKeyFromObject(l.cr), live))
 	require.Len(t, live.Spec.Resource.VerbsDescription, 1, "the fixture is expected to declare one verb")
-	live.Spec.Resource.VerbsDescription[0].Path = "/prs"
-	live.Spec.Resource.VerbsDescription[0].Method = "post"
+	require.NotEmpty(t, live.Spec.Resource.VerbsDescription[0].Path,
+		"the shared fixture must be generatable, or every arm below renders nothing and says so for the "+
+			"wrong reason")
 	require.NoError(t, l.e.kube.Update(ctx, live))
 	l.cr = live
 
