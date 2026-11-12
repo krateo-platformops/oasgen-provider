@@ -431,6 +431,61 @@ untouched and cannot reach a running process by itself.
 > controller's pods yourself; they read the updated ConfigMap at start. Fixed in 0.60.0. The first row is
 > unaffected on every version, so an image upgrade on 0.59.0 did take effect.
 
+### How long that restart takes to reach every controller
+
+The second row above is **eventually consistent, in two stages**, and a check made before both have run
+sees a partial result that looks exactly like the 0.59.0 defect.
+
+```
+helm upgrade --set rdc.env.X=...
+  |  immediate
+  v
+ConfigMap  <release>-rdc-configmap
+  |  KUBELET volume propagation, up to ~60-120 s
+  |  (a live configMap volume mounted at /tmp/assets/rdc-configmap, not a copy made at startup)
+  v
+/tmp/assets/rdc-configmap/configmap.yaml  inside the provider pod
+  |  each RestDefinition's NEXT reconcile, up to one POLL INTERVAL (default 3m)
+  v
+<restdefinition-name>-controller-configmap  re-rendered  ->  the controller is restarted
+```
+
+So the worst case for a single kind is roughly **kubelet lag plus one poll interval, about five minutes**.
+
+**Every RestDefinition has its own phase in that cycle**, set by when it was last reconciled. Kinds
+installed at different times are due at different moments, so a fleet updates in **instalments rather
+than all at once**. A partial result is the expected intermediate state, not a defect — and the
+correlation you notice first, that the kinds which updated are the long-standing ones, is a consequence
+of phase rather than a clue.
+
+**Measure in poll intervals of RUNNING cluster time, not wall-clock minutes.** A stopped or suspended
+cluster does not poll, so a wait that elapses while it is down advances nothing. One consumer's lab is
+stopped between runs by policy; they waited eleven minutes, nine of which it was down, and read the same
+partial result a second time. Seventy-eight seconds of real uptime finished it.
+
+> **The reading to distrust is "did any controller restart?"** On a seven-kind fleet mid-propagation, one
+> restart is a pass by that test while six kinds still hold the old environment. Assert that **every**
+> kind's ConfigMap carries the new value, and treat anything less as *not finished yet* rather than as
+> either outcome.
+
+If a kind still lacks the value after two poll intervals of uptime, that is worth investigating. The check
+that tells you **which stage** is stuck is whether the provider's own mounted file has it — and since
+there is no shell in the image (next section), that read needs an ephemeral container:
+
+```console
+kubectl debug -n krateo-system pod/<provider-pod> --target=<container> --image=busybox -it \
+  -- grep -c X /proc/1/root/tmp/assets/rdc-configmap/configmap.yaml
+```
+
+Reading `kubectl get cm <release>-rdc-configmap -o yaml` instead answers a **different** question: that
+object is updated the instant `helm upgrade` returns, so it is non-zero throughout both stages and cannot
+separate "the value has not reached the provider yet" from "it has, and this RestDefinition has not
+reconciled since".
+
+Credit to the openstack-ironic-operator-kog session, which measured both stages while verifying issue 599
+across seven generated controllers, and to azuredevops-provider-kog, whose restart probe had a 20-second
+quiet window against a 3-minute poll.
+
 ## Inspecting a running controller — there is no shell in either image
 
 Both images run on `gcr.io/distroless/static:nonroot`: `rest-dynamic-controller` since **0.20.0**, and
