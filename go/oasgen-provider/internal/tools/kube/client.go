@@ -49,7 +49,11 @@ const (
 	// could act on. A dry-run Update returns the stored resourceVersion untouched -- which is exactly
 	// what a genuine no-op returns -- so it would otherwise report ApplyUnchanged; and a dry-run Create
 	// would report ApplyCreated and let an audit caller record a write that never happened.
-	ApplyDryRun ApplyOp = "dry-run"
+	//
+	// THE LITERAL IS plumbing's, not ours. plumbing's objectclient carries the same op under the same
+	// string (snowplow's AUDIT-4 ruling, plumbing#142), and the audit records of the two writers are
+	// read together -- a kebab-case spelling here would split one outcome into two in every query.
+	ApplyDryRun ApplyOp = "dryRun"
 )
 
 // ApplyResult reports what Apply did, from the attempt that finally succeeded.
@@ -259,6 +263,13 @@ type UninstallOp string
 const (
 	// UninstallDeleted: the object existed and a Delete was accepted.
 	UninstallDeleted UninstallOp = "deleted"
+	// UninstallDryRun: nothing was deleted, because opts.DryRun asked the apiserver to validate only.
+	//
+	// The same trap as ApplyDryRun and found with it: a dry-run Delete is ACCEPTED by the apiserver and
+	// deletes nothing, so without this it reports UninstallDeleted and an audit caller records a deletion
+	// that never happened. UninstallOptions.DryRun is passed straight to client.DeleteOptions, so this is
+	// reachable by any caller that sets it.
+	UninstallDryRun UninstallOp = "dryRun"
 	// UninstallAbsent: there was nothing to delete -- either the Get said NotFound, or the Delete did
 	// because something removed it in between. Both are the same outcome for a caller: no write of ours
 	// happened, so there is nothing to record.
@@ -310,7 +321,11 @@ func Uninstall(ctx context.Context, kube client.Client, obj client.Object, opts 
 
 				return err
 			}
-			res = UninstallResult{Op: UninstallDeleted, Before: before}
+			op := UninstallDeleted
+			if len(opts.DryRun) > 0 {
+				op = UninstallDryRun
+			}
+			res = UninstallResult{Op: op, Before: before}
 			return nil
 		},
 		retry.RetryIf(retryableAPIError),

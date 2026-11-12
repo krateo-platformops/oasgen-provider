@@ -82,8 +82,12 @@ func TestTheApplyOpsAreDistinct(t *testing.T) {
 		assert.NotEmpty(t, string(op), "%s is the empty string, which is indistinguishable from a failed Apply", name)
 	}
 
-	un := map[UninstallOp]string{UninstallDeleted: "UninstallDeleted", UninstallAbsent: "UninstallAbsent"}
-	assert.Len(t, un, 2, "the two UninstallOp constants share a value")
+	un := map[UninstallOp]string{
+		UninstallDeleted: "UninstallDeleted",
+		UninstallAbsent:  "UninstallAbsent",
+		UninstallDryRun:  "UninstallDryRun",
+	}
+	assert.Len(t, un, 3, "two UninstallOp constants share a value")
 	for op, name := range un {
 		assert.NotEmpty(t, string(op), "%s is the empty string", name)
 	}
@@ -279,6 +283,27 @@ func TestADryRunReportsDryRunAndNotAWrite(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, ApplyUpdated, updated.Op)
 	})
+}
+
+// A DRY-RUN UNINSTALL IS NOT A DELETION. Same trap as the apply side: the apiserver accepts a dry-run
+// Delete and removes nothing, so reporting `deleted` would let an audit caller record a deletion that
+// never happened.
+func TestADryRunUninstallIsNotADeletion(t *testing.T) {
+	ctx := context.Background()
+	kube := fake.NewClientBuilder().WithScheme(arScheme(t)).
+		WithObjects(arCM("dr-del", map[string]string{"K": "v"})).Build()
+
+	res, err := Uninstall(ctx, kube, arCM("dr-del", nil), UninstallOptions{DryRun: []string{"All"}})
+	require.NoError(t, err)
+	assert.Equal(t, UninstallDryRun, res.Op,
+		"a dry-run uninstall reported %q, which says an object was removed", res.Op)
+
+	// CONTROL: without DryRun the same call must report a real deletion, or this test would pass
+	// against an Uninstall that reported UninstallDryRun unconditionally.
+	real, err := Uninstall(ctx, kube, arCM("dr-del", nil), UninstallOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, UninstallDeleted, real.Op,
+		"the control reported %q, so UninstallDryRun carries no information", real.Op)
 }
 
 func TestUninstallReportsWhatItDid(t *testing.T) {
