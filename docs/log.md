@@ -90,6 +90,46 @@ to find.
 An array whose OAS schema declares `uniqueItems: true` with **scalar** items is now compared as a
 multiset. Everything else stays positional.
 
+> **Correction (2026-11-12, issue 617).** This section says the realm was `Ready=False`/`Updating`
+> "forever, one PUT every three minutes". **The PUT loop is bounded**, and the end state is worse than
+> the sentence implies rather than better.
+>
+> Measured by keycloak-provider-kog on 0.61.0, same realm and same 23 event types:
+>
+> ```
+> 15:16:30 15:19:30 15:22:30 15:25:30   four "Successfully requested update"
+> 15:28:30                              "Drift is not converging; no longer issuing the update"
+> ```
+>
+> So the non-convergence guard fires after four attempts and the resource **latches** `Ready=False`.
+> "Never converges" was right; "re-PUTs forever" was not. The original wording came from the consumer's
+> first report and I carried it without asking how the loop ended — and the correction matters in both
+> directions: it is less load on the vendor than described, and a latched failure is **harder** to
+> notice than a visible loop, not easier.
+
+> **Runtime verification (2026-11-12, issues 617 and 548).** This release was tagged stating that no fix
+> in it had executed on a cluster at this version. Two now have, measured by keycloak-provider-kog as a
+> before/after on **one** GKE cluster and **one** Keycloak 26.6.3, against the released artifacts with
+> the chart digests verified at pull:
+>
+> ```
+> #617  0.61.0  four PUTs, then the drift guard gives up, Ready=False
+>       0.62.0  ZERO updates; "External resource is up to date" x6 over ~15 min of running
+>               cluster time; Ready=True
+>       CONTROL removing LOGIN out of band -> EXACTLY ONE PUT -> restored -> up to date
+> #548  0.61.0  orphan left ENABLED; admin USER events [CREATE] only
+>       0.62.0  "the identifier was re-derived through findby"; 0 users left; [CREATE, DELETE]
+>       CONTROL a username the user profile rejects behaves IDENTICALLY on both versions:
+>               "not addressable, releasing finalizer without calling the API", no USER events
+> ```
+>
+> **The two control rows are what make these verifications rather than observations.** Zero updates
+> alone is equally consistent with a comparison that has gone blind and returns equal for everything —
+> which would be a worse defect than the one fixed, silently disabling drift detection on every array.
+> The out-of-band removal producing exactly one PUT is what separates those. Likewise the never-landed
+> row: the obvious wrong way to fix an orphan is to always attempt a delete, and a row that behaves
+> identically on both versions is what rules that out.
+
 ```
 uniqueItems: true  +  scalar items (string/integer/number/boolean)  ->  multiset
 everything else                                                     ->  positional, unchanged
