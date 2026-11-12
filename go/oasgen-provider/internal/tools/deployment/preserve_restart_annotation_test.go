@@ -82,7 +82,8 @@ func TestAnApplyMustNotUndoARestart(t *testing.T) {
 		require.Empty(t, rendered.Spec.Template.Annotations,
 			"premise: the rendered pod template must carry no annotations, or this test is not about the asset deploy.Deploy uses")
 
-		require.NoError(t, kubecli.Apply(ctx, kube, rendered, opts))
+		_, applyErr1 := kubecli.Apply(ctx, kube, rendered, opts)
+		require.NoError(t, applyErr1)
 
 		after := &appsv1.Deployment{}
 		require.NoError(t, kube.Get(ctx, key, after))
