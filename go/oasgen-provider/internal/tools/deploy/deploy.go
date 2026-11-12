@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"path"
-	"strings"
 
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/deployment"
 	hasher "github.com/krateo-platformops/oasgen-provider/internal/tools/hash"
@@ -526,26 +525,72 @@ func (e *PermanentRenderError) Unwrap() error { return e.Err }
 // its finalizer and the CRD, its CRs and their external resources all survive.
 var ErrLiveInstances = fmt.Errorf("CRD still has live instances")
 
-// liveInstanceCount reports how many instances of gvr exist cluster-wide.
+// liveInstanceCount reports how many instances of the kind exist cluster-wide.
 //
-// A missing CRD is not an error: it means the kind is already gone, so there is nothing to protect.
-// Any OTHER failure is propagated, because a count we could not take must never read as zero.
-func liveInstanceCount(ctx context.Context, kube client.Client, gvk schema.GroupVersionKind) (int, error) {
+// A ZERO FROM THIS FUNCTION AUTHORISES AN IRREVERSIBLE DELETE. Its caller uses it to decide whether to
+// uninstall the generated CRD, which cascade-deletes every CR of that kind, and each of those CRs carries
+// a finalizer that deletes the EXTERNAL resource. Two consumers have measured what that costs: for
+// github-provider-kog the cascade issues `DELETE /repos/{owner}/{repo}`, losing code and history with no
+// undo; for openstack-ironic-operator-kog it deprovisions bare-metal blades whose provisioned state is
+// not in git. So "I could not count" must never be spelled the same way as "there were none".
+//
+// THE HARD CASE IS A LIST THAT SAYS "NO SUCH KIND", which this function used to answer with a bare zero.
+// That answer has two causes needing OPPOSITE outcomes:
+//
+//   - the CRD is really gone, so the kind cannot have instances and zero is correct; or
+//   - the CRD is there but the kind is not listable right now -- a RESTMapper whose discovery cache
+//     predates it, an apiserver that has not finished serving it, discovery erroring under load. Instances
+//     may exist and simply be invisible to this client, and a zero would delete them.
+//
+// A failed list cannot tell those apart, so this asks a DIFFERENT question of a DIFFERENT resource: does
+// the CustomResourceDefinition exist? That is a plain Get on a core-group-registered type, so it does not
+// depend on the RESTMapper knowing the generated kind -- the very thing that is in doubt. It is the same
+// shape as the discovery guard in manageFinalizers (#576), and `crd.Get` is the function the pruner
+// already uses, asked rather than reimplemented.
+//
+// Any other listing failure propagates, exactly as before.
+func liveInstanceCount(ctx context.Context, kube client.Client, gvk schema.GroupVersionKind, gr schema.GroupResource) (int, error) {
 	if gvk.Kind == "" {
 		// Without a Kind nothing can be listed, and a zero here would authorise the delete. Refuse.
 		return 0, fmt.Errorf("cannot list instances: no Kind supplied")
 	}
+
 	var list unstructured.UnstructuredList
 	list.SetGroupVersionKind(gvk)
-	if err := kube.List(ctx, &list); err != nil {
-		if apimeta.IsNoMatchError(err) || apierrors.IsNotFound(err) ||
-			strings.Contains(err.Error(), "the server could not find the requested resource") ||
-			strings.Contains(err.Error(), "no matches for") {
-			return 0, nil
-		}
-		return 0, err
+	lerr := kube.List(ctx, &list)
+	if lerr == nil {
+		return len(list.Items), nil
 	}
-	return len(list.Items), nil
+	if !apimeta.IsNoMatchError(lerr) && !apierrors.IsNotFound(lerr) {
+		return 0, lerr
+	}
+
+	// The list said the kind is unknown. Ask whether its CRD exists before believing that means zero.
+	//
+	// The group-resource must be complete first. `schema.GroupResource.String()` -- which is how the CRD's
+	// object name is built -- returns the BARE RESOURCE when the group is empty, and no CRD is ever named
+	// that way. So an incomplete group-resource would make the Get a guaranteed NotFound, read as "the CRD
+	// is absent", and authorise the delete: the question would answer itself with the dangerous answer.
+	if gr.Resource == "" || gr.Group == "" {
+		return 0, fmt.Errorf("the kind %s could not be listed (%v) and its CRD cannot be identified to "+
+			"check: a group-resource with both a resource and a group is required, got %q",
+			gvk.Kind, lerr, gr.String())
+	}
+
+	live, cerr := crd.Get(ctx, kube, gr)
+	if cerr != nil {
+		return 0, fmt.Errorf("the kind %s could not be listed (%v) and whether its CRD %s still exists "+
+			"could not be determined: %w", gvk.Kind, lerr, gr.String(), cerr)
+	}
+	if live != nil {
+		return 0, fmt.Errorf("the kind %s could not be listed (%v) but its CustomResourceDefinition %s "+
+			"exists, so instances of it may exist and simply be unlistable by this client. Refusing to "+
+			"report zero, because zero would authorise uninstalling that CRD and cascade-deleting them",
+			gvk.Kind, lerr, gr.String())
+	}
+
+	// The CRD is genuinely absent, so the kind cannot have instances.
+	return 0, nil
 }
 
 func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) error {
@@ -568,7 +613,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		// A LIST failure refuses too. "I could not count" must never read as "there were none" -- that is
 		// the same conflation that produced the delete-path bugs in #77/#98/#101, and here the cost of
 		// getting it wrong is unrecoverable rather than merely wrong.
-		n, cerr := liveInstanceCount(ctx, opts.KubeClient, opts.GVK)
+		n, cerr := liveInstanceCount(ctx, opts.KubeClient, opts.GVK, opts.GVR.GroupResource())
 		if cerr != nil {
 			opts.Log("Refusing to uninstall CRD: cannot determine whether instances exist",
 				"name", opts.GVR.GroupResource().String(), "error", cerr.Error())
