@@ -9,8 +9,8 @@ require (
 	github.com/gobuffalo/flect v1.0.3
 	github.com/google/go-cmp v0.7.0
 	github.com/itchyny/gojq v0.12.19
-	github.com/krateo-platformops/audit v0.3.0
-	github.com/krateo-platformops/plumbing v1.33.0
+	github.com/krateo-platformops/audit v0.6.0
+	github.com/krateo-platformops/plumbing v1.60.0
 	github.com/krateo-platformops/unstructured-runtime v1.9.0
 	github.com/pb33f/libopenapi v0.28.0
 	github.com/stretchr/testify v1.12.1

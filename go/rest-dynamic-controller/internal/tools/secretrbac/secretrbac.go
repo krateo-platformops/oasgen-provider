@@ -62,10 +62,10 @@ func RoleName(gvr schema.GroupVersionResource, cr types.NamespacedName) string {
 // unconditional and IsNotFound-tolerant: teardown never depends on whether the pair was ever
 // provisioned, which from #540 onwards is the normal case.
 func DeleteSecretRole(ctx context.Context, dyn dynamic.Interface, ns, roleName string) error {
-	if err := objectclient.Uninstall(ctx, dyn, bindingGVR, ns, roleName, objectclient.UninstallOptions{}); err != nil {
+	if _, err := objectclient.Uninstall(ctx, dyn, bindingGVR, ns, roleName, objectclient.UninstallOptions{}); err != nil {
 		return fmt.Errorf("deleting secretRef RBAC RoleBinding %s/%s: %w", ns, roleName, err)
 	}
-	if err := objectclient.Uninstall(ctx, dyn, roleGVR, ns, roleName, objectclient.UninstallOptions{}); err != nil {
+	if _, err := objectclient.Uninstall(ctx, dyn, roleGVR, ns, roleName, objectclient.UninstallOptions{}); err != nil {
 		return fmt.Errorf("deleting secretRef RBAC Role %s/%s: %w", ns, roleName, err)
 	}
 	return nil
