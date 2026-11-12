@@ -13,6 +13,84 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-12 — 0.61.0
+
+**A failed instance list is no longer read as zero instances.** One fix, and an honest note about the half of it that is still open.
+
+### The finalizer that stops a RestDefinition being deleted while its instances live
+
+`manageFinalizers` listed the instances of a generated Kind and used the count to decide whether to hold the `restresources-still-exist` finalizer. **Two distinct failures became a count of zero**, so the guard was defeated by the failure mode it is most likely to meet — a RestDefinition could be deleted while instances of its Kind were still live.
+
+Both silent zeros came from matching error **text**:
+
+```
+"the server could not find the requested resource"   items nilled, error CLEARED
+"no matches for"                                     the whole block skipped, so the error stayed
+                                                     non-nil, was never returned or logged, and was
+                                                     then OVERWRITTEN by the Update calls, which
+                                                     reused `err`
+```
+
+The question is never "did it count correctly" but **"may the finalizer be removed on this evidence"**, and only one answer permits removal:
+
+```
+no-match or NotFound  ->  ask the authority: the CRD itself
+      the CRD check failed   -> return the error   (unknown; HOLD)
+      the CRD EXISTS         -> return an error    (instances may exist, cannot be counted)
+      the CRD is ABSENT      -> no instances CAN exist; proceed with zero
+anything else         ->  return the error
+```
+
+The `Update` calls now use their own error variables, so a dropped error is a **compile** error rather than a silent one.
+
+### I proposed two reachable triggers for that guard and both were refuted
+
+Worth recording, because the comment in the source now says so and a future reader who finds a third will otherwise re-propose one of these:
+
+```
+#314's RESTMapper-lag race    refuted by measurement -- controller-runtime's dynamic mapper tests its
+                              inner error with IsNoMatchError, reloads discovery and retries, so a
+                              stale mapper never surfaces at this call site
+a pruned served version       refuted from the source -- prunableServedVersions skips the version it
+                              was called with (which at its call site IS observedVersion) AND skips any
+                              version holding instances, so neither the version we list at nor one with
+                              instances can be pruned
+```
+
+So the guard is **defensive**: no reachable path is known that delivers a no-match while the CRD is present. That is not a reason to decide from the error alone — asking the CRD costs one `Get` on a path that has already failed, and being wrong costs a RestDefinition whose instances are live. **Right even when the question is academic.**
+
+**The cost of the safe direction is not free, and an operator should know it.** On the generic branch the finalizer is held *indefinitely* if discovery never recovers, so the failure mode of safety is a RestDefinition nobody can delete — and the obvious remedy, removing the finalizer by hand, is precisely the destructive act the guard exists to prevent. See `docs/configuration.md` for what to check first.
+
+### STILL OPEN: the same assumption, one layer down, where it is destructive
+
+`liveInstanceCount` in `internal/tools/deploy` reads a no-match as zero too, and **a zero there authorises `crd.Uninstall`**, which cascade-deletes every instance of the kind and makes the controller fire an external DELETE at the vendor for each one. It is reached precisely *when* the fix above has already failed, so the two layers do not compose for the case either was written to catch.
+
+Filed as **#609** and deliberately not fixed in this release. Every *reachable* failure there is already safe — a non-no-match error is propagated, so an unreachable discovery, an RBAC refusal or a timeout all reach "cannot determine" and refuse. The unfixed case needs the same trigger nobody can find.
+
+### The call-site wiring audit
+
+A decision function and the values fed into it can each be correct, and individually covered, while **the connection between them is asserted nowhere**. That gap shipped 0.59.0's non-firing restart gate, so the audit looked for siblings.
+
+```
+7 decision functions enumerated   2 with test gaps, both over CORRECT code
+                                  2 measured clean, one with a control
+                                  0 live production bugs
+```
+
+- **`resourceExistsForController`'s argument order** was unguarded: two `bool` parameters, so a swap compiles silently, and swapping them at both call sites failed no test in the package. What it protects is #122, where reporting an existing-but-rolling-out Deployment as non-existent re-set `krateo.io/external-create-pending` 75 seconds *after* create succeeded and wedged the resource.
+- **`anchorOf`** had no test naming it and five surviving mutations — but both branches at its call site `continue`, so none of them can change the Role that comes out. What was unverified is a diagnostic distinction a consumer specifically asked for, which is why it got a test rather than a shrug.
+- **The swallowed-error census came back clean**, with a control: 0 call sites discarding an error with `_` in the two audited packages, against 14 elsewhere in the monorepo. So 0.59.0's defect was an outlier rather than the house style — which changed the remedy from a package sweep to a single test.
+
+**My own enumeration had the defect the audit was looking for.** I reported 6 functions; a mechanical re-count found 7. My pattern required the receiver to be `e *external`, so a method on a different type was invisible to the sweep that claimed to cover the package. It surfaced only because two counts of the same thing disagreed by one.
+
+The method is written up in `docs/development/testing.md`, including the traps: baseline-green first, assert the anchor count before writing, restore in a `finally`, and **a compile failure is not a kill**.
+
+### Also in this release
+
+- **`docs/configuration.md`** gains the endpoint allowlist — `rdc.endpointAllowlist` and `rdc.allowAnyHost` were absent from a page that calls itself the whole config surface, and that is the one security control on it. With the matching rule nothing documented anywhere: `(host, port, scheme)` compared exactly, **but an omitted port defaulted from the scheme first, on both sides**. So a redirect that only adds or drops the scheme's default port is *permitted*, and "a redirect that changes only the port is refused" is too strong.
+- **`docs/development/testing.md`** also corrects a misnomer: there is **no envtest** in this repository. Five packages stand up a real `kind` cluster in `TestMain`; nothing imports `controller-runtime/pkg/envtest`. The word appeared in three places, all prose, and I had repeated the claim myself before checking.
+- The **0.60.0** section above gains its runtime evidence, measured and paired on one cluster in one sitting.
+
 ## 2026-11-11 — 0.60.0
 
 **The restart gate that 0.59.0 shipped had never fired, and this release is the one where a `rdc.env` change reaches a running controller.** 0.59.0's own section claimed otherwise — *"a `rdc.env` change such as `REST_CONTROLLER_DEBUG` … every generated controller must roll to pick it up"* — and that sentence was false when it was written. It has a correction block of its own.
