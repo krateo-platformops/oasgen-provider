@@ -40,13 +40,40 @@ podAnnotations: {}
 podSecurityContext: {}
 securityContext: {}
 
+# maxBodyMiB is the largest POST /render body this service accepts, in MiB. IT IS THE ONLY KNOB:
+# the container's memory limit is DERIVED from it below, because the two are physically coupled and
+# setting them independently is how a service ends up accepting bodies it cannot render (#628).
+#
+# THE COUPLING IS MEASURED, not guessed. Parsing and rendering a document allocates ~97x its size and
+# holds ~29x of it live at peak:
+#
+#   input      allocated   live heap
+#     35 KiB     9.6 MiB     8.3 MiB
+#    349 KiB      37 MiB      15 MiB
+#    1.3 MiB     124 MiB      46 MiB
+#    3.1 MiB     300 MiB      90 MiB
+#
+# Note the ratio is NOT constant -- 242x at 35 KiB falling to 29x at 3.1 MiB -- so the derivation
+# below is a BASELINE PLUS A MARGINAL RATE rather than a single multiplier. A flat `cap x 29` would
+# derive a limit the Go runtime cannot start in at small caps.
+maxBodyMiB: 4
+
 resources:
   requests:
     cpu: 100m
     memory: 128Mi
   limits:
     cpu: 500m
-    memory: 512Mi
+    # memory is DERIVED from maxBodyMiB (see templates/deployment.yaml) and is deliberately absent
+    # here. Set memoryLimitOverride below only if you have measured your own workload and mean to
+    # depart from the coupling -- the derivation exists so a closed consumer values schema cannot
+    # express the broken pair at all, and an override reopens that door.
+    #
+    # At the default maxBodyMiB: 4 the derived limit is 512Mi, exactly what this chart shipped
+    # before the knob existed, so upgrading changes nothing for anyone who does not raise the cap.
+
+# memoryLimitOverride, when set, replaces the derived memory limit entirely. Empty means derive.
+memoryLimitOverride: ""
 
 nodeSelector: {}
 affinity: {}
