@@ -222,12 +222,14 @@
     },
     "maxBodyMiB": {
       "type": "integer",
+      "default": 4,
       "minimum": 1,
       "maximum": 64,
       "description": "Largest POST /render body accepted, in MiB. THE CONTAINER'S MEMORY LIMIT IS DERIVED FROM THIS and must not be set independently: parsing holds ~29x the document live at peak, so a cap raised without memory is a service that accepts bodies it cannot render (issue 628). The maximum of 64 is not arbitrary -- at 64 MiB the derived limit is already ~2.4Gi for a SINGLE request, and anything larger should be a deliberate conversation rather than a values edit."
     },
     "memoryLimitOverride": {
       "type": "string",
+      "default": "",
       "description": "Replaces the derived memory limit entirely. Empty (the default) means derive from maxBodyMiB. Setting this reopens the coupling that the derivation exists to close, so set it only after measuring your own workload. oasgen-render still refuses to start if the cap exceeds what the limit can cover."
     }
   }
