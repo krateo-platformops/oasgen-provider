@@ -108,8 +108,33 @@ func populateStatusFields(clientInfo *getter.Info, mg *unstructured.Unstructured
 		return nil // Nothing to populate, but not an error
 	}
 
-	// Combine identifiers and additionalStatusFields into one list.
-	allFields := append(clientInfo.Resource.Identifiers, clientInfo.Resource.AdditionalStatusFields...)
+	// Combine identifiers and additionalStatusFields into one list, in a FRESH slice.
+	//
+	// `append(Resource.Identifiers, ...)` would write into the identifier slice's backing array
+	// whenever it has spare capacity, which after a JSON unmarshal it often does. Measured by
+	// openstack-nova-operator-kog across identifier counts:
+	//
+	//	n   len  cap   aliases?
+	//	1    1    1    no
+	//	2    2    2    no
+	//	3    3    4    YES -- [id0 id1 id2 <additionalStatusField>]
+	//	4    4    4    no
+	//	5    5    8    YES
+	//	6    6    8    YES
+	//
+	// `len(Resource.Identifiers)` does not change, so nothing reading that slice normally sees the
+	// extra element: this is a latent hazard rather than a reproduced bug, and it needs a second
+	// consumer re-slicing or appending to the same array to surface. It is fixed anyway because
+	// THIS REPO ALREADY DECIDED IT MATTERS -- restResources.go builds the equivalent list the safe
+	// way, with a comment saying exactly why. One site documenting a hazard while another does the
+	// unguarded form is worse than either alone, because a reader who finds the guarded one
+	// reasonably assumes the pattern is applied.
+	//
+	// Every consumer definition anyone has surveyed declares 1-2 identifiers, where cap == len,
+	// which is why this would have waited for the first three-identifier kind to be shipped.
+	allFields := make([]string, 0, len(clientInfo.Resource.Identifiers)+len(clientInfo.Resource.AdditionalStatusFields))
+	allFields = append(allFields, clientInfo.Resource.Identifiers...)
+	allFields = append(allFields, clientInfo.Resource.AdditionalStatusFields...)
 	// Early return if no fields to populate
 	if len(allFields) == 0 {
 		return nil
