@@ -1,6 +1,10 @@
 ---
+type: Runbook
 title: Detecting a generated CRD that is stale relative to its OAS document
-description: A RestDefinition can store a content hash for a render that never happened, after which it compares new against new forever and never regenerates. This is how to tell whether a cluster is in that state -- and why the act of fixing it destroys the ability to measure it.
+description: A RestDefinition can store a content hash for a render that never happened, after which it compares new against new forever and never regenerates. How to tell whether a cluster is in that state, the three traps that make a detector report the wrong answer, and why the act of fixing it destroys the ability to measure it.
+resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
+tags: [kog, crd, generation, detection, runbook]
+timestamp: 2026-11-13T00:00:00Z
 ---
 
 # Detecting a generated CRD that is stale relative to its OAS document
