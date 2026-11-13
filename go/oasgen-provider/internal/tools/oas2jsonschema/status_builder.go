@@ -72,12 +72,13 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 			Name: StatusResolvedResolversDigest,
 			Schema: &Schema{
 				Type: []string{"string"},
-				Description: "A salted digest of the values this resource's secretRef resolvers last " +
-					"resolved to, recorded when a create or update succeeded. The controller compares it " +
-					"against the values resolved now; a difference means the referenced Secret's CONTENT " +
-					"changed and must be pushed to the vendor. Salted with the resource's UID because a " +
-					"bare digest of a low-entropy secret is brute-forceable from a field anyone with " +
-					"`get` can read.",
+				Description: "A digest identifying the Secrets this resource's update mapping resolves " +
+					"to -- their names, keys and resourceVersions -- recorded when an update last " +
+					"succeeded. The controller compares it against those Secrets as they are now; a " +
+					"difference means a referenced Secret changed and its value must be pushed to the " +
+					"API. It deliberately contains NO SECRET VALUE: this field is readable by anyone " +
+					"who can get the resource, and a digest of the value itself would be " +
+					"brute-forceable for a low-entropy secret.",
 			},
 		})
 	}

@@ -169,9 +169,19 @@ func TestTheDigestFieldIsAStringAndExplainsItself(t *testing.T) {
 
 	desc, _ := f["description"].(string)
 	require.NotEmpty(t, desc, "a CRD property with no description is undocumented in kubectl explain")
-	for _, want := range []string{"secretRef", "UID", "create or update"} {
+	// THE WORDS ARE THE CONTRACT WITH WHOEVER READS `kubectl explain`.
+	//
+	// "resourceVersions" and "NO SECRET VALUE" are here because the field's earlier description said
+	// it held a UID-salted digest of the resolved VALUES. That would have been a brute-forceable
+	// commitment to every referenced secret in a field any CR reader can see -- measured, a 6-digit
+	// PIN falls out of one in a quarter of a second. The field does not hold that, and an operator
+	// must be able to tell from the CRD alone that it does not.
+	for _, want := range []string{"resourceVersions", "NO SECRET VALUE", "update"} {
 		assert.Contains(t, desc, want,
-			"the description must mention %q: an operator needs to know what rotates it, why it is "+
-				"salted, and when it is written", want)
+			"the description must mention %q: an operator needs to know what moves this digest, that "+
+				"it discloses no secret value, and when it is written", want)
 	}
+	assert.NotContains(t, desc, "salted",
+		"the description claims a salt. There is none, and the salt it used to claim (the resource "+
+			"UID) is readable by the same `get` that reads this field, so it protected nothing")
 }
