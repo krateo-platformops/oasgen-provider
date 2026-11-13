@@ -71,5 +71,31 @@ Do it while the generated controller's Deployment is **Ready**: patching while i
 | 45 days old, 0.52.0-era, provider at 0/0 replicas, no reconcile since the window | 34 | 34 agree, 0 mismatch |
 | two long-lived clusters, one kind on one path each | 1 each | no latch |
 | a throwaway cluster, window opened by a deliberate provider downgrade | 1 | latched |
+| a disposable cluster on 0.62.0, window opened deliberately (Deployment **deleted**, then the document edited) | 2 | **both latched** |
+| the same cluster, same edit, Deployment **present** (control) | 1 | regenerated correctly |
+
+### The mechanism is reproduced, not inferred
+
+The two-definition row above is a deliberate reproduction and it is worth stating in full, because it
+is the difference between a code reading and a measurement:
+
+```
+baseline      Queue  probe=0  crd_schema=3d6af848  oasHash=f7352efb  deploy 1/1
+after:  delete the Deployment, THEN edit the document, THEN let 2 polls run
+result        Queue  probe=0  crd_schema=3d6af848  oasHash=57743d37  deploy=NEW uid
+                             ^^^ UNCHANGED          ^^^ MOVED
+control  Environment  probe=1  crd_schema=4bbbfd41  oasHash=b85b49f2  deploy unchanged
+                              ^^^ the edit IS observable when the Deployment is present
+```
+
+The stored hash advanced to the new document while the served schema stayed byte-identical to the
+old one — the latch, directly observed. `Create` recreated the Deployment and stamped the hash
+without rendering. **The control is what makes this readable**: the same edit with the Deployment
+present changes the served schema, so an unchanged schema in the subject arm cannot be explained by
+the edit being invisible.
+
+Note the Deployment must be **deleted**, not scaled to zero: `deployOk` means *exists*, and at
+`replicas=0` the readiness test computes `0 == 0` and reports the Deployment as existing **and
+ready**. Scaling to zero closes the window while looking like the healthiest possible state.
 
 **No latch has been found on any long-lived cluster.** That is the strongest available statement and it is not "this never happens": the measured population is small, and most of it was checked on one kind.
