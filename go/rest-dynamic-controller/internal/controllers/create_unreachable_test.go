@@ -157,6 +157,25 @@ func TestReadyOnTheUpToDatePathIsDecidedAtTheSetConditionsCallSite(t *testing.T)
 			"with Ready=True on the very resource the diagnostic is about")
 }
 
+// THESE ARMS ARE PERMANENTLY THE ONLY COVERAGE FOR THE POSITIVE DIRECTION. DO NOT DELETE THEM AS
+// UNEXERCISED.
+//
+// The diagnostic they test fires only for an action-only kind whose findby CAN match -- which is, by
+// definition, a kind whose only effect never fires. There is no healthy configuration in which it is
+// correct and the resource works. So:
+//
+//   - no consumer can ever exercise this path, now or later: adoption means WORKING definitions;
+//   - the only live route is deliberately breaking a kind, which has been declined;
+//   - therefore these arms are not interim coverage pending field evidence. Waiting cannot help.
+//
+// A consumer census found ONE action-only definition across 38 consumer kinds, and even that one
+// cannot reach the condition site (its findby cannot match, so Observe returns at the not-found
+// branch). The natural cleanup instinct -- "remove the case no real manifest exercises" -- would
+// delete exactly the only thing testing this.
+//
+// The general test, worth applying to any diagnostic: ASK WHETHER A HEALTHY SYSTEM CAN PRODUCE THE
+// SIGNAL. If it cannot, "we will see it in the field" is not a plan.
+//
 // THE BEHAVIOUR AT THE HANDLER LEVEL: what a consumer actually receives.
 //
 // The predicate tests above establish the shape logic. This asserts the two things an operator sees
