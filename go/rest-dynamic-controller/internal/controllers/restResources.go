@@ -1257,8 +1257,38 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		return err
 	}
 	if apiCall == nil || callInfo == nil {
-		log.Error(fmt.Errorf("API action create not found"), "action", apiaction.Create)
-		return nil
+		// NO CREATE ACTION OF ANY KIND, AND THAT IS NOT A SUCCESS (#624).
+		//
+		// This used to `return nil` after logging. Returning nil tells the runtime the create
+		// SUCCEEDED, and the runtime then records exactly that: a Normal `CreatedExternalResource`
+		// event reading "Successfully requested creation of external resource"
+		// (unstructured-runtime worker.go:1296). So the old behaviour did not merely fail to report
+		// a problem -- it affirmatively reported a success that never happened, once per poll,
+		// forever, for a resource absent at the vendor. The log line was the only contrary signal,
+		// and a log line's level comes from the chart, so it is not sweepable after the fact.
+		//
+		// The two shapes that legitimately declare no create verb are handled ABOVE and return
+		// before here: createApiRef (delegated to a RESTAction) and a dispatch resource (whose
+		// comment at the dispatch branch says it must come first for exactly this reason, #199). So
+		// reaching this point means none of the three applies.
+		//
+		// The condition carries the durable, sweepable explanation; the error stops the runtime
+		// reporting a creation it never performed. A findby-only resource is a legitimate shape, so
+		// the wording says the Kind cannot create rather than that its author erred.
+		if cerr := unstructuredtools.SetConditions(mg, customcondition.NoCreateVerbDeclared()); cerr != nil {
+			log.Error(cerr, "Setting the NoCreateVerbDeclared condition")
+			return cerr
+		}
+		if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+			Pluralizer:    h.pluralizer,
+			DynamicClient: h.dynamicClient,
+		}); uerr != nil {
+			log.Error(uerr, "Updating status")
+			return uerr
+		}
+		err := fmt.Errorf("no create action is declared for this resource: no create verb, no dispatch verb and no createApiRef")
+		log.Error(err, "Cannot create", "action", apiaction.Create, "kind", mg.GetKind(), "name", mg.GetName())
+		return err
 	}
 
 	resolved, err := h.resolveRequestFields(ctx, cs, clientInfo, callInfo.FieldMapping, mg)
