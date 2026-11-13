@@ -36,13 +36,23 @@ spec:
           command: ["/bin/oasgen-render"]
           args:
             - --addr=:{{ .Values.containerPort }}
-          {{- with .Values.env }}
           env:
-            {{- range $k, $v := . }}
+            # DERIVED FROM maxBodyMiB, and the memory limit below is derived from the same number.
+            # The two are physically coupled (#628); this is the declared path that keeps them
+            # together, so a closed consumer values schema cannot express the broken pair.
+            - name: OASGEN_RENDER_MAX_BODY_BYTES
+              value: {{ mul .Values.maxBodyMiB 1048576 | quote }}
+            {{- /*
+              The generic env map follows and is deliberately NOT filtered. Setting
+              OASGEN_RENDER_MAX_BODY_BYTES through it breaks the coupling -- but silently
+              discarding an operator's explicit input is worse than letting it through and failing
+              loudly, and oasgen-render refuses to start when its cap exceeds what its own memory
+              limit can cover. The chart closes the declared path; the binary closes this one.
+            */}}
+            {{- range $k, $v := .Values.env }}
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
-          {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
@@ -68,6 +78,21 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+            limits:
+              {{- toYaml .Values.resources.limits | nindent 14 }}
+              {{- /*
+                MEMORY IS DERIVED, not declared, because it and maxBodyMiB are one decision (#628).
+
+                baseline + marginal, NOT a flat multiplier. The measured live heap is ~29x the
+                document at 3.1 MiB but ~242x at 35 KiB -- a fixed cost plus a rate -- so
+                `cap x 29` would derive a limit the Go runtime cannot start in at a small cap.
+                145/4 is 36.25, i.e. 29x with 25% headroom.
+
+                The 512Mi floor is what this chart shipped before the knob existed, so at the
+                default maxBodyMiB: 4 the rendered limit is byte-identical to today and upgrading
+                changes nothing for anyone who does not raise the cap.
+              */}}
+              memory: {{ .Values.memoryLimitOverride | default (printf "%dMi" (max 512 (add 128 (div (mul .Values.maxBodyMiB 145) 4)))) }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

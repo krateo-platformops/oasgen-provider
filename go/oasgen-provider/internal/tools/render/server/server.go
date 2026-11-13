@@ -44,8 +44,21 @@ import (
 // mapped paths before being held -- so a live render body is about 0.6 MiB at most, roughly a sixth of
 // this. (Its 8 MiB limit applies to the raw spec at import, before trimming, and never reaches /render.)
 //
-// THESE TWO NUMBERS ARE COUPLED. Raising this cap without raising helm/oasgen-provider/values.yaml's
-// render.resources.limits.memory re-creates exactly the inconsistency it was lowered to remove.
+// THESE TWO NUMBERS ARE COUPLED, AND THE COUPLING IS NOW ENFORCED RATHER THAN DESCRIBED (#628).
+//
+// This comment used to say "raise helm/oasgen-provider/values.yaml's render.resources.limits.memory
+// too". That path never existed: it appeared exactly once in the whole repository, in this comment,
+// so a reader who went looking for the key found nothing and could reasonably conclude the coupling
+// was stale rather than the path. The real halves were in two different charts.
+//
+// There is now ONE knob. helm/controller-render-service's `maxBodyMiB` sets this cap and the
+// container's memory limit is derived from it, with resources.limits.memory removed from that
+// chart's values schema so the broken pair cannot be expressed through declared values at all.
+//
+// The routes no chart schema can close -- the generic `env` passthrough and hand-written manifests
+// -- are closed by CheckMemoryBudget in this package, which refuses to start when the configured cap
+// exceeds what this container's cgroup memory limit can serve. A description is not a constraint;
+// these two are.
 const DefaultMaxBodyBytes int64 = 4 << 20
 
 // Severities of a Problem. An "error" is something the controller refuses on: it would apply nothing for

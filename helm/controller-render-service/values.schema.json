@@ -8,7 +8,7 @@
     "global": {
       "type": "object",
       "title": "Global overrides",
-      "description": "Helm global values. Deliberately PERMISSIVE — additionalProperties is NOT false here. The Krateo composition engine injects compositionId, compositionName, compositionNamespace, compositionGroup, compositionResource, compositionApiVersion, compositionKind, compositionInstalledVersion, krateoNamespace and gracefullyPaused into global at install time; forbidding extras makes helm reject the install with \"additional properties ... not allowed\". blueprint-render-service omits it for the same reason.",
+      "description": "Helm global values. Deliberately PERMISSIVE \u2014 additionalProperties is NOT false here. The Krateo composition engine injects compositionId, compositionName, compositionNamespace, compositionGroup, compositionResource, compositionApiVersion, compositionKind, compositionInstalledVersion, krateoNamespace and gracefullyPaused into global at install time; forbidding extras makes helm reject the install with \"additional properties ... not allowed\". blueprint-render-service omits it for the same reason.",
       "properties": {
         "imageRegistry": {
           "type": "string",
@@ -30,10 +30,32 @@
       "description": "The oasgen-provider image; this chart runs its oasgen-render entrypoint rather than the controller, so the renderer cannot drift from the generator whose output it previews.",
       "additionalProperties": false,
       "properties": {
-        "registry": { "type": "string", "title": "Registry", "default": "ghcr.io" },
-        "repository": { "type": "string", "title": "Repository", "default": "krateo-platformops/oasgen-provider" },
-        "pullPolicy": { "type": "string", "title": "Pull policy", "enum": ["Always", "IfNotPresent", "Never"], "default": "IfNotPresent" },
-        "tag": { "type": "string", "title": "Tag", "description": "Overrides the image tag, whose default is the chart appVersion.", "default": "" }
+        "registry": {
+          "type": "string",
+          "title": "Registry",
+          "default": "ghcr.io"
+        },
+        "repository": {
+          "type": "string",
+          "title": "Repository",
+          "default": "krateo-platformops/oasgen-provider"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "title": "Pull policy",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ],
+          "default": "IfNotPresent"
+        },
+        "tag": {
+          "type": "string",
+          "title": "Tag",
+          "description": "Overrides the image tag, whose default is the chart appVersion.",
+          "default": ""
+        }
       }
     },
     "imagePullSecrets": {
@@ -42,11 +64,19 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "properties": { "name": { "type": "string" } }
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
       },
       "default": []
     },
-    "nameOverride": { "type": "string", "title": "Name override", "default": "" },
+    "nameOverride": {
+      "type": "string",
+      "title": "Name override",
+      "default": ""
+    },
     "fullnameOverride": {
       "type": "string",
       "title": "Fullname override",
@@ -66,11 +96,30 @@
       "title": "Service",
       "additionalProperties": false,
       "properties": {
-        "type": { "type": "string", "title": "Service type", "enum": ["ClusterIP", "NodePort", "LoadBalancer"], "default": "ClusterIP" },
-        "port": { "type": "integer", "title": "Service port", "minimum": 1, "maximum": 65535, "default": 8080 }
+        "type": {
+          "type": "string",
+          "title": "Service type",
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ],
+          "default": "ClusterIP"
+        },
+        "port": {
+          "type": "integer",
+          "title": "Service port",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8080
+        }
       }
     },
-    "podAnnotations": { "type": "object", "title": "Pod annotations", "default": {} },
+    "podAnnotations": {
+      "type": "object",
+      "title": "Pod annotations",
+      "default": {}
+    },
     "podSecurityContext": {
       "type": "object",
       "title": "Pod security context",
@@ -92,27 +141,65 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "cpu": { "type": ["string", "number"] },
-            "memory": { "type": ["string", "number"] }
+            "cpu": {
+              "type": [
+                "string",
+                "number"
+              ]
+            },
+            "memory": {
+              "type": [
+                "string",
+                "number"
+              ]
+            }
           }
         },
         "limits": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "cpu": { "type": ["string", "number"] },
-            "memory": { "type": ["string", "number"] }
+            "cpu": {
+              "type": [
+                "string",
+                "number"
+              ]
+            }
           }
         }
       }
     },
-    "nodeSelector": { "type": "object", "title": "Node selector", "additionalProperties": { "type": "string" }, "default": {} },
-    "affinity": { "type": "object", "title": "Affinity", "default": {} },
-    "tolerations": { "type": "array", "title": "Tolerations", "items": { "type": "object" }, "default": [] },
+    "nodeSelector": {
+      "type": "object",
+      "title": "Node selector",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {}
+    },
+    "affinity": {
+      "type": "object",
+      "title": "Affinity",
+      "default": {}
+    },
+    "tolerations": {
+      "type": "array",
+      "title": "Tolerations",
+      "items": {
+        "type": "object"
+      },
+      "default": []
+    },
     "env": {
       "type": "object",
       "title": "Extra environment variables",
-      "additionalProperties": { "type": ["string", "number", "boolean"] },
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean"
+        ]
+      },
       "default": {}
     },
     "snowplowEndpoint": {
@@ -121,9 +208,27 @@
       "description": "Publishes this Service's address as a Secret keyed by server-url, which snowplow RESTActions resolve via endpointRef. Default ON, like blueprint-render-service: the portal's controller-render-draft RESTAction always needs it.",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean", "title": "Create the endpoint Secret", "default": true },
-        "name": { "type": "string", "title": "Secret name", "default": "controller-render-endpoint" }
+        "enabled": {
+          "type": "boolean",
+          "title": "Create the endpoint Secret",
+          "default": true
+        },
+        "name": {
+          "type": "string",
+          "title": "Secret name",
+          "default": "controller-render-endpoint"
+        }
       }
+    },
+    "maxBodyMiB": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64,
+      "description": "Largest POST /render body accepted, in MiB. THE CONTAINER'S MEMORY LIMIT IS DERIVED FROM THIS and must not be set independently: parsing holds ~29x the document live at peak, so a cap raised without memory is a service that accepts bodies it cannot render (issue 628). The maximum of 64 is not arbitrary -- at 64 MiB the derived limit is already ~2.4Gi for a SINGLE request, and anything larger should be a deliberate conversation rather than a values edit."
+    },
+    "memoryLimitOverride": {
+      "type": "string",
+      "description": "Replaces the derived memory limit entirely. Empty (the default) means derive from maxBodyMiB. Setting this reopens the coupling that the derivation exists to close, so set it only after measuring your own workload. oasgen-render still refuses to start if the cap exceeds what the limit can cover."
     }
   }
 }
