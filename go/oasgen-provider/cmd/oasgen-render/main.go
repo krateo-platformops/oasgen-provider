@@ -37,6 +37,28 @@ func main() {
 	// processes apart.
 	log := slog.New(loghandler.NewJSONHandler(level, os.Stderr)).With("component", "oasgen-render")
 
+	// REFUSE AT STARTUP RATHER THAN OOM UNDER LOAD (#628).
+	//
+	// The chart derives the memory limit from the body cap so its declared values cannot express the
+	// broken pair. This closes the two routes no chart schema can: the generic `env` passthrough, and
+	// a hand-written manifest that never goes through the chart. Failing here means a bad pairing
+	// CrashLoopBackOffs at deploy, where it is visible, instead of being OOM-killed on the first
+	// large request, where it looks like a vendor problem.
+	//
+	// A check that could not run is NOT a check that passed, so the two cases are logged
+	// differently: outside a container there is no cgroup limit to read and nothing is verified.
+	if checked, berr := server.CheckMemoryBudget(*maxBody); berr != nil {
+		log.Error("refusing to start: the body cap exceeds what this container's memory limit can serve",
+			"error", berr.Error())
+		os.Exit(1)
+	} else if checked {
+		log.Info("memory budget verified against this container's limit",
+			"maxBodyBytes", *maxBody, "requiredMiB", server.RequiredMemoryMiB(*maxBody))
+	} else {
+		log.Debug("no cgroup memory limit found, so the body cap was not checked against one",
+			"maxBodyBytes", *maxBody)
+	}
+
 	h := server.New(log)
 	h.MaxBodyBytes = *maxBody
 
