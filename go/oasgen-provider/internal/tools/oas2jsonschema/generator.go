@@ -100,7 +100,13 @@ func (g *OASSchemaGenerator) Generate() (*GenerationResult, error) {
 	// emitted for EVERY kind declaring findby, because matching is not conditional on the absence of a
 	// create verb -- which is exactly the guard that made the existing resolvability warning unreachable
 	// for most kinds (#445).
-	generationWarnings = append(generationWarnings, g.warnIdentifiersMissingFromFindByResponse()...)
+	// ONE verdict, BOTH directions. These two diagnostics are opposites -- one suppresses for the
+	// action-only shape, the other fires only for it -- and computing the matchability twice would
+	// let them drift apart. Issue 627 was the cost of exactly that: one function stamping three
+	// values while comparing one of them.
+	matchabilityVerdict := g.matchability()
+	generationWarnings = append(generationWarnings, g.warnIdentifiersMissingFromFindByResponse(matchabilityVerdict)...)
+	generationWarnings = append(generationWarnings, g.warnCreateUnreachableForActionOnlyKind(matchabilityVerdict)...)
 
 	// A dotted status field whose first segment names a request parameter (#463). Reported here rather
 	// than from the spec builder because it is a property of the STATUS declaration against the verbs,

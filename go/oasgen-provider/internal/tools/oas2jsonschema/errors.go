@@ -95,6 +95,13 @@ const (
 	// for a resource with no create verb, resolving against the get-preferred response. Matchability is a
 	// question for every kind declaring findby, and only the findby response can answer it (#445).
 	CodeIdentifierNotInFindByResponse GenerationCode = "IdentifierNotInFindByResponse"
+
+	// CodeCreateUnreachableForActionOnlyKind reports the INVERSE of
+	// CodeIdentifierNotInFindByResponse (issue 629). For a kind whose create is its only write verb,
+	// unstructured-runtime queues a Create only on !ResourceExists, so the create is reachable
+	// exactly one way: a findby that does not match. A findby that CAN match therefore makes the
+	// kind's only effect unreachable -- permanently, with nothing failing anywhere.
+	CodeCreateUnreachableForActionOnlyKind GenerationCode = "CreateUnreachableForActionOnlyKind"
 )
 
 // SchemaGenerationError defines a structured error for schema generation warnings.

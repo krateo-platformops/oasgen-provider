@@ -58,6 +58,20 @@ type ResourceConfig struct {
 	// *ApiRef. So nothing reaches the identifier matching, and a findby declared under delegation exists
 	// to satisfy the needs-an-observe-verb rule and to shape the generated CRD (#444).
 	ObserveDelegated bool
+
+	// CreateDelegated is true when the resource sets createApiRef, i.e. creation is delegated to a
+	// Snowplow RESTAction rather than performed by a create verb.
+	//
+	// IT IS A REACHABLE CREATE, which is the whole reason this field exists. The runtime handles
+	// createApiRef before it ever builds a create call (rest-dynamic-controller's restResources.go:1191,
+	// returning at :1212), so such a kind creates perfectly well with no create verb declared. A
+	// diagnostic that concludes "this resource cannot create" from the absence of a create verb alone
+	// would therefore be a false positive on exactly the kinds that are fine -- and a confidently worded
+	// one, which is the failure mode issue 625 exists to stop repeating.
+	//
+	// Plumbed in render/helper.go beside ObserveDelegated. Before this field the generator could see four
+	// of the five things that make a create reachable and silently assumed the fifth.
+	CreateDelegated bool
 }
 
 type ConfigurationField struct {

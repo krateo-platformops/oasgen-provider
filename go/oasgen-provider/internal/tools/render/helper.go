@@ -149,6 +149,7 @@ func toDomainResourceConfig(cr *definitionv1alpha1.RestDefinition, verbs []oas2j
 		IncludedSpecFields:     cr.Spec.Resource.IncludedSpecFields,
 		DependentLookups:       toDomainDependentLookups(cr.Spec.Resource.DependentLookups),
 		ObserveDelegated:       cr.Spec.Resource.ObserveApiRef != nil,
+		CreateDelegated:        cr.Spec.Resource.CreateApiRef != nil,
 	}, nil
 }
 

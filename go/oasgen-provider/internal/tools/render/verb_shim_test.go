@@ -98,6 +98,7 @@ func everyResourceFieldSet() *definitionv1alpha1.RestDefinition {
 					Path:   "/parents/{id}",
 				}},
 				ObserveApiRef: &definitionv1alpha1.ApiRef{Namespace: "krateo-system", Name: "observe-widget"},
+				CreateApiRef:  &definitionv1alpha1.ApiRef{Namespace: "krateo-system", Name: "observe-widget"},
 			},
 		},
 	}
@@ -139,6 +140,12 @@ func TestEveryResourceConfigFieldIsCarriedByTheShim(t *testing.T) {
 	got2, err := toDomainResourceConfig(cr, nil)
 	require.NoError(t, err)
 	assert.False(t, got2.ObserveDelegated, "observeApiRef absent must mean !ObserveDelegated")
+
+	// CreateDelegated's derivation, and critically its INDEPENDENCE from ObserveDelegated, is pinned
+	// by TestDelegationFlagsArePlumbedIndependently in delegation_plumbing_test.go. The two plumbing
+	// lines are adjacent in helper.go, so a cross-wiring is one word away and passes any test that
+	// only ever sets both refs together -- which this fixture does.
+	assert.True(t, got.CreateDelegated, "createApiRef present must mean CreateDelegated")
 }
 
 // TestTheShimCarriesStaticInjections closes the blind spot that lost them.
