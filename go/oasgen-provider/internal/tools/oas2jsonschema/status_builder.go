@@ -52,6 +52,35 @@ func (g *OASSchemaGenerator) BuildStatusSchema() ([]byte, []error, error) {
 func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, responseSchema *Schema) (*Schema, []error) {
 	var warnings []error
 	statusSchema := &Schema{Type: []string{"object"}, Properties: []Property{}}
+
+	// A PROVIDER-OWNED STATUS FIELD, declared only for a resource that has a secretRef resolver
+	// (#598).
+	//
+	// WHY IT HAS TO BE DECLARED AT ALL. The generated status is a CLOSED schema -- measured on a
+	// rendered CRD, its properties are [conditions, html_url, id, name, observedGeneration] with no
+	// `x-kubernetes-preserve-unknown-fields`. `conditions` and `observedGeneration` are injected by
+	// crdgen, not here. So an undeclared field written by the controller is PRUNED SILENTLY: the
+	// write exits 0, nothing is reported, and the rotation this field exists to detect is still
+	// missed. That is issue 598's own defect arriving through its fix.
+	//
+	// WHY IT IS CONDITIONAL. Declaring it on every kind would change the generated CRD's shape for
+	// every consumer, including one who fingerprints theirs and treats an unattributable diff as a
+	// spoiled instrument. A resource with no secretRef resolver has nothing to digest, so the field
+	// would be permanently empty -- a shape change that buys nothing.
+	if g.hasSecretRefResolver() {
+		statusSchema.Properties = append(statusSchema.Properties, Property{
+			Name: StatusResolvedResolversDigest,
+			Schema: &Schema{
+				Type: []string{"string"},
+				Description: "A salted digest of the values this resource's secretRef resolvers last " +
+					"resolved to, recorded when a create or update succeeded. The controller compares it " +
+					"against the values resolved now; a difference means the referenced Secret's CONTENT " +
+					"changed and must be pushed to the vendor. Salted with the resource's UID because a " +
+					"bare digest of a low-entropy secret is brute-forceable from a field anyone with " +
+					"`get` can read.",
+			},
+		})
+	}
 	respMappings := g.responseFieldMappingsForStatus()
 
 	for _, fieldName := range allStatusFields {
