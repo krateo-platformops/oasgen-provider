@@ -88,9 +88,32 @@ one field. All three stamps now live inside it, after the render, and `Create`'s
 gone — which is what makes the affected pass self-heal: nothing is stamped, so the next Observe sees the
 drift it should see and Update regenerates.
 
-> **Upgrading does not clear an existing latch.** The fix stops new ones forming; the stored hash on an
-> already-affected RestDefinition is still wrong afterwards, and no generator move will move it. Clear it
-> directly, which is non-destructive:
+> **Correction (2026-11-13): an upgrade DOES clear an existing latch.** This paragraph first said the
+> opposite, and the 0.63.1 annotated tag message carries that wrong sentence permanently — an annotated
+> tag cannot be corrected, so this is the authoritative text.
+>
+> `generatorChanged` is not a separate concern from the hashes: it is the **third drift input, combined
+> with OR** (`restdefinition.go:1451`), so a build bump forces a re-render *regardless of what the stored
+> hashes say* — including hashes a latch has falsified. And it is on by default (`main.go:54`,
+> `env.Bool("..._REGENERATE_ON_UPGRADE", true)`). `docs/configuration.md` already said so plainly: *"a
+> provider upgrade also re-renders every definition once, so an upgrade refreshes this field across the
+> fleet."*
+>
+> **So a latch survives only where no upgrade crosses a MAJOR.MINOR.PATCH boundary.** A restart at the
+> same version does not clear it — release triples are compared and the sha is dropped, so two builds of
+> one release are "no change". Nor does an upgrade with `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false`,
+> the fleet-staging escape hatch. Both of those are the cases the patch below is for.
+>
+> This narrows the exposure materially. The 0.45.0–0.63.0 span is unchanged — that is when a latch can
+> FORM — but a latch on a cluster that upgrades at all self-heals at the next release.
+>
+> **How the error was made, because the shape recurs.** I verified that nothing in the `Create` path
+> re-renders, which is where the fix lives, and generalised "the latch survives its own code path" into
+> "the latch survives everything". I never enumerated what *else* triggers a render. The falsifying
+> observation came from a consumer who noticed every RestDefinition logs `Applying CRD` on a version
+> bump — a fact with no answer inside the file I was reading.
+>
+> To clear a latch that an upgrade will not reach, do it directly; it is non-destructive:
 >
 > ```bash
 > kubectl patch restdefinition <name> -n <ns> --subresource=status --type=merge >   -p '{"status":{"oasHash":""}}'
