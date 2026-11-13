@@ -261,3 +261,64 @@ func NotObserved(detail string) metav1.Condition {
 		Message:            msg,
 	}
 }
+
+// TypeResolverDigestRecorded reports whether this controller can actually RECORD the secretRef
+// resolver digest it uses to detect a rotated Secret (#598) -- which is a different question from
+// whether the resource is Ready, and must not be answered on TypeReady.
+//
+// WHY IT NEEDS A TYPE OF ITS OWN. SetConditions upserts by Type and replaces the entry wholesale, so
+// anything written on TypeReady here would fight the one place Ready is decided on the observe path
+// and whichever ran last would win. That is the defect #637 shipped: a condition set on a path the
+// runtime later overwrites is inert, and inert in a way no test on the condition's constructor can
+// see. A resource can be perfectly Ready and still have an undetectable rotation, so the two facts
+// need two channels.
+//
+// IT SURVIVES EXACTLY WHERE THE DIGEST FIELD DOES NOT, which is the whole reason a condition is the
+// carrier. Measured on a rendered CRD: status is a closed schema whose properties are
+// [conditions, html_url, id, name, observedGeneration] with no preserve-unknown-fields, so an
+// undeclared digest field is pruned -- but `conditions.items.properties.type` is a plain string with
+// no enum, so a NEW condition type is storable on that same un-regenerated CRD. The report therefore
+// gets through on precisely the clusters where the thing it is reporting about is broken.
+const TypeResolverDigestRecorded string = "ResolverDigestRecorded"
+
+// The two states of TypeResolverDigestRecorded.
+const (
+	ReasonResolverDigestRecorded    string = "DigestRecorded"
+	ReasonResolverDigestFieldAbsent string = "DigestFieldAbsent"
+)
+
+// ResolverDigestRecorded says the digest was written and read back from the live object, so a
+// rotation of a referenced Secret will be detected.
+func ResolverDigestRecorded() metav1.Condition {
+	return metav1.Condition{
+		Type:               TypeResolverDigestRecorded,
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonResolverDigestRecorded,
+		Message: "the secretRef resolver digest is recorded on this resource, so a change to a " +
+			"referenced Secret will be detected and pushed on the next reconcile",
+	}
+}
+
+// ResolverDigestFieldAbsent says the digest was written and came back absent, so the apiserver
+// pruned it and rotation detection cannot work for this resource.
+//
+// LOUD RATHER THAN SILENT IS THE ENTIRE POINT. A pruned write exits 0 and returns no error, so
+// without this the feature would be exactly as inert as the defect it was built to fix, with nothing
+// anywhere saying so. It does NOT make the resource un-Ready: the resource may be in perfect shape
+// and this says only that one detector is unavailable for it.
+//
+// Not retryable, and deliberately not phrased as transient: the remedy is to regenerate the CRD,
+// which is an operator's action.
+func ResolverDigestFieldAbsent() metav1.Condition {
+	return metav1.Condition{
+		Type:               TypeResolverDigestRecorded,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonResolverDigestFieldAbsent,
+		Message: "this resource's CRD does not declare status." + "resolvedResolversDigest" + ", so the " +
+			"apiserver discarded it. A change to a referenced Secret will NOT be detected for this " +
+			"resource until its CRD is regenerated -- re-apply its RestDefinition, or upgrade the " +
+			"provider that generated it, so the field is declared",
+	}
+}

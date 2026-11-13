@@ -1,6 +1,8 @@
 package restResources
 
 import (
+	"fmt"
+
 	customcondition "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers/condition"
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,8 +28,26 @@ import (
 // Status AND reason are compared, not status alone: the two states carry different reasons, and a future
 // third reason on the same status would otherwise be swallowed.
 func setObservedIfChanged(mg *unstructured.Unstructured, want metav1.Condition) (bool, error) {
+	if want.Type != customcondition.TypeObserved {
+		// A caller that passed some other type would get the right behaviour from
+		// setConditionIfChanged anyway, but silently: this keeps the name honest.
+		return false, fmt.Errorf("setObservedIfChanged called with condition type %q", want.Type)
+	}
+	return setConditionIfChanged(mg, want)
+}
+
+// setConditionIfChanged applies `want` only when it would actually change the condition of that
+// TYPE, and reports whether it did. It is the general form of the rule documented on
+// setObservedIfChanged above, and every word of that rationale applies to any handler-owned
+// condition type: the constructors stamp LastTransitionTime on every call, and tools.UpdateStatus
+// does not diff, so setting unconditionally turns every reconcile into a real API write and makes
+// lastTransitionTime mean "the last time we looked" instead of "the last time this changed".
+//
+// It keys on want.Type rather than on a constant, so a second handler-owned type cannot drift from
+// this logic by copying it.
+func setConditionIfChanged(mg *unstructured.Unstructured, want metav1.Condition) (bool, error) {
 	for _, existing := range unstructuredtools.GetConditions(mg) {
-		if existing.Type != customcondition.TypeObserved {
+		if existing.Type != want.Type {
 			continue
 		}
 		if existing.Status == want.Status && existing.Reason == want.Reason {

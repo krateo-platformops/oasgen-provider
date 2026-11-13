@@ -831,6 +831,85 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			return controller.ExternalObservation{}, cerr
 		}
 	}
+	// SECRET ROTATION IS DRIFT THE CONTENT COMPARISON CANNOT SEE (#598).
+	//
+	// A value sourced from a Secret does not appear in the CR's spec -- its mapping points at a
+	// secretRef, not at a spec path -- and a vendor that masks it does not return it in the observe
+	// body either. So isCRUpdated above compares nothing that moves when the Secret's content
+	// changes, and the rotated value is never pushed. That is the defect; the digest is a channel for
+	// exactly that one difference.
+	//
+	// It runs only AFTER the content comparison agreed, deliberately. A resource that is already
+	// drifting gets an update anyway, so spending a Secret read to reach the same verdict buys
+	// nothing.
+	digestNow, digestInScope, derr := h.resolverDigestNow(ctx, &clientInfo.Resource, mg)
+	if derr != nil {
+		// NOT FATAL TO THE OBSERVATION. A Secret this controller cannot read is a real problem, and
+		// the write path reports it loudly with a field-specific message the moment any create or
+		// update is attempted. Refusing to report whether the resource exists and matches its spec,
+		// because one detector could not run, would turn a credential problem into a resource problem
+		// on a resource that may be perfectly healthy.
+		log.Error(derr, "Could not compute the secretRef resolver digest; a rotation is undetected this pass",
+			"kind", mg.GetKind())
+		digestInScope = false
+	}
+	bootstrappedDigest := false
+	if digestInScope {
+		switch recorded := recordedResolverDigest(mg); {
+		case recorded == digestNow:
+			// Steady state: the Secrets behind this resource are as they were when it was last written.
+
+		case recorded != "":
+			// DRIFT -- AND NOTHING IS RECORDED HERE, which is the load-bearing part. Writing the new
+			// digest now would retire the difference before the update that acts on it has run; if
+			// that update then failed, the next observe would compare equal and the rotation would be
+			// lost permanently. Only Update's success path knows the value reached the vendor, so only
+			// it records the digest.
+			cond := condition.Unavailable()
+			cond.Reason = "ResourceNotUpToDate"
+			cond.Message = "a Secret referenced by this resource's update mapping has changed since the " +
+				"last successful write, so its value must be pushed to the API"
+			if serr := unstructuredtools.SetConditions(mg, cond); serr != nil {
+				log.Error(serr, "Setting condition")
+				return controller.ExternalObservation{}, serr
+			}
+			// Persisted here for the same reason the content-drift branch above persists: the runtime
+			// answers !ResourceUpToDate by queueing an Update and returning, with no status write of
+			// its own, so a condition only set in memory is discarded (#213).
+			if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+				Pluralizer:    h.pluralizer,
+				DynamicClient: h.dynamicClient,
+			}); uerr != nil {
+				log.Error(uerr, "Updating status")
+				return controller.ExternalObservation{}, uerr
+			}
+			log.Info("A referenced Secret changed; queueing an update to push it", "kind", mg.GetKind())
+			return controller.ExternalObservation{
+				ResourceExists:   true,
+				ResourceUpToDate: false,
+			}, nil
+
+		default:
+			// BOOTSTRAP. recorded == "" means either this resource has never had a digest written, or
+			// the apiserver is PRUNING the field because its CRD predates it. Adopting the current
+			// fingerprints is the correct answer to both: it issues no update now, and the first
+			// rotation after this pass is detected normally.
+			//
+			// Treating "" as "differs from everything" instead would make a pruned field an update
+			// loop -- compare, differ, update, write, pruned, compare, differ -- one vendor write per
+			// poll, per CR, forever, on every consumer whose CRD is older than this feature. That is
+			// why the absent case is a bootstrap and not a difference.
+			//
+			// Writing in Observe is safe here, and only here, precisely because this branch reports no
+			// drift: there is no verdict for the write to retire.
+			if serr := setResolverDigest(mg, digestNow); serr != nil {
+				log.Error(serr, "Recording the resolver digest")
+				return controller.ExternalObservation{}, serr
+			}
+			bootstrappedDigest = true
+		}
+	}
+
 	log.Debug("Setting condition", "kind", mg.GetKind())
 	// THE ONLY PLACE Ready is decided on this path. A resource whose create is its only write verb and
 	// whose findby matches can never have that create queued, so reporting it Available would be the
@@ -852,6 +931,41 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 	if err != nil {
 		log.Error(err, "Updating status")
 		return controller.ExternalObservation{}, err
+	}
+
+	// THE READ-BACK. `mg` is now the object the APISERVER RETURNED, so this is the one place that can
+	// tell a digest that was written from one that was accepted and discarded.
+	//
+	// The generated status is a closed schema: oasgen-provider declares its properties and sets no
+	// x-kubernetes-preserve-unknown-fields, so a CRD generated before this field existed prunes it.
+	// The write still succeeds and still returns nil. Without this check the feature would be exactly
+	// as inert as the defect it fixes, with nothing anywhere saying so -- and "silently inert" is the
+	// thing #598 exists to stop. Loudly inert is acceptable.
+	if bootstrappedDigest {
+		want := customcondition.ResolverDigestRecorded()
+		if !resolverDigestWasStored(mg, digestNow) {
+			want = customcondition.ResolverDigestFieldAbsent()
+			log.Info("The resolver digest did not persist, so a Secret rotation will not be detected for "+
+				"this resource: its CRD does not declare the field. Re-apply its RestDefinition to regenerate it",
+				"kind", mg.GetKind(), "field", statusResolvedResolversDigest)
+		}
+		changed, cerr := setConditionIfChanged(mg, want)
+		if cerr != nil {
+			log.Error(cerr, "Setting the resolver-digest condition")
+			return controller.ExternalObservation{}, cerr
+		}
+		// Only on a real transition. This branch is reached on every poll for a resource whose field
+		// is pruned, so an unguarded write here would be one API update per reconcile, forever, for
+		// exactly the consumers already worst affected.
+		if changed {
+			if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+				Pluralizer:    h.pluralizer,
+				DynamicClient: h.dynamicClient,
+			}); uerr != nil {
+				log.Error(uerr, "Updating status")
+				return controller.ExternalObservation{}, uerr
+			}
+		}
 	}
 
 	log.Debug("External resource up-to-date", "kind", mg.GetKind())
@@ -1535,6 +1649,31 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		return err
 	}
 
+	// FINGERPRINT THE RESOLVER SOURCES BEFORE THE CALL, not after it (#598).
+	//
+	// This is taken here, next to the resolve that produced the values this request will carry, and
+	// recorded further down only if the call succeeds. The ordering is the whole point, because the
+	// two directions fail differently:
+	//
+	//	fingerprint BEFORE the send -- if a Secret rotates between here and the response, we sent the
+	//	    new value and recorded the old fingerprint. The next observe sees a difference and issues
+	//	    one more update, re-sending the same value. Harmless.
+	//	fingerprint AFTER the send  -- if a Secret rotates in that same window, we sent the OLD value
+	//	    and recorded the NEW fingerprint. The next observe sees no difference and the rotation is
+	//	    lost PERMANENTLY, which is precisely the defect this feature exists to fix.
+	//
+	// The window cannot be closed -- a Secret can change while the request is in flight -- so the
+	// only choice is which way it errs, and it must err towards a redundant write.
+	//
+	// A failure to fingerprint is logged and does not fail the update: the update is the thing that
+	// matters, and Observe adopts a digest on the next pass if none was recorded.
+	digestToRecord, digestInScope, derr := h.resolverDigestNow(ctx, &clientInfo.Resource, mg)
+	if derr != nil {
+		log.Error(derr, "Could not fingerprint the resolver sources before the update; the next observe "+
+			"will adopt the current value instead", "kind", mg.GetKind())
+		digestInScope = false
+	}
+
 	reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
 	// Whole-document requestTransform, applied to the assembled body immediately before the call — after the
 	// per-field mappings have composed it, so the program sees the finished article. A failure fails the
@@ -1633,6 +1772,25 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		if err != nil {
 			log.Error(err, "Setting condition")
 			return err
+		}
+
+		// THE ONE PLACE THE DIGEST IS RECORDED AS A CLAIM ABOUT WHAT WAS SENT (#598). The status write
+		// below carries it.
+		//
+		// On this branch only. A PENDING update has not landed, so recording here would retire a
+		// difference the API has not yet accepted -- and if the async operation then failed, the
+		// rotation would be lost rather than retried on the next poll. Pending leaves the digest
+		// alone, so the difference survives until an update actually completes.
+		//
+		// Observe ADOPTS a digest when none is recorded, which is a weaker claim -- "assume what is
+		// there now is what was sent" -- and the only one available for a resource that predates this
+		// feature. This is the real claim, which is why the two must not be confused.
+		if digestInScope {
+			if serr := setResolverDigest(mg, digestToRecord); serr != nil {
+				// Logged, not returned: the update already succeeded at the API, so failing here would
+				// make the runtime retry a write that has landed.
+				log.Error(serr, "Recording the resolver digest after a successful update", "kind", mg.GetKind())
+			}
 		}
 	}
 
