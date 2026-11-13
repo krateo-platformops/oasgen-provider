@@ -1,0 +1,98 @@
+{
+  "_comment": [
+    "THE CROSS-MODULE CONTRACT FOR ISSUE 598's RESOLVER DIGEST.",
+    "",
+    "oasgen-provider DECLARES status.<statusField> on the generated CRD. rest-dynamic-controller",
+    "WRITES and COMPARES it. They are separate Go modules in this one repository, both predicates",
+    "under internal/, so they cannot share a definition -- they share this file instead, and each",
+    "module's suite asserts its OWN predicate against every row.",
+    "",
+    "Two things can drift between them, and each is silent:",
+    "",
+    "  1. THE FIELD NAME. If they disagree, the controller writes a key the CRD does not declare,",
+    "     the apiserver prunes it, the write exits 0, and the rotation is never detected -- which is",
+    "     issue 598's own defect arriving through its fix.",
+    "",
+    "  2. THE SCOPE RULE: WHICH verb's secretRef resolvers count. A digest difference's only remedy",
+    "     is an update, so only the update verb's resolvers may contribute. If the declaring side",
+    "     were wider than the writing side, kinds would carry a permanently empty field; if the",
+    "     writing side were wider, a create-only secretRef would report drift that no update can",
+    "     ever retire -- an update per poll, per CR, forever.",
+    "",
+    "`inScope` is a STATIC property of the resource's shape. A resolver's `when` guard is evaluated",
+    "per CR instance at runtime and is deliberately NOT part of this contract: a guarded resolver is",
+    "in scope for the declaration and may still contribute nothing on a given instance. The guard is",
+    "asserted on the controller side only."
+  ],
+  "statusField": "resolvedResolversDigest",
+  "resolverType": "secretRef",
+  "scopeAction": "update",
+  "cases": [
+    {
+      "name": "secretRef on update",
+      "verbs": [{"action": "create"}, {"action": "get"}, {"action": "update", "secretRef": true}],
+      "inScope": true,
+      "why": "the whole point: an update can push the rotated value, so the digest has a remedy"
+    },
+    {
+      "name": "secretRef on update with a when guard",
+      "verbs": [{"action": "create"}, {"action": "get"}, {"action": "update", "secretRef": true, "when": true}],
+      "inScope": true,
+      "why": "a guard decides whether THIS INSTANCE resolves it, not whether the kind is in scope"
+    },
+    {
+      "name": "secretRef on both create and update",
+      "verbs": [{"action": "create", "secretRef": true}, {"action": "get"}, {"action": "update", "secretRef": true}],
+      "inScope": true,
+      "why": "the update verb's resolver counts; the create one is simply not consulted"
+    },
+    {
+      "name": "secretRef on create only",
+      "verbs": [{"action": "create", "secretRef": true}, {"action": "get"}, {"action": "update"}],
+      "inScope": false,
+      "why": "THE DISCRIMINATING ROW. An update cannot push this value, so a difference in it would report drift no update can retire -- one update per poll, per CR, forever"
+    },
+    {
+      "name": "secretRef on create with no update verb at all",
+      "verbs": [{"action": "create", "secretRef": true}, {"action": "get"}],
+      "inScope": false,
+      "why": "nothing about this resource is fixable by an update, so nothing may be reported as drift"
+    },
+    {
+      "name": "secretRef on delete",
+      "verbs": [{"action": "create"}, {"action": "get"}, {"action": "update"}, {"action": "delete", "secretRef": true}],
+      "inScope": false,
+      "why": "a delete credential is not resource content; re-deleting is not a remedy"
+    },
+    {
+      "name": "secretRef on a dispatch verb",
+      "verbs": [{"action": "create"}, {"action": "get"}, {"action": "update"}, {"action": "dispatch", "secretRef": true}],
+      "inScope": false,
+      "why": "a dispatch has side effects; re-running one to retire a digest difference is not a repair"
+    },
+    {
+      "name": "secretRef on findby",
+      "verbs": [{"action": "create"}, {"action": "findby", "secretRef": true}, {"action": "update"}],
+      "inScope": false,
+      "why": "an observe-direction credential; its rotation changes nothing about the resource's content"
+    },
+    {
+      "name": "a dependentLookup resolver on update",
+      "verbs": [{"action": "create"}, {"action": "get"}, {"action": "update", "dependentLookup": true}],
+      "inScope": false,
+      "why": "a resolver but not a secretRef: its value comes from an API call, not Secret content, and resolving it would reach the vendor once per CR per poll"
+    },
+    {
+      "name": "a plain mapping on update with no resolver",
+      "verbs": [{"action": "create"}, {"action": "get"}, {"action": "update", "plain": true}],
+      "inScope": false,
+      "why": "a CR-sourced value is already in spec, so ordinary drift detection covers it"
+    },
+    {
+      "name": "no verbs at all",
+      "verbs": [],
+      "inScope": false,
+      "why": "the degenerate shape; nothing to declare and nothing to write"
+    }
+  ]
+}
