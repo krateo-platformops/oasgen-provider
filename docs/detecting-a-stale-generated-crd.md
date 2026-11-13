@@ -51,6 +51,18 @@ So the same document under the same oasPath must produce the same `oasHash` on a
 
 **3. An unreachable cluster must not share an exit code with "latch found".** `sys.exit("message")` exits 1. If 1 is also your code for LATCH, a cluster that is merely stopped reports a latch. Found by a consumer running their detector against a cluster that had just gone down.
 
+### An existing implementation
+
+`krateo-arubacloud-provider-kog` maintains **`scripts/latch_check.py`**, which recomputes
+`compositeOASDigest` from a cluster's own ConfigMaps and compares it against each RestDefinition's
+stored `oasHash`. It needs no access to this repository's source.
+
+**It is deliberately not something this repo ships, and the reason is worth stating.** A detector
+written here would agree with any mistake in the implementation it was written from. Theirs is an
+independent reimplementation from the published algorithm, so its **34 agreements on a 45-day-old
+cluster** are evidence about the algorithm rather than a restatement of it. A tool shipped alongside
+the code it checks cannot have that property.
+
 ### And a property worth building in
 
 **Make agreement the success mode.** A detector that confirms N definitions agree cannot quietly be checking nothing: if the algorithm were reimplemented wrongly, *none* would agree. Report `AGREES / MISMATCH / NOT CHECKABLE` as three separate counts, and treat **zero agreements** as "suspect the script", not as "no latches".
