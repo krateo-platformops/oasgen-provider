@@ -13,6 +13,100 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-13 — 0.63.1
+
+**One correctness fix, and it is the worst kind: a stale generated CRD that reports itself up to date and
+never recovers.** Shipped on its own rather than bundled so that a correctness fix is not entangled with
+anything else, not because a population of affected clusters is known — see the blast radius below.
+
+### A content hash is no longer stamped for a render that did not happen
+
+`status.oasHash` and `status.resourceHash` are what Observe compares against the live OpenAPI document
+and the live `spec.resource` to decide whether the generated CRD is current. `Create`'s
+CRD-already-exists path compared only **one** of the three drift inputs — the generator build — and then
+advanced all three anyway.
+
+So an OAS content change whose first observation arrived through `Create` had its hash advanced with
+nothing rendered. **That latches permanently.** Every later Observe compares the new document against a
+stored hash *of the new document*, finds no drift, and the CRD keeps its old schema while the
+RestDefinition reports `Ready`. A missed detection recovers on the next pass; this never does.
+
+Measured by the installer session on a **throwaway** GKE cluster built for the purpose: after a chart
+upgrade that changed only its OAS asset, the CRD was byte-identical to its pre-upgrade capture while
+`status.oasHash` held the digest of the **new** document — still unchanged ten minutes later.
+
+```
+live ConfigMap        the 0.7.1 document (uniqueItems x2)
+status.oasHash        0ac62ae41a8840ab…  = the digest of THAT document
+live CRD              sha b19488160f24…  = the 0.7.0 schema, x-kubernetes-list-type absent
+```
+
+**The precondition is narrower than "an OAS change", and a second consumer established that.**
+`Create` is only reached that way when Observe returns early because the generated controller's
+Deployment is absent, so it never gets as far as its own drift checks. keycloak-provider-kog ran the same
+chart upgrade with the Deployment present: the CRD regenerated correctly and the hash matched a fresh
+install's. So the window is an OAS change whose first observation coincides with a generated-controller
+redeploy — which is exactly what a provider upgrade, downgrade or restart produces.
+
+**And it could not be escaped.** Once `status.generatorBuild` reaches the newest available build, no
+generator move clears the latch: a downgrade is deliberately not a trigger, and a re-upgrade leaves
+`running == stored`. On a cluster sitting at the current newest there was no route back.
+
+**Blast radius: no latch has been found on any long-lived cluster.** The only observed instance is the
+one above, on a throwaway cluster, and the window was opened by a deliberate oasgen downgrade that the
+reporter performed as part of a different experiment. Two long-lived clusters were then checked on the
+affected path and neither was latched: one does not have that KOG installed at all, and the other's CRD
+matches its own chart's asset exactly. So this is a real defect with a real reproduction and **no known
+affected installation** — stated that way because an earlier draft of this section claimed two live
+clusters were affected, which was an extrapolation rather than a measurement.
+
+**Every released version can form this latch, measured at twenty consecutive tags.** The two
+preconditions are Observe's OAS drift check being present (so a content change is detectable at all) and
+`Create` stamping the hashes with no OAS comparison on that path:
+
+```
+0.45.0 … 0.63.0    drift check: present    unconditional stamps: 2    -> latchable at every tag
+```
+
+So it long predates 0.62.0, and 0.63.0 carries it too. **Choosing between earlier pins does not change
+exposure; only 0.63.1 removes it** — and only for latches not yet formed.
+
+That check also covered **one kind on one path**, out of 33 and 43 RestDefinitions on those two clusters.
+The instrument that would answer the general question is a render-and-diff of every OAS-backed CRD
+against the document its RestDefinition points at, and it is being built. Until it runs, "no latch found"
+is the honest claim and "no latch exists" is not.
+
+**And do not verify this by reading a CRD's description text.** That tell worked across one chart pair
+because the text happened to change, and it does not generalise: two earlier versions of the same KOG
+carry an identical description, so the same comparison reports "consistent" across a span where the
+schema genuinely differs. Render and diff, or measure nothing.
+
+The fix applies the rule `renderGeneratedCRDs` already existed for. Its own comment put it exactly, about
+the generator build: *"a rule written in a comment is enforced by whoever reads it; a single function that
+renders and then stamps cannot be half-used by a third call site."* That reasoning was never specific to
+one field. All three stamps now live inside it, after the render, and `Create`'s unconditional writes are
+gone — which is what makes the affected pass self-heal: nothing is stamped, so the next Observe sees the
+drift it should see and Update regenerates.
+
+> **Upgrading does not clear an existing latch.** The fix stops new ones forming; the stored hash on an
+> already-affected RestDefinition is still wrong afterwards, and no generator move will move it. Clear it
+> directly, which is non-destructive:
+>
+> ```bash
+> kubectl patch restdefinition <name> -n <ns> --subresource=status --type=merge >   -p '{"status":{"oasHash":""}}'
+> ```
+>
+> Do it while the generated controller's Deployment is **Ready** — patching while it is absent routes the
+> next pass through `Create` again. Deleting the RestDefinition would also clear it and takes the CRD and
+> every CR of that kind with it.
+
+**Three existing tests were passing because of this defect**, which is the most useful thing the fix
+turned up. The shared reconcile fixture declared a verb with no `path` and no `method`, and its own
+comment said why: *"no test in this harness has ever needed the generator to RUN."* That was only
+survivable while `Create`'s false stamp kept the regeneration gate quiet. The fixture is now generatable
+at source, and the helper that used to patch it **asserts** that instead — a fixture that cannot generate
+cannot exercise the loop it is named for.
+
 ## 2026-11-13 — 0.63.0
 
 **One breaking change for consumers, shipped deliberately alone.** A `not` in an OpenAPI document now
@@ -207,6 +301,33 @@ own check against the live cluster at the moment of the destructive act (#612, #
 > message about finalizers, and the definition is still kept. The arm recorded the RD's finalizers at
 > delete time deliberately: with `restresources-still-exist` already present the run would have proved
 > nothing about this path, and would have been discarded as void rather than counted as a pass.
+
+> **Runtime verification (2026-11-13, issue 593).** Verified against a live Azure DevOps by
+> azuredevops-provider-kog, with a same-cluster 0.61.0 control and a second chart as the only other
+> variable. The prediction was stated before the run, so the rows could falsify it:
+>
+> ```
+> 0.62.0, chart 0.2.0 (default stateFilter)
+>   d=0    ORPHANED+warning   CreatedExternalResource 22:16:12
+>                             > OrphanedExternalResourcePossible 22:16:14
+>                             > DeletedExternalResource
+>   d=5    FIX-WORKED         project 404 at +10 min
+>   d=15   FIX-WORKED
+>   d=30   FIX-WORKED
+>
+> 0.61.0 control, same cluster          4/4 ORPHANED-SILENT
+> 0.62.0, chart B (stateFilter=all)     4/4 FIX-WORKED, no warnings
+> ```
+>
+> The falsifier — an ORPHANED-**silent** row on 0.62.0 — did not fire. Only d=0 loses the race, because
+> the project is still `new` there, and that case is **announced** rather than silent: the finalizer is
+> released, because holding it would leave a CR nobody can delete, and the Event names the identifiers so
+> the orphan is recoverable. d=5 already wins.
+>
+> Note for anyone building an alert on this: the Event reason is **`OrphanedExternalResourcePossible`**.
+> `reasonPossibleOrphan` is the Go identifier, not the emitted value — I quoted the identifier to the
+> consumer building the matcher, and only their looser `"orphan"` match saved the arm from reporting a
+> false falsification.
 
 ### A reordered set-typed array is no longer reported as drift forever
 
