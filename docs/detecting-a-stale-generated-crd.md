@@ -55,24 +55,38 @@ So the same document under the same oasPath must produce the same `oasHash` on a
 
 **Make agreement the success mode.** A detector that confirms N definitions agree cannot quietly be checking nothing: if the algorithm were reimplemented wrongly, *none* would agree. Report `AGREES / MISMATCH / NOT CHECKABLE` as three separate counts, and treat **zero agreements** as "suspect the script", not as "no latches".
 
-### Measured: 0.63.1 refuses to latch, and the end-state read is enough to show it
+### Measured: 0.63.1 refuses to latch
 
 The identical delete-and-edit that latched two kinds on 0.62.0 produced `probe=1` on 0.63.1 — the
-served CRD carries the edit.
+served CRD carries the edit. That is the user-visible outcome, measured.
 
-Only the end state was sampled, two polls later, so the run cannot *directly* show that `oasHash`
-stayed unstamped while the Deployment was absent. **It does not need to.** On that cluster
-`generatorBuild` was already `0.63.1-…` from the earlier upgrade, so `generatorChanged` was false,
-and `resourceHash` was unchanged. Render is reachable from exactly two places, and both are now
-excluded except one term:
+**The mechanism behind it was NOT measured on this run, and the distinction matters enough to state.**
+Only the end state was sampled, two polls later, so the run does not show that `oasHash` stayed
+unstamped while the Deployment was absent.
 
-- `Create`'s CRD-exists path renders **only** `if generatorChanged` — false here;
+There is an elimination argument that would close that gap, and it is worth recording **with its
+premise named**, because the premise is what a future run should capture. Render is reachable from
+exactly two sites:
+
+- `Create`'s CRD-exists path renders **only** `if generatorChanged`;
 - `Observe` renders on `oasHash != stored || resourceHash != stored || generatorChanged`.
 
-So the render that produced the probe can only have come from `oasHash != stored`, which requires
-the stored hash to have still been the **old** document's at that comparison — i.e. it was not
-stamped while the Deployment was absent. That is precisely what the fix does, established from an
-end-state read by eliminating the alternatives.
+`resourceHash` was measured unchanged. **If** `generatorBuild` for that definition was already at the
+new release when the edit landed, then `generatorChanged` is false, two of the three terms are
+excluded, and the render can only have come from `oasHash != stored` — which requires the stored hash
+to have still been the old document's, i.e. not stamped while the Deployment was absent.
+
+**That premise was not measured for the definition under test.** The upgrade arm recorded
+`generatorBuild` for two *sibling* definitions on the same cluster, both at the new release; the only
+row for the subject definition predates the upgrade. So "it was already at the new release" is an
+inference from siblings, not an observation of the subject, and the argument is plausible rather than
+established.
+
+> **To close it, record the subject definition's own status row immediately before the edit.** One
+> extra read, and the end-state sample then proves the mechanism rather than only the outcome.
+
+This is the same discipline the rest of this document asks for, applied to the document itself: an
+argument whose premise is unmeasured is a hypothesis, however well it fits.
 
 ### Measured: an upgrade clears a latch, and only `generatorBuild` moves
 
