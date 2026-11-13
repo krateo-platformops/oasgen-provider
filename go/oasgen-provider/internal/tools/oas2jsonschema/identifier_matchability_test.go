@@ -71,7 +71,7 @@ func TestAnIdentifierPresentInGetButAbsentFromTheFindByItemIsWarned(t *testing.T
 		ironicShapedDoc(),
 	)
 
-	sge := requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse())
+	sge := requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 
 	assert.Contains(t, sge.Message, `"name"`, "the absent identifier must be named")
 	assert.NotContains(t, sge.Message, `"uuid"`, "an identifier the findby items DO carry must not be reported")
@@ -88,11 +88,17 @@ func TestTheWarningReachesAKindWithACreateVerb(t *testing.T) {
 	verbs := []Verb{
 		{Action: ActionCreate, Method: "POST", Path: "/v1/nodes"},
 		findByVerb("/v1/nodes", "", ""),
+		// A get verb is REQUIRED here now, and not incidental to this test's point. Without it the
+		// fixture is the action-only shape (create as the only write verb), for which issue 625
+		// deliberately SUPPRESSES this warning -- so the arm would fail for a reason that has nothing
+		// to do with #445, which is what it exists to pin. Keeping create-with-a-get preserves
+		// exactly the property under test: the warning is not gated on `!hasCreateVerb()`.
+		{Action: ActionGet, Method: "GET", Path: "/v1/nodes/{uuid}"},
 	}
 	g := matchGen([]string{"uuid", "name"}, verbs, ironicShapedDoc())
 
 	require.True(t, g.hasCreateVerb(), "the fixture must actually declare a create verb or this arm proves nothing")
-	requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse())
+	requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 }
 
 // Under AND the resource is not degraded, it is non-functional: every item fails, findby reports
@@ -104,7 +110,7 @@ func TestTheANDConsequenceIsStatedAsNonFunctional(t *testing.T) {
 		ironicShapedDoc(),
 	)
 
-	sge := requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse())
+	sge := requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 	assert.Contains(t, sge.Message, "AND")
 	assert.Contains(t, sge.Message, "never match")
 	assert.Contains(t, sge.Message, "creating", "the create-loop consequence is the reason AND is the severe case")
@@ -117,26 +123,26 @@ func TestEveryIdentifierAbsentIsReportedAsPolicyIndependent(t *testing.T) {
 		ironicShapedDoc(),
 	)
 
-	sge := requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse())
+	sge := requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 	assert.Contains(t, sge.Message, "regardless of policy")
 }
 
 func TestTheMatchabilityWarningStaysSilentWhenItShould(t *testing.T) {
 	t.Run("every identifier present in the item", func(t *testing.T) {
 		g := matchGen([]string{"uuid", "power_state"}, []Verb{findByVerb("/v1/nodes", "", "")}, ironicShapedDoc())
-		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse())
+		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 	})
 
 	t.Run("no findby verb", func(t *testing.T) {
 		g := matchGen([]string{"uuid", "name"},
 			[]Verb{{Action: ActionGet, Method: "GET", Path: "/v1/nodes/{uuid}"}}, ironicShapedDoc())
-		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse())
+		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 	})
 
 	t.Run("observation delegated", func(t *testing.T) {
 		g := matchGen([]string{"uuid", "name"}, []Verb{findByVerb("/v1/nodes", "", "")}, ironicShapedDoc())
 		g.resourceConfig.ObserveDelegated = true
-		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse())
+		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 	})
 
 	// THE DESIGN ARM: this warning asserts a field is ABSENT, which an unreadable schema cannot
@@ -147,7 +153,7 @@ func TestTheMatchabilityWarningStaysSilentWhenItShould(t *testing.T) {
 			"/v1/nodes": {Ops: map[string]Operation{"get": &mockOperation{}}}, // no documented responses
 		}}
 		g := matchGen([]string{"uuid", "name"}, []Verb{findByVerb("/v1/nodes", "", "")}, doc)
-		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse(),
+		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()),
 			"absence cannot be asserted from a response that could not be read; naming a specific field as "+
 				"missing here would be wrong rather than cautious")
 	})
@@ -165,12 +171,12 @@ func TestTheMatchabilityWarningStaysSilentWhenItShould(t *testing.T) {
 			}}},
 		}}
 		g := matchGen([]string{"uuid", "name"}, []Verb{findByVerb("/v1/nodes", "", "")}, doc)
-		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse())
+		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 	})
 
 	t.Run("no identifiers declared", func(t *testing.T) {
 		g := matchGen(nil, []Verb{findByVerb("/v1/nodes", "", "")}, ironicShapedDoc())
-		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse())
+		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 	})
 }
 
@@ -187,13 +193,13 @@ func TestANestedIdentifierIsResolvedThroughItsPath(t *testing.T) {
 
 	t.Run("present nested identifier is not reported", func(t *testing.T) {
 		g := matchGen([]string{"metadata.name"}, []Verb{findByVerb("/widgets", "", "")}, doc)
-		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse(),
+		assert.Empty(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()),
 			"a nested identifier that IS present must not be reported; a top-level-only check would")
 	})
 
 	t.Run("absent nested identifier is reported", func(t *testing.T) {
 		g := matchGen([]string{"metadata.serial"}, []Verb{findByVerb("/widgets", "", "")}, doc)
-		sge := requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse())
+		sge := requireOneWarning(t, g.warnIdentifiersMissingFromFindByResponse(g.matchability()))
 		assert.Contains(t, sge.Message, "metadata.serial")
 	})
 }
@@ -206,6 +212,12 @@ func TestTheMatchabilityWarningReachesGenerationWarnings(t *testing.T) {
 		Verbs: []Verb{
 			{Action: ActionCreate, Method: "POST", Path: "/v1/nodes"},
 			findByVerb("/v1/nodes", "", ""),
+			// See the note in TestTheWarningReachesAKindWithACreateVerb: without a get verb this is
+			// the action-only shape and the warning is suppressed by design (issue 625). This test
+			// pins the PLUMBING -- that the warning reaches GenerationWarnings -- so it needs a shape
+			// the warning legitimately fires for. The action-only shape's own plumbing is pinned by
+			// TestTheUnreachableCreateWarningReachesGenerationWarnings.
+			{Action: ActionGet, Method: "GET", Path: "/v1/nodes/{uuid}"},
 		},
 	}
 	result, err := NewOASSchemaGenerator(ironicShapedDoc(), DefaultGeneratorConfig(), resourceConfig).Generate()

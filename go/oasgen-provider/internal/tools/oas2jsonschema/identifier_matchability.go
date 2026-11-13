@@ -3,8 +3,6 @@ package oas2jsonschema
 import (
 	"fmt"
 	"strings"
-
-	"github.com/krateo-platformops/oasgen-provider/internal/tools/pathparsing"
 )
 
 // warnIdentifiersMissingFromFindByResponse reports a declared identifier that findby can never match on,
@@ -38,51 +36,34 @@ import (
 // about the response, and absence cannot be established from a schema that could not be read. A warning
 // naming a specific field as missing, emitted because the document was unreadable, would be wrong rather
 // than cautious. So the two branch opposite ways on the same input, deliberately.
-func (g *OASSchemaGenerator) warnIdentifiersMissingFromFindByResponse() []error {
+func (g *OASSchemaGenerator) warnIdentifiersMissingFromFindByResponse(mr matchabilityResult) []error {
+	// The verdict is computed ONCE by the caller and handed to both directions, so the suppression
+	// below and issue 629's warning cannot be driven by two computations that disagree.
+	if mr.Verdict == MatchabilityIndeterminate {
+		return nil
+	}
 	identifiers := g.resourceConfig.Identifiers
-	if len(identifiers) == 0 {
-		return nil
-	}
-
-	var findBy *Verb
-	for i := range g.resourceConfig.Verbs {
-		if strings.EqualFold(g.resourceConfig.Verbs[i].Action, ActionFindBy) {
-			findBy = &g.resourceConfig.Verbs[i]
-			break
-		}
-	}
-	if findBy == nil {
-		// No findby verb, so nothing ever compares identifiers against a response.
-		return nil
-	}
-	if g.resourceConfig.ObserveDelegated {
-		// The findby is declared but never executed; see ResourceConfig.ObserveDelegated.
-		return nil
-	}
-
-	envelope, _, err := extractRawResponseSchemaForAction(g.docs, g.resourceConfig.Verbs, ActionFindBy, g.generatorConfig)
-	if err != nil || envelope == nil {
-		return nil // cannot read the response, so cannot assert a field is missing from it
-	}
-	item, uerr := unwrapFindByItems(envelope, findBy.ItemsPath)
-	if uerr != nil || item == nil {
-		// An ambiguous envelope is its own, louder diagnostic (ErrAmbiguousCollection); do not pile a
-		// speculative absence claim on top of it.
-		return nil
-	}
-
-	policy := strings.ToUpper(findBy.IdentifiersMatchPolicy)
-	var missing []string
-	for _, identifier := range identifiers {
-		segments, perr := pathparsing.ParsePath(identifier)
-		if perr != nil || len(segments) == 0 {
-			continue // an unparseable identifier path is a different defect, already reported elsewhere
-		}
-		if found, _ := lookupTypeByPath(item, segments); !found {
-			missing = append(missing, identifier)
-		}
-	}
+	missing := mr.Missing
+	policy := mr.Policy
 	if len(missing) == 0 {
+		return nil
+	}
+
+	// ISSUE 625: SUPPRESSED FOR AN ACTION-ONLY KIND, and the suppression is the fix rather than a
+	// softening of it.
+	//
+	// For that shape an unmatchable findby is not a defect -- it is the only thing that makes the
+	// resource work, because unstructured-runtime queues a Create only on !ResourceExists. The
+	// message below tells the author to "remove %s from identifiers", and a consumer who followed it
+	// quoted this warning in a commit as the justification for making findby match, which disabled
+	// every provision transition for 24 hours. The same change had been reverted in their repo four
+	// days earlier under the subject "the responseTransform I added today would have silently
+	// stopped every transition" -- so this warning out-argued the author's own correct revert note.
+	//
+	// A diagnostic that overrides a correct local decision is worse than no diagnostic. For this
+	// shape the accurate warning is close to the inverse, and that is what
+	// warnCreateUnreachableForActionOnlyKind emits instead.
+	if g.isActionOnly() {
 		return nil
 	}
 
@@ -135,4 +116,56 @@ func pluralise(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// warnCreateUnreachableForActionOnlyKind reports the inverse defect (issue 629): a kind whose create
+// is its only write verb, whose findby CAN match, and whose only effect therefore never fires.
+//
+// # WHY A MISSING DIAGNOSTIC HERE IS WORSE THAN AN ORDINARY ONE
+//
+// The measured symptom is an INVERTED health signal. The broken resource reports
+// Observed=True, Ready=True/Available, Synced=True/ReconcileSuccess with zero creates and the
+// external object still in its initial state, while the WORKING one reports Ready=False/Pending.
+// Triaging by CR health you would pick the broken one. unstructured-runtime
+// (pkg/controller/worker.go) queues a Create only on !observation.ResourceExists -- nothing about
+// up-to-dateness can produce one -- so the moment findby matches, Observe returns
+// {ResourceExists: true, ResourceUpToDate: true}, logs "External resource up-to-date", and the
+// definition's only effect never fires again.
+//
+// This is generation-time only. It tells the AUTHOR at apply time; it does not fix the inverted CR
+// condition an operator triages later, which is the runtime half and lands separately.
+//
+// RDC's latched_absence.go already covers the UNMATCHED case at runtime -- a synthesised not-found
+// plus Pending takes the latch and reportLatchedInferredAbsence warns after a repeat threshold. The
+// matched case is the symmetric gap, and nothing covered it on any path.
+func (g *OASSchemaGenerator) warnCreateUnreachableForActionOnlyKind(mr matchabilityResult) []error {
+	if !g.isActionOnly() {
+		return nil
+	}
+	// Only a POSITIVE matchability finding justifies this claim. Indeterminate must stay silent in
+	// BOTH directions: a document whose findby envelope could not be read tells us nothing about
+	// whether the create is reachable, and a confident "your only verb can never run" emitted
+	// because a schema was unreadable would be wrong rather than cautious.
+	if mr.Verdict != MatchabilityCanMatch {
+		return nil
+	}
+
+	detail := "all declared identifiers are present in the items the findby response carries"
+	if len(mr.Missing) > 0 {
+		// The OR-with-some-present case: matching narrows to the ones that ARE present and still
+		// succeeds, so the create is just as unreachable as if none were missing.
+		detail = "identifiersMatchPolicy is OR (the default) and at least one declared identifier is " +
+			"present in the findby response, so matching narrows to it and still succeeds"
+	}
+
+	return []error{SchemaGenerationError{
+		Path: "spec.resource.verbsDescription",
+		Code: CodeCreateUnreachableForActionOnlyKind,
+		Message: "this resource declares create as its only write verb (no get, no update, no dispatch, " +
+			"no createApiRef), so its create is reachable only while findby does NOT match: the runtime " +
+			"queues a create exclusively on an absent resource. " + detail + ", so findby can match -- and " +
+			"once it does, this resource's only effect never fires again while every condition reports " +
+			"healthy. If create is an action rather than a creation, declare identifiers the findby " +
+			"response does not carry, or express the action as a dispatch verb",
+	}}
 }
