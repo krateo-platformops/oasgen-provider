@@ -13,6 +13,106 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-13 — 0.64.0
+
+**Two shapes that reported themselves healthy while doing nothing now say so, the `/render` body cap
+and its memory limit became one knob instead of two, and three documentation claims I had written
+turned out to be false.**
+
+### TWO CONSUMER-VISIBLE BREAKS, both deliberate
+
+**`resources.limits.memory` is now REJECTED by `controller-render-service`'s values schema, not
+ignored.** It is removed from `values.schema.json`, which is `additionalProperties: false`, so a
+values file that set it becomes invalid. That is the point: the body cap and the memory limit are
+physically coupled, and the broken pair is now inexpressible rather than merely discouraged.
+
+**A findby-only kind now reports `Ready=False`** with reason `NoCreateVerbDeclared`, and `Create`
+returns an error. It previously returned nil, which tells the runtime the create SUCCEEDED — and the
+runtime then recorded a Normal `CreatedExternalResource` event reading *"Successfully requested
+creation of external resource"*, once per poll, forever, for a resource absent at the vendor (#624,
+#637). Anything asserting `Ready=True` on such a kind will go red, correctly.
+
+### One knob for the `/render` body cap, with the memory limit derived (#628, #638, #641)
+
+`maxBodyMiB` on `controller-render-service` is now the only knob; the container's memory limit is
+derived from it. `oasgen-render` additionally reads its own cgroup memory limit and **refuses to
+start** when the cap exceeds what that limit can serve, which closes the routes no chart schema can:
+the generic `env` passthrough, and hand-written manifests.
+
+**The derivation is a baseline plus a rate, not a multiplier.** The measured live heap is ~29× the
+document at 3.1 MiB but ~242× at 35 KiB — a fixed cost plus a marginal rate — so a flat `cap × 29`
+would derive a limit the Go runtime cannot start in at a small cap. It is `128Mi + cap × 36.25`,
+floored at `512Mi`.
+
+**The floor is what this chart shipped before the knob existed**, so at the default `maxBodyMiB: 4`
+the rendered limit is byte-identical to 0.63.1. Upgrading changes nothing for anyone who does not
+raise the cap. Above it: 16 → 708Mi, 32 → 1288Mi.
+
+> The comment that documented this coupling named `helm/oasgen-provider/values.yaml`'s
+> `render.resources.limits.memory` — a path that appeared **exactly once in the repository, in that
+> comment**. A reader who went looking for the key found nothing and could reasonably conclude the
+> coupling was stale rather than the path.
+
+### An unreachable create is reported instead of looking healthy (#625, #629, #633, #636)
+
+For a kind whose `create` is its only write verb, the runtime queues a Create only on
+`!ResourceExists`, so the create is reachable exactly one way: a findby that does not match. The
+moment findby matches, the kind's only effect never fires again — and it reported
+`Ready=True/Synced` while doing so. **Triaging by CR health you would pick the broken one**, because
+the *working* arm reports `Ready=False/Pending`.
+
+Generation time now emits `CreateUnreachableForActionOnlyKind` for that shape, and **suppresses** the
+older `IdentifierNotInFindByResponse`, which told such an author to remove the identifiers that make
+their kind work. Both read **one** verdict computed once. Runtime sets `Ready=False` with reason
+`CreateUnreachable` plus a warning event.
+
+**The clause that makes it a diagnostic rather than a false positive:** after a successful create,
+findby matches — that is the normal terminal state. A provisioned node is still in the collection
+forever. So the trigger also requires that **no create has ever succeeded**, which
+`unstructured-runtime` answers through its own `krateo.io/external-create-succeeded` annotation.
+Keying on the match alone would have warned about every successfully provisioned resource of exactly
+the kind this exists to help.
+
+### THREE CLAIMS IN THIS LOG WERE FALSE, and the census behind one of them was a false pass (#396, #639)
+
+A property-level `not` **never reaches a generated CRD**. `oas2jsonschema`'s `Schema` type has no
+`Not` field at all, so the keyword dies in the OAS→schema step, before crdgen. Measured by
+`github-provider-kog` against the released `oasgen-render` binaries from both 0.62.0 and 0.63.1, with
+a `maxLength` control proving the probe can see a change. Open as #396 since 2026-11-03.
+
+So: **0.63.0's note promising an enforced admission constraint changed nothing for any consumer**;
+the runbook's claim that every drop warns is true of crdgen's drops and false for `not`, which never
+arrives; and **0.63.0's census reported "zero documents affected" by counting `not` nodes** — the
+number was right and the reason was wrong, because no RestDefinition could have been affected
+regardless. A census that returns 0 for a reason other than the one being tested proves nothing about
+the thing being tested.
+
+And **0.63.1's claim that an upgrade does not clear a latch was wrong** (#634). `generatorChanged` is
+the third drift input, OR'd with the two content hashes, and on by default. The 0.63.1 annotated tag
+carries that sentence permanently and cannot be corrected; the log is authoritative.
+
+### Smaller
+
+- `populateStatusFields` no longer appends into the identifier slice's backing array (#640). Latent —
+  nothing reads past `len` today — and fixed because `restResources.go` already guarded the identical
+  pattern **with a comment saying why**, which makes one unguarded site worse than either alone. Both
+  now use `slices.Concat`, so the guarantee is stated by the function rather than reconstructed from a
+  make-then-append pair. That also cleared three pre-existing `go/allocation-size-overflow` alerts,
+  one of them on the very line held up as the correct pattern.
+- `docs/detecting-a-stale-generated-crd.md` is new (#635): how to tell whether a cluster has a CRD
+  stale relative to its document, the three traps that make a detector report the wrong answer, and
+  why the act of fixing it destroys the ability to measure it.
+
+### Measured by consumers, not by me
+
+The latch of 0.63.1 was **reproduced deliberately** on 0.62.0 — two kinds, with a control proving the
+edit is observable when the Deployment is present — then cleared by the upgrade to 0.63.1 with
+`generatorBuild` as the only drift input that moved, and 0.63.1 refused to latch under the identical
+procedure. The documented recovery was run for the first time: the probe appeared **17 seconds** after
+the patch. A separate 45-day-old cluster measured 34 of 34 definitions with no latch, and confirmed
+across eleven releases that the OAS digest is version-independent — a claim this repo had only read
+off its own source.
+
 ## 2026-11-13 — 0.63.1
 
 **One correctness fix, and it is the worst kind: a stale generated CRD that reports itself up to date and
