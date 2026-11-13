@@ -13,6 +13,70 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-13 — 0.63.1
+
+**One correctness fix, and it is the worst kind: a stale generated CRD that reports itself up to date and
+never recovers.** Shipped on its own rather than bundled, because two live clusters are in that state now.
+
+### A content hash is no longer stamped for a render that did not happen
+
+`status.oasHash` and `status.resourceHash` are what Observe compares against the live OpenAPI document
+and the live `spec.resource` to decide whether the generated CRD is current. `Create`'s
+CRD-already-exists path compared only **one** of the three drift inputs — the generator build — and then
+advanced all three anyway.
+
+So an OAS content change whose first observation arrived through `Create` had its hash advanced with
+nothing rendered. **That latches permanently.** Every later Observe compares the new document against a
+stored hash *of the new document*, finds no drift, and the CRD keeps its old schema while the
+RestDefinition reports `Ready`. A missed detection recovers on the next pass; this never does.
+
+Measured by the installer session on a clean GKE cluster: after a chart upgrade that changed only its OAS
+asset, the CRD was byte-identical to its pre-upgrade capture while `status.oasHash` held the digest of the
+**new** document — still unchanged ten minutes later.
+
+```
+live ConfigMap        the 0.7.1 document (uniqueItems x2)
+status.oasHash        0ac62ae41a8840ab…  = the digest of THAT document
+live CRD              sha b19488160f24…  = the 0.7.0 schema, x-kubernetes-list-type absent
+```
+
+**The precondition is narrower than "an OAS change", and a second consumer established that.**
+`Create` is only reached that way when Observe returns early because the generated controller's
+Deployment is absent, so it never gets as far as its own drift checks. keycloak-provider-kog ran the same
+chart upgrade with the Deployment present: the CRD regenerated correctly and the hash matched a fresh
+install's. So the window is an OAS change whose first observation coincides with a generated-controller
+redeploy — which is exactly what a provider upgrade, downgrade or restart produces.
+
+**And it could not be escaped.** Once `status.generatorBuild` reaches the newest available build, no
+generator move clears the latch: a downgrade is deliberately not a trigger, and a re-upgrade leaves
+`running == stored`. On a cluster sitting at the current newest there was no route back.
+
+The fix applies the rule `renderGeneratedCRDs` already existed for. Its own comment put it exactly, about
+the generator build: *"a rule written in a comment is enforced by whoever reads it; a single function that
+renders and then stamps cannot be half-used by a third call site."* That reasoning was never specific to
+one field. All three stamps now live inside it, after the render, and `Create`'s unconditional writes are
+gone — which is what makes the affected pass self-heal: nothing is stamped, so the next Observe sees the
+drift it should see and Update regenerates.
+
+> **Upgrading does not clear an existing latch.** The fix stops new ones forming; the stored hash on an
+> already-affected RestDefinition is still wrong afterwards, and no generator move will move it. Clear it
+> directly, which is non-destructive:
+>
+> ```bash
+> kubectl patch restdefinition <name> -n <ns> --subresource=status --type=merge >   -p '{"status":{"oasHash":""}}'
+> ```
+>
+> Do it while the generated controller's Deployment is **Ready** — patching while it is absent routes the
+> next pass through `Create` again. Deleting the RestDefinition would also clear it and takes the CRD and
+> every CR of that kind with it.
+
+**Three existing tests were passing because of this defect**, which is the most useful thing the fix
+turned up. The shared reconcile fixture declared a verb with no `path` and no `method`, and its own
+comment said why: *"no test in this harness has ever needed the generator to RUN."* That was only
+survivable while `Create`'s false stamp kept the regeneration gate quiet. The fixture is now generatable
+at source, and the helper that used to patch it **asserts** that instead — a fixture that cannot generate
+cannot exercise the loop it is named for.
+
 ## 2026-11-13 — 0.63.0
 
 **One breaking change for consumers, shipped deliberately alone.** A `not` in an OpenAPI document now
