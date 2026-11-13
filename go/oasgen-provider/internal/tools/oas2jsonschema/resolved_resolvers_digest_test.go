@@ -25,67 +25,101 @@ func statusPropsFor(t *testing.T, g *OASSchemaGenerator) map[string]any {
 	return props
 }
 
-func digestGen(t *testing.T, mapping []FieldMappingEntry) *OASSchemaGenerator {
+// digestGen builds a create/get/update resource and puts `mapping` on the verb named by `onAction`.
+//
+// WHICH VERB CARRIES THE MAPPING IS THE WHOLE EXPERIMENT, so it is a parameter rather than a
+// constant. An earlier version of this helper always attached the mapping to `create`; against a
+// gate that only consults `update` every row would have come back false, and against the previous
+// any-verb gate every secretRef row came back true. Neither arrangement can tell the two gates
+// apart -- the same mapping has to be placeable on either verb for the table to discriminate.
+func digestGen(t *testing.T, onAction string, mapping []FieldMappingEntry) *OASSchemaGenerator {
 	t.Helper()
-	return matchGen([]string{"uuid"}, []Verb{
-		{Action: ActionCreate, Method: "POST", Path: "/v1/nodes", FieldMapping: mapping},
+	verbs := []Verb{
+		{Action: ActionCreate, Method: "POST", Path: "/v1/nodes"},
 		{Action: ActionGet, Method: "GET", Path: "/v1/nodes/{uuid}"},
-	}, ironicShapedDoc())
+		{Action: ActionUpdate, Method: "PATCH", Path: "/v1/nodes/{uuid}"},
+	}
+	var placed bool
+	for i := range verbs {
+		if verbs[i].Action == onAction {
+			verbs[i].FieldMapping = mapping
+			placed = true
+		}
+	}
+	require.True(t, placed || mapping == nil,
+		"onAction %q matches none of this fixture's verbs, so the mapping was silently dropped and "+
+			"the row would pass for the wrong reason", onAction)
+	return matchGen([]string{"uuid"}, verbs, ironicShapedDoc())
 }
 
 // THE ABSENT CASE IS THE LOAD-BEARING ONE.
 //
 // Declaring this field unconditionally would change the generated CRD's shape for every consumer,
 // including one who fingerprints theirs and treats an unattributable diff as a spoiled instrument. A
-// resource with no secretRef resolver has nothing to digest, so the field would be a permanently
-// empty string bought at the cost of moving everyone's CRD.
+// resource whose UPDATE verb has no secretRef resolver has nothing an update could push, so the
+// field would be a permanently empty string bought at the cost of moving everyone's CRD.
 //
-// So this table's `false` rows are not completeness — they are the assertion that most consumers see
+// So this table's `false` rows are not completeness -- they are the assertion that most consumers see
 // no change at all.
-func TestTheDigestFieldIsDeclaredOnlyForASecretRefResolver(t *testing.T) {
+func TestTheDigestFieldIsDeclaredOnlyForAnUpdatableSecretRefResolver(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		mapping []FieldMappingEntry
-		want    bool
-		why     string
+		name     string
+		onAction string
+		mapping  []FieldMappingEntry
+		want     bool
+		why      string
 	}{
 		{
-			name:    "a secretRef resolver",
-			mapping: []FieldMappingEntry{{InBody: "password", ResolverType: "secretRef"}},
-			want:    true,
-			why:     "the only shape whose Secret content can rotate behind the controller's back",
+			name:     "a secretRef resolver on update",
+			onAction: ActionUpdate,
+			mapping:  []FieldMappingEntry{{InBody: "password", ResolverType: "secretRef"}},
+			want:     true,
+			why:      "the only shape whose Secret content can rotate AND be pushed back by an update",
 		},
 		{
-			name:    "a secretRef resolver with a when guard",
-			mapping: []FieldMappingEntry{{InBody: "password", ResolverType: "secretRef", ResolverHasWhen: true}},
-			want:    true,
-			why:     "a conditional resolver still resolves a Secret when its guard holds",
+			name:     "a secretRef resolver on update with a when guard",
+			onAction: ActionUpdate,
+			mapping:  []FieldMappingEntry{{InBody: "password", ResolverType: "secretRef", ResolverHasWhen: true}},
+			want:     true,
+			why:      "a guard decides whether an INSTANCE resolves it, not whether the kind is in scope",
 		},
 		{
-			name:    "no mapping at all",
-			mapping: nil,
-			want:    false,
-			why:     "nothing to digest; the field would be permanently empty",
+			// THE DISCRIMINATING ROW: identical mapping to the first, on a different verb.
+			name:     "a secretRef resolver on create only",
+			onAction: ActionCreate,
+			mapping:  []FieldMappingEntry{{InBody: "password", ResolverType: "secretRef"}},
+			want:     false,
+			why: "an update cannot push this value, so a digest difference in it would be drift no " +
+				"update can retire -- one update per poll, per CR, forever",
 		},
 		{
-			name:    "a plain mapping with no resolver",
-			mapping: []FieldMappingEntry{{InBody: "token", InCustomResource: "spec.token"}},
-			want:    false,
-			why:     "a CR-sourced value is already in spec, so ordinary drift detection covers it",
+			name:     "no mapping at all",
+			onAction: ActionUpdate,
+			mapping:  nil,
+			want:     false,
+			why:      "nothing to digest; the field would be permanently empty",
 		},
 		{
-			// THE NARROW GATE. dependentLookup is a resolver but not a secretRef: its value comes from
-			// another resource via an API call, not from a Secret's content, so it has no rotation
-			// story and must not pull the field in.
-			name:    "a dependentLookup resolver",
-			mapping: []FieldMappingEntry{{InPath: "userId", ResolverType: "dependentLookup", ResolverLookupName: "l"}},
-			want:    false,
-			why:     "dependentLookup is a resolver but not a secretRef; it reads no Secret content",
+			name:     "a plain mapping on update with no resolver",
+			onAction: ActionUpdate,
+			mapping:  []FieldMappingEntry{{InBody: "token", InCustomResource: "spec.token"}},
+			want:     false,
+			why:      "a CR-sourced value is already in spec, so ordinary drift detection covers it",
+		},
+		{
+			// THE NARROW TYPE GATE. dependentLookup is a resolver but not a secretRef: its value comes
+			// from another resource via an API call, not from a Secret's content, so it has no
+			// rotation story and must not pull the field in.
+			name:     "a dependentLookup resolver on update",
+			onAction: ActionUpdate,
+			mapping:  []FieldMappingEntry{{InPath: "userId", ResolverType: "dependentLookup", ResolverLookupName: "l"}},
+			want:     false,
+			why:      "dependentLookup is a resolver but not a secretRef; it reads no Secret content",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := digestGen(t, tc.mapping)
-			require.Equal(t, tc.want, g.hasSecretRefResolver(), "the predicate itself: %s", tc.why)
+			g := digestGen(t, tc.onAction, tc.mapping)
+			require.Equal(t, tc.want, g.hasUpdatableSecretRefResolver(), "the predicate itself: %s", tc.why)
 
 			props := statusPropsFor(t, g)
 			_, declared := props[StatusResolvedResolversDigest]
@@ -98,41 +132,35 @@ func TestTheDigestFieldIsDeclaredOnlyForASecretRefResolver(t *testing.T) {
 				"the status schema declared no properties, so the digest assertion proves nothing")
 		})
 	}
-
 }
 
-// THE TABLE ABOVE MUST CONTAIN BOTH OUTCOMES, counted rather than assumed.
+// THE SAME MAPPING, MOVED BETWEEN TWO VERBS, MUST CHANGE THE ANSWER.
 //
-// An all-true table passes against a predicate that returns true unconditionally; an all-false one
-// against the opposite. This counts the rows of each kind, so a future edit that "simplifies" the
-// table into one outcome fails here with the reason instead of passing vacuously.
-//
-// It mirrors the table deliberately rather than sharing it: a shared slice could be reduced in one
-// place and this check would reduce with it.
-func TestTheDigestDeclarationTableHasBothOutcomes(t *testing.T) {
-	want := []bool{true, true, false, false, false}
-	var yes, no int
-	for _, w := range want {
-		if w {
-			yes++
-		} else {
-			no++
-		}
-	}
-	require.NotZero(t, yes,
-		"no row expects the field to be declared: the table passes against a generator that never declares it")
-	require.NotZero(t, no,
-		"no row forbids it: the table passes against one that declares it for every resource, which is "+
-			"the CRD-shape change this gate exists to avoid")
-	assert.Equal(t, 5, len(want),
-		"the mirrored expectation has %d rows; the table above has 5. Re-sync them, or this check is "+
-			"counting something else", len(want))
+// Stated as its own test because it is the one property that separates this gate from the any-verb
+// gate it replaced, and a reader scanning the table above can miss that two of its rows differ in
+// nothing but `onAction`. If a future edit widens the gate back to "any verb", every row of that
+// table still passes except one -- and this fails with the reason.
+func TestMovingTheSecretRefOffUpdateWithdrawsTheField(t *testing.T) {
+	mapping := []FieldMappingEntry{{InBody: "password", ResolverType: "secretRef"}}
+
+	onUpdate := digestGen(t, ActionUpdate, mapping)
+	onCreate := digestGen(t, ActionCreate, mapping)
+
+	require.True(t, onUpdate.hasUpdatableSecretRefResolver(),
+		"the positive half: a secretRef on update must be in scope, or the negative half below proves nothing")
+	require.False(t, onCreate.hasUpdatableSecretRefResolver(),
+		"the same mapping on create must NOT be in scope; an update cannot push it")
+
+	_, onUpdateDeclared := statusPropsFor(t, onUpdate)[StatusResolvedResolversDigest]
+	_, onCreateDeclared := statusPropsFor(t, onCreate)[StatusResolvedResolversDigest]
+	assert.True(t, onUpdateDeclared, "declared for the update-verb resolver")
+	assert.False(t, onCreateDeclared, "withdrawn for the create-verb resolver")
 }
 
 // The declared field must be a STRING and carry the reason it exists, because a bare property name
 // in a CRD tells an operator reading `kubectl explain` nothing about why their status grew a field.
 func TestTheDigestFieldIsAStringAndExplainsItself(t *testing.T) {
-	g := digestGen(t, []FieldMappingEntry{{InBody: "password", ResolverType: "secretRef"}})
+	g := digestGen(t, ActionUpdate, []FieldMappingEntry{{InBody: "password", ResolverType: "secretRef"}})
 	props := statusPropsFor(t, g)
 
 	f, ok := props[StatusResolvedResolversDigest].(map[string]any)

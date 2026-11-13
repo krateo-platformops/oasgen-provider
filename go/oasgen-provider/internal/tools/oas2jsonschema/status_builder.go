@@ -65,9 +65,9 @@ func (g *OASSchemaGenerator) composeStatusSchema(allStatusFields []string, respo
 	//
 	// WHY IT IS CONDITIONAL. Declaring it on every kind would change the generated CRD's shape for
 	// every consumer, including one who fingerprints theirs and treats an unattributable diff as a
-	// spoiled instrument. A resource with no secretRef resolver has nothing to digest, so the field
-	// would be permanently empty -- a shape change that buys nothing.
-	if g.hasSecretRefResolver() {
+	// spoiled instrument. A resource whose UPDATE verb has no secretRef resolver has nothing an update
+	// could push, so the field would be permanently empty -- a shape change that buys nothing.
+	if g.hasUpdatableSecretRefResolver() {
 		statusSchema.Properties = append(statusSchema.Properties, Property{
 			Name: StatusResolvedResolversDigest,
 			Schema: &Schema{
