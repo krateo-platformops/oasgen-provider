@@ -51,6 +51,30 @@ So the same document under the same oasPath must produce the same `oasHash` on a
 
 **Make agreement the success mode.** A detector that confirms N definitions agree cannot quietly be checking nothing: if the algorithm were reimplemented wrongly, *none* would agree. Report `AGREES / MISMATCH / NOT CHECKABLE` as three separate counts, and treat **zero agreements** as "suspect the script", not as "no latches".
 
+### Measured: an upgrade clears a latch, and only `generatorBuild` moves
+
+The same deliberately latched definition, upgraded 0.62.0 → 0.63.1 with no patch applied:
+
+```
+before   probe=0  crd_schema=3d6af848  generatorBuild=0.62.0-8d6143fce  oasHash=57743d37  resourceHash=2b52eebb  deploy=f9f4f42b
+after    probe=1  crd_schema=ab855bb8  generatorBuild=0.63.1-692a993ee  oasHash=57743d37  resourceHash=2b52eebb  deploy=f9f4f42b
+                  ^^^ re-rendered       ^^^ THE ONLY INPUT THAT MOVED    ^^^ unchanged    ^^^ unchanged        ^^^ same uid
+```
+
+**Both content hashes stayed put and the schema re-rendered anyway**, which is the OR in
+`oasHash != stored || resourceHash != stored || generatorChanged` observed directly. The Deployment
+uid is unchanged, so this did not go through `Create`. (Sampled once, two polls after the upgrade, so
+the probe appeared in the same interval `generatorBuild` moved — not provably the same instant.)
+
+**And the unchanged `oasHash` is the clearest illustration of why status cannot detect a latch.**
+`57743d37` is the *new* document's hash: the latch stamped it correctly while rendering nothing. The
+status was never wrong **about the document** — it was wrong about *what had been rendered*, and no
+field records that. After the re-render the same value is finally true. A status-only check sees an
+unchanged, correct-looking hash in both states.
+
+The control definition re-rendered too, with `generatorBuild` moving and its schema unchanged —
+confirming the upgrade re-renders everything and only the latched one changes.
+
 ## Recovery
 
 An upgrade crossing a release boundary clears a latch on its own. Where that is not available — a cluster held at one version, or one running with `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false` — clear it directly. This is non-destructive:
