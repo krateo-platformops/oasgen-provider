@@ -21,7 +21,8 @@ var (
 	widgetGVR  = schema.GroupVersionResource{Group: "widgets.example.io", Version: "v1alpha1", Resource: "widgets"}
 	roleGVR    = schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}
 	bindingGVR = schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"}
-	secretGVR  = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+	// secretGVR is declared in resolver_digest.go: production code needs it, and two copies of
+	// the same GVR is a pair of names nothing asserts are equal.
 )
 
 type fakePluralizer struct{}
