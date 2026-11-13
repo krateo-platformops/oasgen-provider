@@ -130,8 +130,15 @@ func populateStatusFields(clientInfo *getter.Info, mg *unstructured.Unstructured
 	// unguarded form is worse than either alone, because a reader who finds the guarded one
 	// reasonably assumes the pattern is applied.
 	//
-	// Every consumer definition anyone has surveyed declares 1-2 identifiers, where cap == len,
-	// which is why this would have waited for the first three-identifier kind to be shipped.
+	// WHO COULD REACH THIS, measured rather than assumed. A consumer with 36 generated definitions
+	// audited their whole fleet: the maximum identifier count on any kind is ONE, 36 of 36, with a
+	// >=1 control proving the walk read something. Their immunity is a property of their GENERATOR
+	// -- it emits a single identifier per kind -- not of their vendor.
+	//
+	// So the growth points at 3, 5 and 6 are unreachable from a generated corpus, and this would
+	// have waited for a HAND-WRITTEN definition with three or more identifiers. Composite
+	// identifiers are the shape that needs them (role assignments and similar), which is both why
+	// nobody has hit it and why someone eventually will.
 	allFields := make([]string, 0, len(clientInfo.Resource.Identifiers)+len(clientInfo.Resource.AdditionalStatusFields))
 	allFields = append(allFields, clientInfo.Resource.Identifiers...)
 	allFields = append(allFields, clientInfo.Resource.AdditionalStatusFields...)
