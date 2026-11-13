@@ -26,6 +26,16 @@ const (
 	// forever -- correctly. Keying on a matched findby alone would report every provisioned resource
 	// as broken (#629, and the false-positive family of #625).
 	ReasonCreateUnreachable string = "CreateUnreachable"
+
+	// ReasonNoCreateVerbDeclared is set when the runtime asked for a create and the definition
+	// declares no create action at all -- no create verb, no dispatch, no createApiRef.
+	//
+	// DISTINCT FROM ReasonCreateUnreachable on purpose, though both mean "this will never be
+	// created". There the create exists and cannot be queued, and the remedy is to change the
+	// identifiers or use a dispatch verb. Here there is nothing to queue, and the remedy is to
+	// declare a create verb or accept that the Kind only ever observes. Folding them together would
+	// give an operator one reason and two incompatible fixes.
+	ReasonNoCreateVerbDeclared string = "NoCreateVerbDeclared"
 	// ReasonAuthorizationDenied is set when the API answered 403 to a verb and the response carried no
 	// rate-limit signal, so the refusal is a decision about this credential rather than a limit that
 	// clears. The controller stops issuing that verb; the resource stays NOT ready.
@@ -171,6 +181,38 @@ func CreateUnreachable(detail string) metav1.Condition {
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonCreateUnreachable,
 		Message:            detail,
+	}
+}
+
+// NoCreateVerbDeclared returns a condition indicating the runtime asked this resource to be created
+// and its definition declares no create action of any kind.
+//
+// WHY THIS IS NOT A SILENT NO-OP, which is what it replaced. Returning nil from Create tells the
+// runtime the create SUCCEEDED, and the runtime then records exactly that: a Normal
+// `CreatedExternalResource` event reading "Successfully requested creation of external resource"
+// (unstructured-runtime worker.go:1296). So the old behaviour did not merely fail to report a
+// problem -- it affirmatively reported a success that never happened, once per poll, forever, on a
+// resource that does not exist at the vendor (#624).
+//
+// Deliberately NOT Ready and deliberately permanent, matching DriftNotConverging: nothing is
+// retryable because there is no action to retry. The remedy is a declaration change, which is a
+// human's decision.
+//
+// A findby-only resource is a LEGITIMATE SHAPE, not a user error: a read-only vendor collection
+// exposes one path with one method, so a document generated from it can express nothing else. This
+// condition says the Kind cannot create rather than that the author did something wrong. Treating
+// observe-only as a first-class mode is a separate conversation (#624 option 3) and must not be
+// smuggled in here.
+func NoCreateVerbDeclared() metav1.Condition {
+	return metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonNoCreateVerbDeclared,
+		Message: "the runtime asked for this resource to be created, but its definition declares no " +
+			"create action: no create verb, no dispatch verb and no createApiRef. Nothing will be " +
+			"created for it. If the vendor exposes a creation endpoint, declare it in " +
+			"spec.resource.verbsDescription; if it does not, this Kind can only observe",
 	}
 }
 
