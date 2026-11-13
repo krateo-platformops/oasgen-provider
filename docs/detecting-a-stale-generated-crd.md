@@ -51,6 +51,25 @@ So the same document under the same oasPath must produce the same `oasHash` on a
 
 **Make agreement the success mode.** A detector that confirms N definitions agree cannot quietly be checking nothing: if the algorithm were reimplemented wrongly, *none* would agree. Report `AGREES / MISMATCH / NOT CHECKABLE` as three separate counts, and treat **zero agreements** as "suspect the script", not as "no latches".
 
+### Measured: 0.63.1 refuses to latch, and the end-state read is enough to show it
+
+The identical delete-and-edit that latched two kinds on 0.62.0 produced `probe=1` on 0.63.1 — the
+served CRD carries the edit.
+
+Only the end state was sampled, two polls later, so the run cannot *directly* show that `oasHash`
+stayed unstamped while the Deployment was absent. **It does not need to.** On that cluster
+`generatorBuild` was already `0.63.1-…` from the earlier upgrade, so `generatorChanged` was false,
+and `resourceHash` was unchanged. Render is reachable from exactly two places, and both are now
+excluded except one term:
+
+- `Create`'s CRD-exists path renders **only** `if generatorChanged` — false here;
+- `Observe` renders on `oasHash != stored || resourceHash != stored || generatorChanged`.
+
+So the render that produced the probe can only have come from `oasHash != stored`, which requires
+the stored hash to have still been the **old** document's at that comparison — i.e. it was not
+stamped while the Deployment was absent. That is precisely what the fix does, established from an
+end-state read by eliminating the alternatives.
+
 ### Measured: an upgrade clears a latch, and only `generatorBuild` moves
 
 The same deliberately latched definition, upgraded 0.62.0 → 0.63.1 with no patch applied:
@@ -99,6 +118,8 @@ Do it while the generated controller's Deployment is **Ready**: patching while i
 | a throwaway cluster, window opened by a deliberate provider downgrade | 1 | latched |
 | a disposable cluster on 0.62.0, window opened deliberately (Deployment **deleted**, then the document edited) | 2 | **both latched** |
 | the same cluster, same edit, Deployment **present** (control) | 1 | regenerated correctly |
+| the same cluster upgraded to **0.63.1**, same delete-and-edit | 1 | **did not latch** |
+| 0.63.1, same edit, Deployment present (control) | 1 | regenerated correctly |
 
 ### The mechanism is reproduced, not inferred
 
