@@ -118,6 +118,16 @@ reject objects that already exist.
 
 ## 3. A dropped constraint is visible, and that was worth checking
 
+> **Correction (2026-11-13): this section is true of drops CRDGEN makes, and does not apply to a
+> `not` written in an OpenAPI document.** Such a `not` never reaches crdgen — `oas2jsonschema`'s
+> `Schema` type has no `Not` field, so the keyword is discarded in the OAS→schema step. There is no
+> drop site, so nothing calls `t.warn`, so `status.schemaWarnings` stays empty. A reader who checked
+> `schemaWarnings` after a `not` vanished would find nothing and conclude the constraint had
+> survived. Measured on released binaries; open as **#396**.
+>
+> The warning plumbing itself works and is worth keeping in mind for every other constraint:
+> `render.go:180` and `:221` do call `crdgen.GenerateWithWarnings`.
+
 Every drop above calls `t.warn(...)`. Those warnings are not swallowed: `render.go` calls
 `crdgen.GenerateWithWarnings`, adapts them onto `GenerationWarnings`, and the controller writes them to
 `status.schemaWarnings` on the RestDefinition and raises a `SchemaWarnings` Warning Event
