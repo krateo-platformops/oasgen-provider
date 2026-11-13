@@ -17,6 +17,15 @@ const (
 	// issued, enough times in a row that the update is evidently not able to fix it. The controller stops
 	// issuing that update; the resource stays NOT ready, with the field named.
 	ReasonDriftNotConverging string = "DriftNotConverging"
+	// ReasonCreateUnreachable is set when a resource's create is its ONLY write verb and its findby
+	// matches, so the runtime can never queue that create -- it queues one only on !ResourceExists.
+	// The resource's single effect cannot fire, and no reconcile will change that.
+	//
+	// IT REQUIRES THAT NO CREATE HAS EVER SUCCEEDED, which is what separates it from the healthy
+	// terminal state. After a successful create the external object exists, so findby matches
+	// forever -- correctly. Keying on a matched findby alone would report every provisioned resource
+	// as broken (#629, and the false-positive family of #625).
+	ReasonCreateUnreachable string = "CreateUnreachable"
 	// ReasonAuthorizationDenied is set when the API answered 403 to a verb and the response carried no
 	// rate-limit signal, so the refusal is a decision about this credential rather than a limit that
 	// clears. The controller stops issuing that verb; the resource stays NOT ready.
@@ -135,6 +144,33 @@ func DriftNotConverging(field, detail string) metav1.Condition {
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonDriftNotConverging,
 		Message:            msg,
+	}
+}
+
+// CreateUnreachable returns a condition indicating that this resource's create is its only write verb
+// and can never be queued, so its one effect will never fire.
+//
+// Deliberately NOT Ready, and deliberately not an error, matching DriftNotConverging: nothing failed
+// and nothing is retryable. The runtime queues a Create only on !ResourceExists, so a findby that
+// matches closes the only door. The remedy is a declaration change -- identifiers the findby response
+// does not carry, or expressing the action as a dispatch verb -- which is a human's decision.
+//
+// WHY THIS CONDITION EXISTS AT ALL, rather than just the event that accompanies it. The measured
+// symptom (#629) is an INVERTED health signal: the stuck resource reported Ready=True/Synced while a
+// working one reported Ready=False/Pending, so triaging by CR health picked the broken one. An event
+// does not appear in `kubectl get`, so an event alone would leave that table unchanged -- it would
+// close the issue on the half it did not complain about.
+//
+// Note both now read Ready=False, for different reasons; the REASON is what distinguishes a stuck
+// resource from one with a create in flight. That is the deliberate cost of making the stuck one
+// visible at all.
+func CreateUnreachable(detail string) metav1.Condition {
+	return metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonCreateUnreachable,
+		Message:            detail,
 	}
 }
 

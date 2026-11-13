@@ -1,0 +1,94 @@
+{
+  "_comment": [
+    "THE CANONICAL action-only CASES, read by BOTH modules' tests.",
+    "",
+    "oasgen-provider decides this shape at generation time (oas2jsonschema.isActionOnly, issues",
+    "625 and 629); rest-dynamic-controller decides it at runtime (controllers.isActionOnlyResource).",
+    "They cannot share code -- separate Go modules, and both predicates live under internal/ -- so",
+    "they share THIS FILE instead. Each module's test reads it and asserts its own predicate against",
+    "every row.",
+    "",
+    "That is the enforceable version of 'one predicate'. A comment saying 'keep these in sync' is",
+    "not: it fails silently, and the whole argument for one predicate is that a suppression and its",
+    "inverse must not disagree about the shape. If you change one predicate, a row here fails in the",
+    "OTHER module's suite.",
+    "",
+    "Each escape exists because it makes the create reachable WITHOUT a non-matching findby. The",
+    "runtime queues a Create only on !ResourceExists, so for a kind with no other write verb the",
+    "create is reachable exactly one way -- unless one of these escapes applies."
+  ],
+  "cases": [
+    {
+      "name": "the canonical shape: findby plus create, nothing else",
+      "verbs": ["findby", "create"],
+      "createApiRef": false,
+      "observeApiRef": false,
+      "actionOnly": true,
+      "why": "openstack-ironic-operator-kog's ironic-node-provision, verbatim from its manifest: create is PUT /v1/nodes/{node_id}/states/provision, an ACTION rather than a creation"
+    },
+    {
+      "name": "create alone, no findby",
+      "verbs": ["create"],
+      "createApiRef": false,
+      "observeApiRef": false,
+      "actionOnly": true,
+      "why": "still action-only by shape; whether anything can make its create unreachable is the matchability question, not this one"
+    },
+    {
+      "name": "a get verb",
+      "verbs": ["findby", "create", "get"],
+      "createApiRef": false,
+      "observeApiRef": false,
+      "actionOnly": false,
+      "why": "Observe no longer decides existence from findby alone"
+    },
+    {
+      "name": "an update verb",
+      "verbs": ["findby", "create", "update"],
+      "createApiRef": false,
+      "observeApiRef": false,
+      "actionOnly": false,
+      "why": "drift can drive a write, so a matching findby does not make the kind inert"
+    },
+    {
+      "name": "a dispatch verb",
+      "verbs": ["findby", "create", "dispatch"],
+      "createApiRef": false,
+      "observeApiRef": false,
+      "actionOnly": false,
+      "why": "the action has a reachable path that does not depend on absence"
+    },
+    {
+      "name": "createApiRef set",
+      "verbs": ["findby", "create"],
+      "createApiRef": true,
+      "observeApiRef": false,
+      "actionOnly": false,
+      "why": "creation is delegated to a RESTAction, handled before any create call is built, so the create is reachable with no create verb at all"
+    },
+    {
+      "name": "observeApiRef set",
+      "verbs": ["findby", "create"],
+      "createApiRef": false,
+      "observeApiRef": true,
+      "actionOnly": false,
+      "why": "the findby is declared but never executes, so it cannot make anything unreachable"
+    },
+    {
+      "name": "no create verb at all",
+      "verbs": ["findby", "get"],
+      "createApiRef": false,
+      "observeApiRef": false,
+      "actionOnly": false,
+      "why": "nothing to be unreachable"
+    },
+    {
+      "name": "delete does not rescue the shape",
+      "verbs": ["findby", "create", "delete"],
+      "createApiRef": false,
+      "observeApiRef": false,
+      "actionOnly": true,
+      "why": "delete is not a write that can realise spec drift; it only runs on deletion, so the create is still reachable only via a non-matching findby"
+    }
+  ]
+}
