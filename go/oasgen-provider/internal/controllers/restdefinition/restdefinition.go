@@ -903,7 +903,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	if !crdOk {
 		// renderGeneratedCRDs, not generateAndApplyCRDs: the stamp has to travel with the render, and
 		// persistCreatePhaseStatus below snapshots the whole status, so setting it here persists it.
-		if err := e.renderGeneratedCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); err != nil {
+		if err := e.renderGeneratedCRDs(ctx, cr, gvk, docs, hasSecuritySchemes, oasHash); err != nil {
 			return err
 		}
 
@@ -929,7 +929,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	if e.genCfg.generatorChanged(cr.Status.GeneratorBuild) {
 		e.log.Debug("Generator build changed and the CRD already exists; regenerating before stamping",
 			"status", cr.Status.GeneratorBuild, "current", e.genCfg.Build)
-		if err := e.renderGeneratedCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); err != nil {
+		if err := e.renderGeneratedCRDs(ctx, cr, gvk, docs, hasSecuritySchemes, oasHash); err != nil {
 			return fmt.Errorf("regenerating the CRD after a provider upgrade: %w", err)
 		}
 	}
@@ -1003,9 +1003,18 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (err error) 
 	cr.Status.OASPath = cr.Spec.OASPath
 	cr.Status.Digest = dig
 	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
-	cr.Status.OASHash = oasHash
-	cr.Status.ResourceHash = resourceHash(cr)
-	// NO GeneratorBuild STAMP HERE (#541). This phase does not render, and the field means "the build
+	// NO HASH STAMPS HERE, AND NO GeneratorBuild STAMP (#541, #627). This phase does not render, and all
+	// three fields mean "the inputs the CRD was rendered from". renderGeneratedCRDs writes them, wherever
+	// the render happened -- including the branch above, which regenerates when the generator moved under
+	// an existing CRD.
+	//
+	// status.oasHash and status.resourceHash used to be written here unconditionally. On the path where
+	// the CRD already exists and the generator has NOT moved, nothing renders -- and advancing the hashes
+	// anyway told the next Observe that the live document had already been generated from, permanently.
+	// Leaving them alone is what makes that pass self-heal: Observe sees the drift it should see, and
+	// Update regenerates.
+	//
+	// The old comment here said only "the build
 	// that rendered this CRD". renderGeneratedCRDs writes it, wherever the render happened -- including
 	// the branch above, which regenerates when the generator moved under an existing CRD.
 
@@ -1241,11 +1250,31 @@ func (e *external) ensureVersionPolicyBestEffort(ctx context.Context, cr *defini
 // different build would be false." That reasoning is right, and it sat next to a sibling call site where
 // the premise did not hold. A rule written in a comment is enforced by whoever reads it; a single
 // function that renders and then stamps cannot be half-used by a third call site.
-func (e *external) renderGeneratedCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, docs *oas2jsonschema.DocumentSet, hasSecuritySchemes bool) error {
+func (e *external) renderGeneratedCRDs(ctx context.Context, cr *definitionv1alpha1.RestDefinition, gvk schema.GroupVersionKind, docs *oas2jsonschema.DocumentSet, hasSecuritySchemes bool, oasHash string) error {
 	if err := e.generateAndApplyCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); err != nil {
 		return err
 	}
+	// ALL THREE drift inputs are stamped here, and nowhere else (#627).
+	//
+	// The reasoning above is about GeneratorBuild and it was never specific to it: a bookkeeping value
+	// that attests a render must not be writable by a caller that did not render. #541 applied it to one
+	// input of three and the other two kept their unconditional writes at the end of Create's second
+	// phase -- so an OAS content change or a spec.resource change that arrived via Create had its hash
+	// advanced with nothing rendered.
+	//
+	// THAT LATCHED PERMANENTLY, which is why this is a worse defect than the one above rather than the
+	// same one again. Observe compares these two hashes against the live document and spec; once the
+	// stored value equals what it is compared against, no later reconcile sees drift, so the CRD keeps an
+	// older schema forever while the RestDefinition reports Ready. Measured by the installer session: an
+	// OAS-only change left the CRD byte-identical while status.oasHash held the digest of the NEW
+	// document, still unchanged ten minutes later and unrecoverable by any generator move.
+	//
+	// resourceHash is recomputed here rather than passed in, because its input is `cr` -- which this
+	// function already has, and which generateAndApplyCRDs does not modify. One source for the value
+	// removes the question of whether a caller's copy was stale.
 	cr.Status.GeneratorBuild = e.genCfg.Build
+	cr.Status.OASHash = oasHash
+	cr.Status.ResourceHash = resourceHash(cr)
 	return nil
 }
 
@@ -1429,10 +1458,9 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 		// state the rule correctly -- "the CRD was just rendered by THIS build whatever provoked the
 		// render, so recording a different build would be false" -- while a sibling call site stamped on
 		// a branch that had rendered nothing (#541). A rule in a comment is enforced by whoever reads it.
-		if gerr := e.renderGeneratedCRDs(ctx, cr, gvk, docs, hasSecuritySchemes); gerr != nil {
+		if gerr := e.renderGeneratedCRDs(ctx, cr, gvk, docs, hasSecuritySchemes, oasHash); gerr != nil {
 			return fmt.Errorf("regenerating CRD: %w", gerr)
 		}
-		cr.Status.ResourceHash = resHash
 	}
 
 	// Retire served versions nothing is using any more. OUTSIDE the regeneration gate above, because a
@@ -1514,7 +1542,10 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (err error) 
 	cr.Status.OASPath = cr.Spec.OASPath
 	cr.Status.Digest = dig
 	cr.Status.HasSecuritySchemes = &hasSecuritySchemes
-	cr.Status.OASHash = oasHash
+	// No status.oasHash write here either (#627): renderGeneratedCRDs stamps it inside the gate above.
+	// This site was harmless -- the gate's own condition includes `oasHash != cr.Status.OASHash`, so
+	// reaching here without a render means the value was already equal -- but "harmless because another
+	// condition happens to cover it" is the property that stopped holding at Create's sibling site.
 
 	// Taken AFTER every in-place step above and immediately before the write, same rule as Create's
 	// phase 2. Update already sets the Creating condition a few lines up, which is what applyTo merges,
