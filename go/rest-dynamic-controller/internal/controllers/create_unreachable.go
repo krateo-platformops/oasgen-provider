@@ -1,10 +1,17 @@
 package restResources
 
 import (
+	"errors"
 	"strings"
 
+	"github.com/krateo-platformops/plumbing/kubeutil/event"
+
+	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
+
+	customcondition "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers/condition"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -79,4 +86,39 @@ func createIsUnreachable(r *getter.Resource, mg *unstructured.Unstructured) bool
 	}
 	// A zero time means no create has ever succeeded for this resource.
 	return meta.GetExternalCreateSucceeded(mg).IsZero()
+}
+
+// createUnreachableCondition returns the condition to set INSTEAD of Available, or nil when this
+// resource is fine. It emits the accompanying event as a side effect when it returns non-nil.
+//
+// IT RETURNS THE CONDITION RATHER THAN SETTING IT, and that is not a style choice. The up-to-date
+// path ends by setting condition.Available() unconditionally (restResources.go:836), so a
+// CreateUnreachable written anywhere earlier in Observe -- including right next to the findby match
+// that detects it -- is overwritten with Ready=True before the reconcile returns. The fix would be
+// inert while still passing any test that asserts the condition was set at the moment it was set.
+// Returning it to that one call site makes overwriting impossible rather than merely unlikely.
+//
+// NO REPEAT COUNTER, deliberately, and the asymmetry with reportLatchedInferredAbsence is the point.
+// That path waits for maxLatchedAbsenceRepeats because a create genuinely in flight is
+// indistinguishable from one that will never land, and only elapsed time separates them. Here there
+// is no ambiguity: no create has EVER succeeded and findby already matches, so nothing is in flight
+// and no later observation can change the verdict. Waiting would delay a signal that is already
+// certain.
+func (h *handler) createUnreachableCondition(mg *unstructured.Unstructured, r *getter.Resource, log logging.Logger) *metav1.Condition {
+	if !createIsUnreachable(r, mg) {
+		return nil
+	}
+
+	const detail = "this resource's create is its only write verb, and the controller queues a create " +
+		"only for a resource it observes as absent. Its findby matches an existing item, so the create " +
+		"can never be issued and this resource's only effect will not fire. No create has ever succeeded " +
+		"for it. Declare identifiers the findby response does not carry, or express the action as a " +
+		"dispatch verb"
+
+	h.eventRecorder.Event(mg, event.Warning(reasonCreateUnreachable, "Observe", errors.New(detail)))
+	log.Info("Create is unreachable for an action-only resource",
+		"kind", mg.GetKind(), "name", mg.GetName())
+
+	cond := customcondition.CreateUnreachable(detail)
+	return &cond
 }

@@ -118,3 +118,38 @@ func TestOnlyAResourceWhoseCreateNeverSucceededIsReported(t *testing.T) {
 	assert.False(t, createIsUnreachable(withGet, never),
 		"a kind with a get verb does not decide existence from findby alone")
 }
+
+// THE OVERWRITE HAZARD, pinned on the source because no behavioural test can see it from outside.
+//
+// The up-to-date path ends by setting a Ready condition. If a CreateUnreachable is written anywhere
+// EARLIER in Observe -- including right beside the findby match that detects it -- that final write
+// overwrites it with Ready=True and the whole diagnostic becomes inert, while still passing any test
+// that asserts the condition was set at the moment it was set.
+//
+// So the decision must happen AT that call site, and this asserts it does. A future author adding a
+// second unconditional condition.Available() on this path reintroduces the bug silently; they have to
+// come here and say why.
+func TestReadyOnTheUpToDatePathIsDecidedAtTheSetConditionsCallSite(t *testing.T) {
+	b, err := os.ReadFile("restResources.go")
+	require.NoError(t, err)
+	src := string(b)
+	require.NotEmpty(t, src, "restResources.go is empty, so every Count below would be a vacuous 0")
+
+	// The up-to-date path must route its Ready through the variable, not through a literal.
+	require.Contains(t, src, "readyCondition := condition.Available()",
+		"the up-to-date path no longer computes its Ready condition into a variable, so the "+
+			"CreateUnreachable verdict cannot replace it")
+	require.Contains(t, src, "unstructuredtools.SetConditions(mg, readyCondition)",
+		"the final SetConditions no longer uses the computed condition, so a CreateUnreachable verdict "+
+			"is discarded")
+	assert.Contains(t, src, "h.createUnreachableCondition(mg, &clientInfo.Resource, log)",
+		"the verdict is no longer consulted where Ready is decided")
+
+	// CONTROL: the literal form this replaced must NOT come back on this path. Counting all
+	// occurrences would be brittle -- Available() is legitimately set on other paths -- so this pins
+	// the exact line that used to overwrite the verdict.
+	assert.NotContains(t, src, "unstructuredtools.SetConditions(mg, condition.Available())\n\tif err != nil {\n\t\tlog.Error(err, \"Setting condition\")",
+		"the unconditional Available() on the up-to-date path is back. That is the line that makes "+
+			"issue 629's condition inert: it runs after the findby match and overwrites Ready=False "+
+			"with Ready=True on the very resource the diagnostic is about")
+}

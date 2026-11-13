@@ -46,6 +46,12 @@ const (
 	// reasonAbsenceLatched is the same inference, but on the path where NO create follows it and the
 	// resource is reported converged -- see latched_absence.go for why that needs its own signal.
 	reasonAbsenceLatched event.Reason = "AbsenceLatchedWhileCreatePending"
+
+	// reasonCreateUnreachable is the opposite inference to reasonAbsenceLatched. There, findby did NOT
+	// match and a create was pending, so absence was inferred and nothing was issued. Here findby DID
+	// match on a resource whose create is its only write verb, so the runtime -- which queues a Create
+	// only on !ResourceExists -- can never issue it. Nothing is failing, so this surfaces nowhere else.
+	reasonCreateUnreachable event.Reason = "CreateUnreachableForActionOnlyKind"
 )
 
 func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, pluralizer pluralizer.PluralizerInterface, prettyJSONDebug bool, hostPolicyCfg hostpolicy.Config) controller.ExternalClient {
@@ -827,7 +833,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}
 	}
 	log.Debug("Setting condition", "kind", mg.GetKind())
-	err = unstructuredtools.SetConditions(mg, condition.Available())
+	// THE ONLY PLACE Ready is decided on this path. A resource whose create is its only write verb and
+	// whose findby matches can never have that create queued, so reporting it Available would be the
+	// inverted health signal issue 629 measured: the stuck resource reading Ready=True while a working
+	// one reads Ready=False/Pending, so triage by CR health picks the broken one.
+	readyCondition := condition.Available()
+	if unreachable := h.createUnreachableCondition(mg, &clientInfo.Resource, log); unreachable != nil {
+		readyCondition = *unreachable
+	}
+	err = unstructuredtools.SetConditions(mg, readyCondition)
 	if err != nil {
 		log.Error(err, "Setting condition")
 		return controller.ExternalObservation{}, err
