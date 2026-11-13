@@ -9,10 +9,13 @@ import (
 	"testing"
 	"time"
 
+	customcondition "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers/condition"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/meta"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -152,4 +155,58 @@ func TestReadyOnTheUpToDatePathIsDecidedAtTheSetConditionsCallSite(t *testing.T)
 		"the unconditional Available() on the up-to-date path is back. That is the line that makes "+
 			"issue 629's condition inert: it runs after the findby match and overwrites Ready=False "+
 			"with Ready=True on the very resource the diagnostic is about")
+}
+
+// THE BEHAVIOUR AT THE HANDLER LEVEL: what a consumer actually receives.
+//
+// The predicate tests above establish the shape logic. This asserts the two things an operator sees
+// -- the condition and the event -- and, critically, that a HEALTHY action-only resource receives
+// NEITHER. The silent case is the one worth guarding: a diagnostic that fires on every provisioned
+// node would be worse than none, and nothing in the predicate tests would catch it.
+func TestTheUnreachableCreateVerdictProducesAConditionAndAnEvent(t *testing.T) {
+	actionOnly := resourceFor(shapeCase{Verbs: []string{"findby", "create"}})
+	log := logging.NewNopLogger()
+
+	t.Run("a stuck resource gets the condition and the event", func(t *testing.T) {
+		evs := &recordingEvents{}
+		h := &handler{eventRecorder: evs}
+		mg := &unstructured.Unstructured{Object: map[string]any{}}
+
+		got := h.createUnreachableCondition(mg, actionOnly, log)
+
+		require.NotNil(t, got, "a kind whose create has never succeeded and whose findby matches must be reported")
+		assert.Equal(t, metav1.ConditionFalse, got.Status,
+			"reporting Ready=True is the inverted health signal issue 629 measured")
+		assert.Equal(t, customcondition.ReasonCreateUnreachable, got.Reason)
+		assert.Contains(t, got.Message, "dispatch verb", "the message must offer the remedy, not just the problem")
+
+		require.Len(t, evs.all(), 1, "exactly one event, so a repeating reconcile does not spam")
+		assert.Equal(t, reasonCreateUnreachable, evs.all()[0].Reason)
+	})
+
+	t.Run("a resource whose create already succeeded gets NEITHER", func(t *testing.T) {
+		evs := &recordingEvents{}
+		h := &handler{eventRecorder: evs}
+		mg := &unstructured.Unstructured{Object: map[string]any{}}
+		meta.SetExternalCreateSucceeded(mg, time.Now().Add(-time.Hour))
+
+		got := h.createUnreachableCondition(mg, actionOnly, log)
+
+		assert.Nil(t, got,
+			"a provisioned resource's findby matches forever, correctly. Reporting it would warn about "+
+				"every successful resource of exactly the kind this exists to help")
+		assert.Empty(t, evs.all(), "and it must not emit an event either")
+	})
+
+	t.Run("a kind with a get verb gets NEITHER", func(t *testing.T) {
+		evs := &recordingEvents{}
+		h := &handler{eventRecorder: evs}
+		mg := &unstructured.Unstructured{Object: map[string]any{}}
+
+		got := h.createUnreachableCondition(mg,
+			resourceFor(shapeCase{Verbs: []string{"findby", "create", "get"}}), log)
+
+		assert.Nil(t, got, "a kind with a get verb does not decide existence from findby alone")
+		assert.Empty(t, evs.all())
+	})
 }
