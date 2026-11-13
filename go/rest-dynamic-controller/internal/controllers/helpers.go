@@ -2,6 +2,7 @@ package restResources
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/comparison"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/deepcopy"
@@ -139,9 +140,12 @@ func populateStatusFields(clientInfo *getter.Info, mg *unstructured.Unstructured
 	// have waited for a HAND-WRITTEN definition with three or more identifiers. Composite
 	// identifiers are the shape that needs them (role assignments and similar), which is both why
 	// nobody has hit it and why someone eventually will.
-	allFields := make([]string, 0, len(clientInfo.Resource.Identifiers)+len(clientInfo.Resource.AdditionalStatusFields))
-	allFields = append(allFields, clientInfo.Resource.Identifiers...)
-	allFields = append(allFields, clientInfo.Resource.AdditionalStatusFields...)
+	// slices.Concat ALWAYS allocates, so the result can never share an array with either input --
+	// which is the aliasing guarantee, stated by the function rather than reconstructed from a
+	// make-then-append pair. It also avoids computing an allocation size as `len(a)+len(b)`, which
+	// CodeQL flags as a possible overflow (go/allocation-size-overflow) and which this file's
+	// previous form was flagged for.
+	allFields := slices.Concat(clientInfo.Resource.Identifiers, clientInfo.Resource.AdditionalStatusFields)
 	// Early return if no fields to populate
 	if len(allFields) == 0 {
 		return nil
