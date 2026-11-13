@@ -2,6 +2,7 @@ package restResources
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/comparison"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/deepcopy"
@@ -108,8 +109,43 @@ func populateStatusFields(clientInfo *getter.Info, mg *unstructured.Unstructured
 		return nil // Nothing to populate, but not an error
 	}
 
-	// Combine identifiers and additionalStatusFields into one list.
-	allFields := append(clientInfo.Resource.Identifiers, clientInfo.Resource.AdditionalStatusFields...)
+	// Combine identifiers and additionalStatusFields into one list, in a FRESH slice.
+	//
+	// `append(Resource.Identifiers, ...)` would write into the identifier slice's backing array
+	// whenever it has spare capacity, which after a JSON unmarshal it often does. Measured by
+	// openstack-nova-operator-kog across identifier counts:
+	//
+	//	n   len  cap   aliases?
+	//	1    1    1    no
+	//	2    2    2    no
+	//	3    3    4    YES -- [id0 id1 id2 <additionalStatusField>]
+	//	4    4    4    no
+	//	5    5    8    YES
+	//	6    6    8    YES
+	//
+	// `len(Resource.Identifiers)` does not change, so nothing reading that slice normally sees the
+	// extra element: this is a latent hazard rather than a reproduced bug, and it needs a second
+	// consumer re-slicing or appending to the same array to surface. It is fixed anyway because
+	// THIS REPO ALREADY DECIDED IT MATTERS -- restResources.go builds the equivalent list the safe
+	// way, with a comment saying exactly why. One site documenting a hazard while another does the
+	// unguarded form is worse than either alone, because a reader who finds the guarded one
+	// reasonably assumes the pattern is applied.
+	//
+	// WHO COULD REACH THIS, measured rather than assumed. A consumer with 36 generated definitions
+	// audited their whole fleet: the maximum identifier count on any kind is ONE, 36 of 36, with a
+	// >=1 control proving the walk read something. Their immunity is a property of their GENERATOR
+	// -- it emits a single identifier per kind -- not of their vendor.
+	//
+	// So the growth points at 3, 5 and 6 are unreachable from a generated corpus, and this would
+	// have waited for a HAND-WRITTEN definition with three or more identifiers. Composite
+	// identifiers are the shape that needs them (role assignments and similar), which is both why
+	// nobody has hit it and why someone eventually will.
+	// slices.Concat ALWAYS allocates, so the result can never share an array with either input --
+	// which is the aliasing guarantee, stated by the function rather than reconstructed from a
+	// make-then-append pair. It also avoids computing an allocation size as `len(a)+len(b)`, which
+	// CodeQL flags as a possible overflow (go/allocation-size-overflow) and which this file's
+	// previous form was flagged for.
+	allFields := slices.Concat(clientInfo.Resource.Identifiers, clientInfo.Resource.AdditionalStatusFields)
 	// Early return if no fields to populate
 	if len(allFields) == 0 {
 		return nil

@@ -136,7 +136,10 @@ func (h *handler) observeViaRestAction(ctx context.Context, mg *unstructured.Uns
 // withhold. Payload size is the only cost, and a spec that is too large to forward would already be too
 // large to reconcile.
 func buildExtras(mg *unstructured.Unstructured, static map[string]interface{}, identifiers []string) map[string]any {
-	out := make(map[string]any, len(static)+len(identifiers)+4)
+	// No computed capacity hint. For a map it is only a hint, this one holds about six entries, and
+	// `len(a)+len(b)+4` is what CodeQL flags as go/allocation-size-overflow. Dropping it costs
+	// nothing measurable and removes the third instance of that rule from this package.
+	out := make(map[string]any)
 	for k, v := range static {
 		out[k] = v
 	}
