@@ -1271,20 +1271,34 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		// comment at the dispatch branch says it must come first for exactly this reason, #199). So
 		// reaching this point means none of the three applies.
 		//
-		// The condition carries the durable, sweepable explanation; the error stops the runtime
-		// reporting a creation it never performed. A findby-only resource is a legitimate shape, so
-		// the wording says the Kind cannot create rather than that its author erred.
-		if cerr := unstructuredtools.SetConditions(mg, customcondition.NoCreateVerbDeclared()); cerr != nil {
-			log.Error(cerr, "Setting the NoCreateVerbDeclared condition")
-			return cerr
-		}
-		if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
-			Pluralizer:    h.pluralizer,
-			DynamicClient: h.dynamicClient,
-		}); uerr != nil {
-			log.Error(uerr, "Updating status")
-			return uerr
-		}
+		// The error stops the runtime reporting a creation it never performed. A findby-only resource
+		// is a legitimate shape, so the wording says the Kind cannot create rather than that its
+		// author erred.
+		//
+		// NO CONDITION IS SET HERE, AND THAT IS A CORRECTION RATHER THAN AN OMISSION.
+		//
+		// This branch used to set customcondition.NoCreateVerbDeclared(). That write was INERT and
+		// shipped inert in 0.64.0: returning an error sends the runtime down its own failure path,
+		// which does
+		//
+		//	SetConditions(el, condition.WithMessage(condition.Creating(), wrapped.Error()), ...)
+		//
+		// at unstructured-runtime worker.go:1213. Both are TypeReady and SetConditions upserts by
+		// TYPE, so the runtime's Creating() replaces ours every time. Measured by a consumer on
+		// shipped 0.64.0: Ready=False/Creating and Synced=False/ReconcileError, with
+		// `NoCreateVerbDeclared` appearing nowhere in the conditions or the events.
+		//
+		// THE DETAIL SURVIVES, which is why the behaviour is still right: the runtime wraps this
+		// function's error into the condition message and emits CannotCreateExternalResource with the
+		// same text, so the cause is named and the false "Successfully requested creation" event is
+		// gone. What does not survive is the REASON, so nothing should be documented as grepping for
+		// it.
+		//
+		// This is the same overwrite hazard that #636 was restructured to avoid -- there the verdict
+		// is returned to the one site that decides Ready, instead of being written earlier. The
+		// difference is that on THAT path we own the final write and on this one the runtime does.
+		// Having found the hazard and fixed it next door, shipping it here is the part worth
+		// recording.
 		err := fmt.Errorf("no create action is declared for this resource: no create verb, no dispatch verb and no createApiRef")
 		log.Error(err, "Cannot create", "action", apiaction.Create, "kind", mg.GetKind(), "name", mg.GetName())
 		return err
