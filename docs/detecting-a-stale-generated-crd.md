@@ -51,6 +51,18 @@ So the same document under the same oasPath must produce the same `oasHash` on a
 
 **3. An unreachable cluster must not share an exit code with "latch found".** `sys.exit("message")` exits 1. If 1 is also your code for LATCH, a cluster that is merely stopped reports a latch. Found by a consumer running their detector against a cluster that had just gone down.
 
+### An existing implementation
+
+`krateo-arubacloud-provider-kog` maintains **`scripts/latch_check.py`**, which recomputes
+`compositeOASDigest` from a cluster's own ConfigMaps and compares it against each RestDefinition's
+stored `oasHash`. It needs no access to this repository's source.
+
+**It is deliberately not something this repo ships, and the reason is worth stating.** A detector
+written here would agree with any mistake in the implementation it was written from. Theirs is an
+independent reimplementation from the published algorithm, so its **34 agreements on a 45-day-old
+cluster** are evidence about the algorithm rather than a restatement of it. A tool shipped alongside
+the code it checks cannot have that property.
+
 ### And a property worth building in
 
 **Make agreement the success mode.** A detector that confirms N definitions agree cannot quietly be checking nothing: if the algorithm were reimplemented wrongly, *none* would agree. Report `AGREES / MISMATCH / NOT CHECKABLE` as three separate counts, and treat **zero agreements** as "suspect the script", not as "no latches".
@@ -112,6 +124,20 @@ unchanged, correct-looking hash in both states.
 The control definition re-rendered too, with `generatorBuild` moving and its schema unchanged —
 confirming the upgrade re-renders everything and only the latched one changes.
 
+### Reasoned, not measured: delete the Deployment rather than scaling it to zero
+
+**This one is a code reading. No run has tested it**, and it sits outside the measured rows above for
+that reason — the reproduction deleted the Deployment and never tried `replicas=0`.
+
+`LookupDeployment` returns `(exists, ready, err)`. `deployOk` is *exists*, not ready, and `ready`
+computes `*Spec.Replicas == Status.ReadyReplicas` — which at `0 == 0` is **true**. So a Deployment
+scaled to zero should report *exists and ready*: it would not merely fail to open the window, it
+would look like the healthiest possible state, and the run would record a clean "refused to latch"
+from a window that never opened.
+
+Delete it instead. If anyone measures the `replicas=0` case, this section should become a row in the
+table above or be deleted.
+
 ## Recovery
 
 An upgrade crossing a release boundary clears a latch on its own. Where that is not available — a cluster held at one version, or one running with `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false` — clear it directly. This is non-destructive:
@@ -158,9 +184,5 @@ old one — the latch, directly observed. `Create` recreated the Deployment and 
 without rendering. **The control is what makes this readable**: the same edit with the Deployment
 present changes the served schema, so an unchanged schema in the subject arm cannot be explained by
 the edit being invisible.
-
-Note the Deployment must be **deleted**, not scaled to zero: `deployOk` means *exists*, and at
-`replicas=0` the readiness test computes `0 == 0` and reports the Deployment as existing **and
-ready**. Scaling to zero closes the window while looking like the healthiest possible state.
 
 **No latch has been found on any long-lived cluster.** That is the strongest available statement and it is not "this never happens": the measured population is small, and most of it was checked on one kind.

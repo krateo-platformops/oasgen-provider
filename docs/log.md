@@ -139,6 +139,24 @@ change is real elsewhere, and this release carries nothing else that could be co
 
 ### A `not` subschema now carries more than `const`/`enum`
 
+> **Correction (2026-11-13): this capability is UNREACHABLE from a RestDefinition, so this release
+> note changed nothing for any consumer.** A property-level `not` written in an OpenAPI document
+> never reaches crdgen through this provider: `oas2jsonschema`'s `Schema` type has **no `Not` field
+> at all** (nor `OneOf`), so the keyword is discarded in the OAS→schema step, one layer before
+> crdgen. Measured by `github-provider-kog` against the released `oasgen-render` binaries from both
+> 0.62.0 and 0.63.1: `not: {type: string, pattern: "^prod-"}` renders as `{"type":"string"}` with
+> `warnings=[]`, while a `maxLength: 7` control survives. The enum-only case — which crdgen
+> supported even at plumbing v1.33.0 — is lost too, which is what proves the loss is upstream of
+> crdgen rather than a crdgen capability question. Known and open as **#396** since 2026-11-03.
+>
+> The plumbing change described below is real. It is simply not reachable from here.
+>
+> **And the census in this release's own notes was a false pass.** It reported zero documents
+> affected across six corpora by counting `not` nodes. The number was right and the reason was
+> wrong: no RestDefinition could have been affected regardless. A census that returns 0 for a
+> reason other than the one being tested proves nothing about the thing being tested — found by
+> *injecting* `not` where the census only counted it.
+
 The provider's CRD generator moved from plumbing v1.33.0 to **v1.60.0**. `(*transpiler).emitNot` used to
 hand-build its subschema as `&JSONSchemaProps{Enum: forbidden}` and drop any `not` carrying no `const` or
 `enum`. It now calls `junctorMemberSchema`, the shared builder every other junctor member already used, so
