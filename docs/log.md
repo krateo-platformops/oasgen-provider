@@ -16,7 +16,8 @@ provider and the rest-dynamic-controller together.
 ## 2026-11-13 — 0.63.1
 
 **One correctness fix, and it is the worst kind: a stale generated CRD that reports itself up to date and
-never recovers.** Shipped on its own rather than bundled, because two live clusters are in that state now.
+never recovers.** Shipped on its own rather than bundled so that a correctness fix is not entangled with
+anything else, not because a population of affected clusters is known — see the blast radius below.
 
 ### A content hash is no longer stamped for a render that did not happen
 
@@ -30,9 +31,9 @@ nothing rendered. **That latches permanently.** Every later Observe compares the
 stored hash *of the new document*, finds no drift, and the CRD keeps its old schema while the
 RestDefinition reports `Ready`. A missed detection recovers on the next pass; this never does.
 
-Measured by the installer session on a clean GKE cluster: after a chart upgrade that changed only its OAS
-asset, the CRD was byte-identical to its pre-upgrade capture while `status.oasHash` held the digest of the
-**new** document — still unchanged ten minutes later.
+Measured by the installer session on a **throwaway** GKE cluster built for the purpose: after a chart
+upgrade that changed only its OAS asset, the CRD was byte-identical to its pre-upgrade capture while
+`status.oasHash` held the digest of the **new** document — still unchanged ten minutes later.
 
 ```
 live ConfigMap        the 0.7.1 document (uniqueItems x2)
@@ -50,6 +51,24 @@ redeploy — which is exactly what a provider upgrade, downgrade or restart prod
 **And it could not be escaped.** Once `status.generatorBuild` reaches the newest available build, no
 generator move clears the latch: a downgrade is deliberately not a trigger, and a re-upgrade leaves
 `running == stored`. On a cluster sitting at the current newest there was no route back.
+
+**Blast radius: no latch has been found on any long-lived cluster.** The only observed instance is the
+one above, on a throwaway cluster, and the window was opened by a deliberate oasgen downgrade that the
+reporter performed as part of a different experiment. Two long-lived clusters were then checked on the
+affected path and neither was latched: one does not have that KOG installed at all, and the other's CRD
+matches its own chart's asset exactly. So this is a real defect with a real reproduction and **no known
+affected installation** — stated that way because an earlier draft of this section claimed two live
+clusters were affected, which was an extrapolation rather than a measurement.
+
+That check also covered **one kind on one path**, out of 33 and 43 RestDefinitions on those two clusters.
+The instrument that would answer the general question is a render-and-diff of every OAS-backed CRD
+against the document its RestDefinition points at, and it is being built. Until it runs, "no latch found"
+is the honest claim and "no latch exists" is not.
+
+**And do not verify this by reading a CRD's description text.** That tell worked across one chart pair
+because the text happened to change, and it does not generalise: two earlier versions of the same KOG
+carry an identical description, so the same comparison reports "consistent" across a span where the
+schema genuinely differs. Render and diff, or measure nothing.
 
 The fix applies the rule `renderGeneratedCRDs` already existed for. Its own comment put it exactly, about
 the generator build: *"a rule written in a comment is enforced by whoever reads it; a single function that
