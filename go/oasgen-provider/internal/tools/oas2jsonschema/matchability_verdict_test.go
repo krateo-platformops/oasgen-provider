@@ -82,6 +82,25 @@ func TestEachEscapeFromTheActionOnlyShapeIsHonouredIndependently(t *testing.T) {
 	}
 }
 
+// THESE ARMS ARE PERMANENTLY THE ONLY COVERAGE FOR THE POSITIVE DIRECTION. DO NOT DELETE THEM AS
+// UNEXERCISED.
+//
+// The diagnostic they test fires only for an action-only kind whose findby CAN match -- which is, by
+// definition, a kind whose only effect never fires. There is no healthy configuration in which it is
+// correct and the resource works. So:
+//
+//   - no consumer can ever exercise this path, now or later: adoption means WORKING definitions;
+//   - the only live route is deliberately breaking a kind, which has been declined;
+//   - therefore these arms are not interim coverage pending field evidence. Waiting cannot help.
+//
+// A consumer census found ONE action-only definition across 38 consumer kinds, and even that one
+// cannot reach the condition site (its findby cannot match, so Observe returns at the not-found
+// branch). The natural cleanup instinct -- "remove the case no real manifest exercises" -- would
+// delete exactly the only thing testing this.
+//
+// The general test, worth applying to any diagnostic: ASK WHETHER A HEALTHY SYSTEM CAN PRODUCE THE
+// SIGNAL. If it cannot, "we will see it in the field" is not a plan.
+//
 // ISSUE 629 FIRES when the action-only kind's findby CAN match.
 //
 // `uuid` IS carried by the collection items in the Ironic-shaped document, so findby matches, Observe
@@ -327,4 +346,49 @@ func readSourceFile(t *testing.T, name string) string {
 	require.NoError(t, err, "reading %s for a structural assertion", name)
 	require.NotEmpty(t, b, "%s is empty, so any Count() over it would be a vacuous 0", name)
 	return string(b)
+}
+
+// THE REAL REGRESSION, kept as a fixture in preference to a constructed one.
+//
+// This is not a shape invented to exercise the predicate. It is the change a consumer actually
+// shipped: a `responseTransform` that made the findby items carry `node_id`, applied to make an
+// "unmatchable findby" warning go away. It disabled every provision transition for 24 hours, and the
+// same change had been reverted in their repo four days earlier under the subject "the
+// responseTransform I added today would have silently stopped every transition" -- so the warning
+// this code suppresses had out-argued the author's own correct revert note.
+//
+// A historical bad state is better evidence than a constructed one: it is known to be reachable by a
+// real author acting on a real message, which is exactly what a synthetic fixture cannot establish.
+func TestTheRealIronicRegressionIsCaught(t *testing.T) {
+	doc := ironicShapedDoc()
+	// What the transform added: `node_id` present in the collection items.
+	doc.Paths["/v1/nodes"].Ops["get"] = &mockOperation{Responses: map[int]ResponseInfo{200: {Content: map[string]*Schema{
+		"application/json": obj(prop("nodes", arr(obj(
+			prop("node_id", scalar("string")),
+			prop("uuid", scalar("string")),
+		)))),
+	}}}}
+	// ironic-node-provision, verbatim: findby + create, one identifier, OR policy.
+	g := matchGen([]string{"node_id"}, []Verb{
+		findByVerb("/v1/nodes", "OR", ""),
+		{Action: ActionCreate, Method: "PUT", Path: "/v1/nodes/{node_id}/states/provision"},
+	}, doc)
+
+	require.True(t, g.isActionOnly(), "the real definition must be recognised as action-only")
+	mr := g.matchability()
+	require.Equal(t, MatchabilityCanMatch, mr.Verdict,
+		"with the transform applied the findby CAN match, which is what made the create unreachable")
+
+	errs := g.warnCreateUnreachableForActionOnlyKind(mr)
+	require.Len(t, errs, 1,
+		"the change that cost a consumer 24 hours of stopped transitions must produce a diagnostic")
+
+	// CONTROL: without the transform -- the configuration they shipped as the fix -- it must be SILENT.
+	clean := matchGen([]string{"node_id"}, []Verb{
+		findByVerb("/v1/nodes", "OR", ""),
+		{Action: ActionCreate, Method: "PUT", Path: "/v1/nodes/{node_id}/states/provision"},
+	}, ironicShapedDoc())
+	assert.Empty(t, clean.warnCreateUnreachableForActionOnlyKind(clean.matchability()),
+		"the CORRECT configuration must not be warned about -- an unmatchable findby is what makes "+
+			"this shape work, and warning it is the defect issue 625 exists to stop")
 }
