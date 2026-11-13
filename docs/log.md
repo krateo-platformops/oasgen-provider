@@ -60,6 +60,17 @@ matches its own chart's asset exactly. So this is a real defect with a real repr
 affected installation** — stated that way because an earlier draft of this section claimed two live
 clusters were affected, which was an extrapolation rather than a measurement.
 
+**Every released version can form this latch, measured at twenty consecutive tags.** The two
+preconditions are Observe's OAS drift check being present (so a content change is detectable at all) and
+`Create` stamping the hashes with no OAS comparison on that path:
+
+```
+0.45.0 … 0.63.0    drift check: present    unconditional stamps: 2    -> latchable at every tag
+```
+
+So it long predates 0.62.0, and 0.63.0 carries it too. **Choosing between earlier pins does not change
+exposure; only 0.63.1 removes it** — and only for latches not yet formed.
+
 That check also covered **one kind on one path**, out of 33 and 43 RestDefinitions on those two clusters.
 The instrument that would answer the general question is a render-and-diff of every OAS-backed CRD
 against the document its RestDefinition points at, and it is being built. Until it runs, "no latch found"
@@ -290,6 +301,33 @@ own check against the live cluster at the moment of the destructive act (#612, #
 > message about finalizers, and the definition is still kept. The arm recorded the RD's finalizers at
 > delete time deliberately: with `restresources-still-exist` already present the run would have proved
 > nothing about this path, and would have been discarded as void rather than counted as a pass.
+
+> **Runtime verification (2026-11-13, issue 593).** Verified against a live Azure DevOps by
+> azuredevops-provider-kog, with a same-cluster 0.61.0 control and a second chart as the only other
+> variable. The prediction was stated before the run, so the rows could falsify it:
+>
+> ```
+> 0.62.0, chart 0.2.0 (default stateFilter)
+>   d=0    ORPHANED+warning   CreatedExternalResource 22:16:12
+>                             > OrphanedExternalResourcePossible 22:16:14
+>                             > DeletedExternalResource
+>   d=5    FIX-WORKED         project 404 at +10 min
+>   d=15   FIX-WORKED
+>   d=30   FIX-WORKED
+>
+> 0.61.0 control, same cluster          4/4 ORPHANED-SILENT
+> 0.62.0, chart B (stateFilter=all)     4/4 FIX-WORKED, no warnings
+> ```
+>
+> The falsifier — an ORPHANED-**silent** row on 0.62.0 — did not fire. Only d=0 loses the race, because
+> the project is still `new` there, and that case is **announced** rather than silent: the finalizer is
+> released, because holding it would leave a CR nobody can delete, and the Event names the identifiers so
+> the orphan is recoverable. d=5 already wins.
+>
+> Note for anyone building an alert on this: the Event reason is **`OrphanedExternalResourcePossible`**.
+> `reasonPossibleOrphan` is the Go identifier, not the emitted value — I quoted the identifier to the
+> consumer building the matcher, and only their looser `"orphan"` match saved the arm from reporting a
+> false falsification.
 
 ### A reordered set-typed array is no longer reported as drift forever
 
