@@ -62,7 +62,9 @@ kubectl patch restdefinition <name> -n <ns> --subresource=status --type=merge \
 
 Do it while the generated controller's Deployment is **Ready**: patching while it is absent routes the next pass through `Create` again.
 
-> **This recovery has been reasoned from the code and not yet run.** It is stated here so that is known, rather than implied to be verified.
+**Measured once, on a deliberately latched definition on 0.62.0:** the probe appeared in the served CRD **17 seconds** after the patch. `crd_schema_sha` changed, `oasHash` was re-stamped to the new document's hash, and `resourceHash`, `generatorBuild` and the Deployment uid were all unchanged — so the patch caused a re-render and nothing else.
+
+**Why it is seconds rather than up to a poll interval.** The RestDefinition is the controller's `For()` object and **no predicate filters status-only updates** — the builder chain is `Named → WithOptions → For → Build`, with no `WithEventFilter` and no `builder.WithPredicates`, and `ForControllerRuntime()` returns only `MaxConcurrentReconciles`, a rate limiter and optionally a queue constructor. So patching `status` generates a watch event and enqueues a reconcile immediately, rather than waiting for the 3-minute poll.
 
 ## What has actually been observed
 
