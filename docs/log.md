@@ -53,6 +53,19 @@ value as "differs from everything" would mean compare, differ, update, write, pr
 on every consumer that has not regenerated. Instead the current fingerprints are adopted, no update
 is issued, and the first real rotation afterwards is detected normally.
 
+**THE FIRST CONSUMER TO ADOPT A `secretRef` ON AN UPDATE VERB PAYS A CRD REGENERATION**, and nothing
+in the change advertises it. The field is declared *conditionally* — only when the update verb carries
+a `secretRef` — which keeps every other kind's CRD byte-identical, and means a definition that adopts
+one crosses the gate and has its CRD re-rendered. Where a kind's old served version is still being
+consumed, that regeneration unserves it and can block renders that pin it until a parent pin moves.
+Raised by a consumer who is about to be exactly that first adopter.
+
+On any upgrade, note that re-applying the RestDefinition is **not** required for this: a provider
+upgrade re-renders every managed CRD on its own, because `generatorChanged` is OR'd with the content
+hashes and defaults on. To stage it — upgrade the provider, keep the CRDs where they are, and
+regenerate deliberately later — set `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false`. That gate scopes
+only the render: the generated controllers are still deployed and still take the new image.
+
 **It says so when it cannot work.** After writing, the digest is read back from the object the
 apiserver returned. If it is absent, the resource reports `ResolverDigestRecorded=False` with reason
 `DigestFieldAbsent`, naming the remedy — re-apply the RestDefinition to regenerate the CRD. That is on
