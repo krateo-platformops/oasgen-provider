@@ -13,6 +13,19 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+**Annotations.** Indented blockquotes inside a release's section are labelled, and the label says what
+kind of claim it is. The distinction is load-bearing: only the first means the text above it is wrong.
+
+| label | means |
+|---|---|
+| `Correction (date)` | **the text above was wrong.** A retraction of this file's own claim |
+| `Known issue (date, issue N)` | later news: a defect found after that release shipped. The text above stands |
+| `Runtime verification (date)` | someone measured it on a cluster afterwards, and this is what they found |
+| `Note (date)` | context that is neither a retraction nor a defect |
+
+An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
+annotation about the release.
+
 ## 2026-11-14 — 0.68.0
 
 **One defect, fixed on both sides: a create that reached the vendor is no longer reported as a failed
@@ -180,6 +193,38 @@ So "the vendor refuses the second create" is common, and that is what kept the m
 > No fix in this release. The two obvious ones are both wrong — reporting not-exists re-creates a resource
 > that already exists, and latching `Available` is the defect — so it needs a decision rather than a patch.
 > Tracked in #682.
+
+> **Note (2026-11-14): this release moved WHERE a status-write conflict after a create is reported, so
+> a detector keyed on either log MESSAGE goes quiet while the race is still happening.** Two messages
+> changed and one channel did not:
+>
+> | signal | 0.67.0 | 0.68.0 |
+> |---|---|---|
+> | the handler's log message | `Updating status` | *"The create reached the vendor but its status write failed…"* |
+> | the runtime's own `Status write lost a race to a newer write`, create path | emitted | **not emitted** — the handler no longer returns the conflict as an error |
+> | the wrapped error TEXT | present | **present**, in the handler's log payload and in a Warning event |
+>
+> So the error text survives. `tools.UpdateStatus` wraps a conflict as
+> `fmt.Errorf("%w: %w", ErrStatusConflict, err)`, which carries both
+> `status write conflicted with a newer write` and the apiserver's own wording.
+>
+> What to key on, in order of robustness:
+>
+> 1. the **Warning event** on the CR, reason `Created`, message containing `status could not be
+>    written` — independent of log level and of pod restarts within the retention window;
+> 2. the log payload `status write conflicted with a newer write`, which is `tools.ErrStatusConflict`'s
+>    own text and a constant in the runtime;
+> 3. `the object has been modified`, which is the **apiserver's** wording and varies by Kubernetes
+>    version — present today, not guaranteed.
+>
+> Raised by azuredevops-provider-kog, who asked which string to key on before building a probe rather
+> than after. **An earlier version of this note claimed their first choice would have read zero. That
+> was wrong**: their grep matched the apiserver's text anywhere in the log rather than being anchored
+> on the old message, so it would have worked. I inferred the anchoring from their question instead of
+> reading their script, which I had never seen — the correction is theirs.
+>
+> A status conflict is still written exactly once and never retried (unstructured-runtime #30, removed
+> in core-provider #359), so a silent internal retry is not an explanation for a detector reading zero.
 
 ### Known limitation
 
