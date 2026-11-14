@@ -724,10 +724,19 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		// for one comparison, with nothing to catch the mismatch -- the two are one fact about one
 		// operation, which is why they travel as one value.
 		var listSemantics comparison.ListSemantics
-		for _, v := range clientInfo.Resource.VerbsDescription {
+		var strippedPaths []string
+		for i := range clientInfo.Resource.VerbsDescription {
+			v := &clientInfo.Resource.VerbsDescription[i]
 			if !strings.EqualFold(v.Action, string(apiaction.Update)) {
 				continue
 			}
+			// DERIVED FIRST AND UNCONDITIONALLY, because it needs no client and no document: the
+			// resolver sources come from the RestDefinition's own fieldMapping (#663). A document that
+			// cannot be read degrades the ARRAY comparison to positional, which is the old behaviour;
+			// it must not also un-strip the resolver pointers, because that reinstates a defect that
+			// burns real vendor writes.
+			strippedPaths = resolverSourcePaths(v)
+
 			ucli, serr := cs.For(ctx, string(apiaction.Update))
 			if serr != nil {
 				log.Error(serr, "Deriving list semantics for drift comparison; every array will be compared positionally")
@@ -746,7 +755,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			break
 		}
 
-		res, err := isCRUpdated(mg, b, clientInfo.Resource.CompareScope, scopeFields, listSemantics)
+		res, err := isCRUpdated(mg, b, clientInfo.Resource.CompareScope, scopeFields,
+			listSemantics.Comparer().WithStrippedPaths(strippedPaths))
 		if err != nil {
 			log.Error(err, "Checking if CR is updated")
 			return controller.ExternalObservation{}, err
