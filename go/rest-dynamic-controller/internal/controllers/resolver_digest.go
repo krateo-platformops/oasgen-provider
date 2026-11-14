@@ -177,3 +177,72 @@ func resolverDigestWasStored(stored *unstructured.Unstructured, want string) boo
 	}
 	return recordedResolverDigest(stored) == want && want != ""
 }
+
+// resolverDigestVerdict is what Observe must do about the resolver digest on one pass.
+//
+// IT IS A SEPARATE, PURE FUNCTION BECAUSE THE INTERESTING CASE IS THE ONE THAT DOES NOTHING.
+// Observe's branches are reachable only from the integration suite, which provisions a kind cluster
+// and so does not run locally -- and the branch that matters most to most consumers is the one where
+// a resource has no secretRef resolver at all and must therefore produce NO digest and NO condition.
+// A consumer pointed out that if the bootstrap branch ran before that check, every resource that uses
+// no secrets would grow a frightening false `DigestFieldAbsent`; by their census that is 38 of 38
+// definitions today. The code was already correct. Nothing asserted it, so it was one edit away from
+// not being.
+type resolverDigestVerdict int
+
+const (
+	// digestNotApplicable: there is no update-scoped secretRef resolver on this resource, or no
+	// digest could be computed. NOTHING may be written -- not the digest, and not the condition.
+	// This is the common case: most kinds reference no Secret.
+	digestNotApplicable resolverDigestVerdict = iota
+	// digestUnchanged: the referenced Secrets are as they were when this resource was last written.
+	digestUnchanged
+	// digestRotated: a referenced Secret changed. Report drift and write NOTHING -- Update's success
+	// path records the new digest, because only it knows the value reached the API.
+	digestRotated
+	// digestNeedsBootstrap: nothing is recorded yet. Adopt the current fingerprints, report no drift.
+	digestNeedsBootstrap
+)
+
+func (v resolverDigestVerdict) String() string {
+	switch v {
+	case digestNotApplicable:
+		return "NotApplicable"
+	case digestUnchanged:
+		return "Unchanged"
+	case digestRotated:
+		return "Rotated"
+	case digestNeedsBootstrap:
+		return "NeedsBootstrap"
+	}
+	return "unknown"
+}
+
+// resolverDigestDecision maps (in scope, recorded, computed) to the one action Observe takes.
+//
+// TWO GUARDS, AND BOTH ARE THE DIFFERENCE BETWEEN A NO-OP AND AN UNBOUNDED WRITE LOOP.
+//
+// `!inScope` short-circuits before anything else, so a resource with no secretRef resolver is
+// untouched -- see the type's comment for why that case is the one worth asserting.
+//
+// An EMPTY `computed` is also not applicable, even when inScope says otherwise. If it were compared,
+// a resource with a recorded digest and an empty computed one would read as rotated on every pass:
+// drift, update, drift, update, forever, pushing nothing. `resolverDigestNow` should never return
+// that pair, which is exactly why it is guarded here rather than assumed -- an invariant worth one
+// branch is worth it most when something else is responsible for maintaining it.
+//
+// `recorded == ""` is a BOOTSTRAP, not a difference. That is what makes a pruned field degrade to
+// today's behaviour instead of to an update every poll on every consumer with an older CRD.
+func resolverDigestDecision(inScope bool, recorded, computed string) resolverDigestVerdict {
+	if !inScope || computed == "" {
+		return digestNotApplicable
+	}
+	switch {
+	case recorded == computed:
+		return digestUnchanged
+	case recorded != "":
+		return digestRotated
+	default:
+		return digestNeedsBootstrap
+	}
+}

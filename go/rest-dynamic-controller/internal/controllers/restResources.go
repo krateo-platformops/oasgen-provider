@@ -854,60 +854,63 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		digestInScope = false
 	}
 	bootstrappedDigest := false
-	if digestInScope {
-		switch recorded := recordedResolverDigest(mg); {
-		case recorded == digestNow:
-			// Steady state: the Secrets behind this resource are as they were when it was last written.
+	switch resolverDigestDecision(digestInScope, recordedResolverDigest(mg), digestNow) {
+	case digestNotApplicable:
+		// NOTHING IS WRITTEN HERE -- no digest, and no condition. This is the common case: most kinds
+		// reference no Secret at all, and a resource with nothing to fingerprint must not grow a
+		// condition about a detector that does not apply to it.
 
-		case recorded != "":
-			// DRIFT -- AND NOTHING IS RECORDED HERE, which is the load-bearing part. Writing the new
-			// digest now would retire the difference before the update that acts on it has run; if
-			// that update then failed, the next observe would compare equal and the rotation would be
-			// lost permanently. Only Update's success path knows the value reached the vendor, so only
-			// it records the digest.
-			cond := condition.Unavailable()
-			cond.Reason = "ResourceNotUpToDate"
-			cond.Message = "a Secret referenced by this resource's update mapping has changed since the " +
-				"last successful write, so its value must be pushed to the API"
-			if serr := unstructuredtools.SetConditions(mg, cond); serr != nil {
-				log.Error(serr, "Setting condition")
-				return controller.ExternalObservation{}, serr
-			}
-			// Persisted here for the same reason the content-drift branch above persists: the runtime
-			// answers !ResourceUpToDate by queueing an Update and returning, with no status write of
-			// its own, so a condition only set in memory is discarded (#213).
-			if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
-				Pluralizer:    h.pluralizer,
-				DynamicClient: h.dynamicClient,
-			}); uerr != nil {
-				log.Error(uerr, "Updating status")
-				return controller.ExternalObservation{}, uerr
-			}
-			log.Info("A referenced Secret changed; queueing an update to push it", "kind", mg.GetKind())
-			return controller.ExternalObservation{
-				ResourceExists:   true,
-				ResourceUpToDate: false,
-			}, nil
+	case digestUnchanged:
+		// Steady state: the Secrets behind this resource are as they were when it was last written.
 
-		default:
-			// BOOTSTRAP. recorded == "" means either this resource has never had a digest written, or
-			// the apiserver is PRUNING the field because its CRD predates it. Adopting the current
-			// fingerprints is the correct answer to both: it issues no update now, and the first
-			// rotation after this pass is detected normally.
-			//
-			// Treating "" as "differs from everything" instead would make a pruned field an update
-			// loop -- compare, differ, update, write, pruned, compare, differ -- one vendor write per
-			// poll, per CR, forever, on every consumer whose CRD is older than this feature. That is
-			// why the absent case is a bootstrap and not a difference.
-			//
-			// Writing in Observe is safe here, and only here, precisely because this branch reports no
-			// drift: there is no verdict for the write to retire.
-			if serr := setResolverDigest(mg, digestNow); serr != nil {
-				log.Error(serr, "Recording the resolver digest")
-				return controller.ExternalObservation{}, serr
-			}
-			bootstrappedDigest = true
+	case digestRotated:
+		// DRIFT -- AND NOTHING IS RECORDED HERE, which is the load-bearing part. Writing the new
+		// digest now would retire the difference before the update that acts on it has run; if
+		// that update then failed, the next observe would compare equal and the rotation would be
+		// lost permanently. Only Update's success path knows the value reached the vendor, so only
+		// it records the digest.
+		cond := condition.Unavailable()
+		cond.Reason = "ResourceNotUpToDate"
+		cond.Message = "a Secret referenced by this resource's update mapping has changed since the " +
+			"last successful write, so its value must be pushed to the API"
+		if serr := unstructuredtools.SetConditions(mg, cond); serr != nil {
+			log.Error(serr, "Setting condition")
+			return controller.ExternalObservation{}, serr
 		}
+		// Persisted here for the same reason the content-drift branch above persists: the runtime
+		// answers !ResourceUpToDate by queueing an Update and returning, with no status write of
+		// its own, so a condition only set in memory is discarded (#213).
+		if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+			Pluralizer:    h.pluralizer,
+			DynamicClient: h.dynamicClient,
+		}); uerr != nil {
+			log.Error(uerr, "Updating status")
+			return controller.ExternalObservation{}, uerr
+		}
+		log.Info("A referenced Secret changed; queueing an update to push it", "kind", mg.GetKind())
+		return controller.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+
+	case digestNeedsBootstrap:
+		// BOOTSTRAP. recorded == "" means either this resource has never had a digest written, or
+		// the apiserver is PRUNING the field because its CRD predates it. Adopting the current
+		// fingerprints is the correct answer to both: it issues no update now, and the first
+		// rotation after this pass is detected normally.
+		//
+		// Treating "" as "differs from everything" instead would make a pruned field an update
+		// loop -- compare, differ, update, write, pruned, compare, differ -- one vendor write per
+		// poll, per CR, forever, on every consumer whose CRD is older than this feature. That is
+		// why the absent case is a bootstrap and not a difference.
+		//
+		// Writing in Observe is safe here, and only here, precisely because this branch reports no
+		// drift: there is no verdict for the write to retire.
+		if serr := setResolverDigest(mg, digestNow); serr != nil {
+			log.Error(serr, "Recording the resolver digest")
+			return controller.ExternalObservation{}, serr
+		}
+		bootstrappedDigest = true
 	}
 
 	log.Debug("Setting condition", "kind", mg.GetKind())

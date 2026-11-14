@@ -337,3 +337,137 @@ func TestTheDigestIsRecordedOnBootstrapAndNotOnDrift(t *testing.T) {
 	assert.Contains(t, src, "customcondition.ResolverDigestFieldAbsent()",
 		"nothing reports a pruned digest field any more")
 }
+
+// ---------------------------------------------------------------- the verdict
+
+// A KIND WITH NO secretRef RESOLVER MUST BE LEFT COMPLETELY ALONE.
+//
+// Raised by openstack-ironic-operator-kog, who measured ZERO secretRef resolvers across all 7 of
+// their RestDefinitions and asked the right question: does this feature put a frightening
+// `DigestFieldAbsent` condition on a resource that has nothing to fingerprint? By their census that
+// would be 38 of 38 definitions across consumers today.
+//
+// The answer is no, and it was no before they asked -- but nothing asserted it, so it was one edit
+// to the branch order away from being yes, and the integration suite that could have caught it does
+// not run locally. This is the assertion that makes the no durable.
+func TestAKindWithNoResolverIsLeftAlone(t *testing.T) {
+	// The three shapes of "no update-scoped secretRef resolver", all of which reach
+	// resolverDigestNow's (digest="", inScope=false) return.
+	for _, tc := range []struct {
+		name string
+		r    *getter.Resource
+	}{
+		{"no verbs at all", &getter.Resource{}},
+		{"a nil resource", nil},
+		{
+			name: "verbs with no resolver anywhere -- the Ironic shape",
+			r: &getter.Resource{VerbsDescription: []getter.VerbsDescription{
+				{Action: "findby"}, {Action: "get"}, {Action: "create"}, {Action: "delete"},
+			}},
+		},
+		{
+			name: "an update verb whose mapping carries no resolver",
+			r: &getter.Resource{VerbsDescription: []getter.VerbsDescription{
+				{Action: "update", FieldMapping: []getter.FieldMappingItem{
+					{InBody: "name", InCustomResource: "spec.name"},
+				}},
+			}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sources, err := resolverDigestSources(tc.r, crWith(map[string]any{}))
+			require.NoError(t, err)
+			require.Empty(t, sources, "nothing to fingerprint")
+
+			// inScope=false and computed="" is what resolverDigestNow returns for these.
+			assert.Equal(t, digestNotApplicable, resolverDigestDecision(false, "", ""),
+				"a resource with no resolver must reach NotApplicable, which writes no digest AND no "+
+					"condition. Any other verdict puts a DigestFieldAbsent on every resource that uses "+
+					"no secrets at all")
+
+			// And it must stay NotApplicable even if a digest were somehow already recorded on it --
+			// otherwise a resource whose resolver was REMOVED from its definition would report a
+			// rotation forever against a digest nothing can recompute.
+			assert.Equal(t, digestNotApplicable, resolverDigestDecision(false, "stale-abc", ""),
+				"a stale recorded digest on a now-resolverless resource must not read as a rotation")
+		})
+	}
+
+	// POSITIVE CONTROL: a resource that DOES carry an update-scoped secretRef must produce a source,
+	// or every row above passes against a collector that always returns nothing.
+	withResolver := &getter.Resource{VerbsDescription: []getter.VerbsDescription{
+		{Action: "update", FieldMapping: []getter.FieldMappingItem{
+			secretRefEntry("password", "spec.ref.name", "spec.ref.key"),
+		}},
+	}}
+	sources, err := resolverDigestSources(withResolver, crWith(map[string]any{
+		"spec": map[string]any{"ref": map[string]any{"name": "s1", "key": "k1"}},
+	}))
+	require.NoError(t, err)
+	require.Len(t, sources, 1, "the control must find a source; otherwise the rows above prove nothing")
+}
+
+// THE EMPTY-COMPUTED GUARD. resolverDigestNow should never return (inScope=true, computed=""), which
+// is precisely why the decision guards it: if that pair were compared against a recorded digest it
+// would read as a rotation on every single pass -- drift, update, drift, update, forever, pushing
+// nothing. An invariant someone else maintains is worth one branch here.
+func TestAnEmptyComputedDigestIsNeverARotation(t *testing.T) {
+	assert.Equal(t, digestNotApplicable, resolverDigestDecision(true, "recorded-abc", ""),
+		"an empty computed digest against a recorded one must NOT be a rotation: that is an unbounded "+
+			"update loop that pushes nothing")
+	assert.Equal(t, digestNotApplicable, resolverDigestDecision(true, "", ""))
+}
+
+func TestTheDigestVerdictCoversEveryCase(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		inScope  bool
+		recorded string
+		computed string
+		want     resolverDigestVerdict
+		why      string
+	}{
+		{
+			name: "no resolver on the resource", inScope: false, recorded: "", computed: "",
+			want: digestNotApplicable,
+			why:  "nothing to fingerprint: no digest and no condition",
+		},
+		{
+			name: "same fingerprints", inScope: true, recorded: "abc", computed: "abc",
+			want: digestUnchanged,
+			why:  "the Secrets are as they were at the last successful write",
+		},
+		{
+			name: "a referenced Secret changed", inScope: true, recorded: "abc", computed: "def",
+			want: digestRotated,
+			why:  "report drift and write nothing; Update records the new digest once it lands",
+		},
+		{
+			name: "never recorded", inScope: true, recorded: "", computed: "abc",
+			want: digestNeedsBootstrap,
+			why: "adopt the current fingerprints; this is also what a PRUNED field looks like, and " +
+				"treating it as a difference would be one update per poll per CR forever",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want,
+				resolverDigestDecision(tc.inScope, tc.recorded, tc.computed), tc.why)
+		})
+	}
+
+	// EVERY verdict must be reachable from this table, or a case exists that nothing exercises.
+	seen := map[resolverDigestVerdict]bool{}
+	for _, v := range []resolverDigestVerdict{
+		resolverDigestDecision(false, "", ""),
+		resolverDigestDecision(true, "abc", "abc"),
+		resolverDigestDecision(true, "abc", "def"),
+		resolverDigestDecision(true, "", "abc"),
+	} {
+		seen[v] = true
+	}
+	for _, v := range []resolverDigestVerdict{
+		digestNotApplicable, digestUnchanged, digestRotated, digestNeedsBootstrap,
+	} {
+		assert.True(t, seen[v], "verdict %s is unreachable from this table, so nothing exercises it", v)
+	}
+}
