@@ -1220,6 +1220,43 @@ func (h *handler) observeAuthorizationDenied(ctx context.Context, mg *unstructur
 //
 // A 401 is not in scope here either: see restclient.IsAuthorizationDenied. Credential rotation is delegated
 // to a secret manager, and retrying a 401 is the mechanism by which a rotation mid-reconcile is survived.
+// recordAuthorizationDenied emits the Warning event and the log line for a permanent authorisation
+// refusal. Extracted so the two callers -- the persisting path below, and Create's CreateResult path
+// which must NOT persist -- cannot describe the same refusal differently.
+//
+// The vendor's explanation reaches the log and not the condition (#334): a 403 body often names the
+// required scope, and a condition is readable by anyone with `get` on the CR.
+func (h *handler) recordAuthorizationDenied(mg *unstructured.Unstructured, verb string, err error, log logging.Logger) {
+	h.eventRecorder.Event(mg, event.Warning(reasonUpdated, event.Action(verb), fmt.Errorf(
+		"the API refused the %s request for %s; the credential is not permitted to perform it, so it will not be retried",
+		verb, mg.GetName())))
+	log.Info("Authorization denied; no longer issuing this verb",
+		"kind", mg.GetKind(), "verb", verb, "error", err.Error())
+}
+
+// createAuthorizationDeniedResult builds the CreateResult for a create the API refused.
+//
+// A REFUSAL, SO BOTH HALVES. The runtime stamps Synced=ReconcileSuccess when a handler returns no
+// TypeSynced, which would report a successful sync on a resource the credential can never create.
+// Observe and Update deliberately do NOT get the Synced half: observeAuthorizationDenied wraps the
+// error in controller.ReadyAssessed and lets the runtime own Synced, and changing that would alter a
+// path this is not about.
+//
+// NOTHING IS PERSISTED HERE, unlike stopOnAuthorizationDenied. The runtime upserts and writes a
+// CreateResult's conditions itself (#258), so a status write from inside would be the same write
+// twice.
+func (h *handler) createAuthorizationDeniedResult(mg *unstructured.Unstructured, verb string, err error, log logging.Logger) controller.CreateResult {
+	h.recordAuthorizationDenied(mg, verb, err, log)
+	ready := customcondition.AuthorizationDenied(verb)
+	synced := ready
+	synced.Type = condition.TypeSynced
+	return controller.CreateResult{
+		Requested:  false,
+		Reason:     customcondition.ReasonAuthorizationDenied,
+		Conditions: []metav1.Condition{ready, synced},
+	}
+}
+
 func (h *handler) stopOnAuthorizationDenied(ctx context.Context, mg *unstructured.Unstructured, verb string, err error, log logging.Logger) (bool, error) {
 	if !restclient.IsAuthorizationDenied(err) {
 		return false, nil
@@ -1228,13 +1265,7 @@ func (h *handler) stopOnAuthorizationDenied(ctx context.Context, mg *unstructure
 		log.Error(serr, "Setting condition")
 		return false, nil
 	}
-	h.eventRecorder.Event(mg, event.Warning(reasonUpdated, event.Action(verb), fmt.Errorf(
-		"the API refused the %s request for %s; the credential is not permitted to perform it, so it will not be retried",
-		verb, mg.GetName())))
-	// The vendor's explanation reaches the log and not the condition (#334): a 403 body often names the
-	// required scope, and a condition is readable by anyone with `get` on the CR.
-	log.Info("Authorization denied; no longer issuing this verb",
-		"kind", mg.GetKind(), "verb", verb, "error", err.Error())
+	h.recordAuthorizationDenied(mg, verb, err, log)
 	if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
 		Pluralizer:    h.pluralizer,
 		DynamicClient: h.dynamicClient,
@@ -1512,8 +1543,17 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		// `handled || cerr != nil` reads the contract directly: cerr is nil when the condition
 		// persisted (so this returns nil and stops retrying) and carries the conflict when the write
 		// deferred (so the runtime requeues). Falling through means neither applied.
-		if handled, cerr := h.stopOnAuthorizationDenied(ctx, mg, "create", err, log); handled || cerr != nil {
-			return controller.CreateResult{}, cerr
+		// CLASSIFY AND RETURN, rather than classify-and-persist. A refused create called nothing, so
+		// Requested:false is what stops the runtime stamping external-create-succeeded and emitting the
+		// Normal CreatedExternalResource event for a resource that does not exist (#657).
+		//
+		// This deliberately does NOT reuse stopOnAuthorizationDenied: that helper PERSISTS the
+		// condition, which Observe's observeAuthorizationDenied depends on (the object handleObserve
+		// writes Synced onto is a fresh re-fetch, so a condition only set in memory is simply absent) --
+		// and persisting here would be the same write twice, since the runtime writes a CreateResult's
+		// conditions itself.
+		if restclient.IsAuthorizationDenied(err) {
+			return h.createAuthorizationDeniedResult(mg, "create", err, log), nil
 		}
 		if handled, cerr := h.stopOnEndpointRefusal(ctx, mg, "create", err, log); handled || cerr != nil {
 			return controller.CreateResult{}, cerr

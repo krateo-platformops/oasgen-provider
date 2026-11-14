@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,7 +36,15 @@ func TestDeleteNeverStopsOnAuthorizationDenied(t *testing.T) {
 	f, err := parser.ParseFile(fset, "restResources.go", src, 0)
 	require.NoError(t, err)
 
-	const guard = "stopOnAuthorizationDenied"
+	// TWO ENTRY POINTS TO ONE GUARD, since 0.66.0. Create no longer calls stopOnAuthorizationDenied:
+	// that helper PERSISTS the condition, which Observe depends on, and persisting from inside Create
+	// would be a second write of what the runtime already writes from a CreateResult. So Create
+	// classifies with restclient.IsAuthorizationDenied and returns createAuthorizationDeniedResult.
+	//
+	// Both are entry points to the same refusal guard, so this unions them. That makes the assertion
+	// STRONGER than the single-name version it replaces: Delete reaching the guard by EITHER route now
+	// fails, where before only one route was watched.
+	guardEntryPoints := []string{"stopOnAuthorizationDenied", "createAuthorizationDeniedResult"}
 	callers := map[string]int{}
 
 	for _, decl := range f.Decls {
@@ -50,10 +59,14 @@ func TestDeleteNeverStopsOnAuthorizationDenied(t *testing.T) {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != guard {
+			if !ok {
 				return true
 			}
-			callers[name]++
+			for _, g := range guardEntryPoints {
+				if sel.Sel.Name == g {
+					callers[name]++
+				}
+			}
 			return true
 		})
 	}
@@ -61,8 +74,9 @@ func TestDeleteNeverStopsOnAuthorizationDenied(t *testing.T) {
 	// Premise first: if the guard is not called anywhere, this test proves nothing about Delete and must
 	// fail loudly rather than pass vacuously. A rename or a removal lands here.
 	require.NotEmpty(t, callers,
-		"%s is called nowhere in restResources.go: either it was renamed or the #313 guard was removed, "+
-			"and this test cannot say anything about Delete until it is reached", guard)
+		"none of %v is called anywhere in restResources.go: either they were renamed or the #313 guard "+
+			"was removed, and this test cannot say anything about Delete until one is reached",
+		guardEntryPoints)
 
 	require.Contains(t, callers, "CreateWithResult",
 		"Create does not guard a denied 403, so it retries a refused create forever (#313)")
@@ -70,9 +84,9 @@ func TestDeleteNeverStopsOnAuthorizationDenied(t *testing.T) {
 		"Update does not guard a denied 403, so it retries a refused update forever (#313)")
 
 	require.NotContains(t, callers, "Delete",
-		"Delete calls %s. Stopping there removes the finalizer and ORPHANS the external resource -- "+
-			"retrying a denied delete forever is wasteful, orphaning is unrecoverable, and #261 settled "+
-			"that an unverifiable delete holds the finalizer", guard)
+		"Delete calls one of %v. Stopping there removes the finalizer and ORPHANS the external resource "+
+			"-- retrying a denied delete forever is wasteful, orphaning is unrecoverable, and #261 "+
+			"settled that an unverifiable delete holds the finalizer", guardEntryPoints)
 }
 
 // TestDeleteDoesNotReachTheGuardINDIRECTLY closes a hole that #436 opened in the test above.
@@ -123,17 +137,33 @@ func TestDeleteDoesNotReachTheGuardINDIRECTLY(t *testing.T) {
 	// reason: stopping a delete lets the finalizer be removed while the external resource still exists
 	// (#261). Enumerated here rather than discovered, so adding a third guard without adding it to this
 	// list is a visible omission in a diff rather than a silent gap.
-	guards := []string{"stopOnAuthorizationDenied", "stopOnEndpointRefusal"}
-	for _, guard := range guards {
-		t.Run(guard, func(t *testing.T) { assertDeleteDoesNotReach(t, fset, calls, guard) })
+	// A refusal CLASS can have more than one entry point. Since 0.66.0 the authorization guard has two:
+	// Update reaches it via stopOnAuthorizationDenied, Create via createAuthorizationDeniedResult (which
+	// does not persist, because the runtime writes a CreateResult's conditions itself). Reachability is
+	// therefore "reaches ANY entry point of this class".
+	//
+	// Enumerated rather than discovered, so adding a third guard without declaring its class and its
+	// expected reachers is a visible omission in a diff rather than a silent gap.
+	classes := []struct {
+		name        string
+		entryPoints []string
+	}{
+		{"authorization refusal", []string{"stopOnAuthorizationDenied", "createAuthorizationDeniedResult"}},
+		{"endpoint refusal", []string{"stopOnEndpointRefusal"}},
+	}
+	for _, c := range classes {
+		t.Run(c.name, func(t *testing.T) { assertDeleteDoesNotReach(t, fset, calls, c.entryPoints) })
 	}
 }
 
-func assertDeleteDoesNotReach(t *testing.T, fset *token.FileSet, calls map[string]map[string]bool, guard string) {
+func assertDeleteDoesNotReach(t *testing.T, fset *token.FileSet, calls map[string]map[string]bool, entryPoints []string) {
 	t.Helper()
 	_ = fset
-	// Fixpoint: a method reaches the guard if it calls it, or calls anything that reaches it.
-	reaches := map[string]bool{guard: true}
+	// Fixpoint: a method reaches the class if it calls any entry point, or calls anything that does.
+	reaches := map[string]bool{}
+	for _, g := range entryPoints {
+		reaches[g] = true
+	}
 	for changed := true; changed; {
 		changed = false
 		for fn, callees := range calls {
@@ -153,16 +183,16 @@ func assertDeleteDoesNotReach(t *testing.T, fset *token.FileSet, calls map[strin
 	// PREMISE, so a renamed guard or a broken walk fails loudly instead of passing vacuously: the two
 	// verbs that are SUPPOSED to reach it must be found by this same traversal.
 	require.True(t, reaches["CreateWithResult"],
-		"the transitive walk does not find Create reaching %s, so it cannot say anything about Delete: "+
-			"either the guard was renamed or this traversal is broken", guard)
+		"the transitive walk does not find Create reaching %v, so it cannot say anything about Delete: "+
+			"either the guard was renamed or this traversal is broken", entryPoints)
 	require.True(t, reaches["Update"],
-		"the transitive walk does not find Update reaching %s; same premise failure as Create", guard)
+		"the transitive walk does not find Update reaching %v; same premise failure as Create", entryPoints)
 
 	// And the property itself.
 	require.False(t, reaches["Delete"],
-		"Delete reaches %s through %v. Stopping a denied delete removes the finalizer and ORPHANS the "+
-			"external resource; #261 settled that an unverifiable delete holds it. If a wrapper made this "+
-			"path look harmless, it is not -- the wrapper still stops.", guard, calls["Delete"])
+		"Delete reaches one of %v through %v. Stopping a denied delete removes the finalizer and ORPHANS "+
+			"the external resource; #261 settled that an unverifiable delete holds it. If a wrapper made "+
+			"this path look harmless, it is not -- the wrapper still stops.", entryPoints, calls["Delete"])
 
 	// Observe SHOULD reach the 403 guard as of #436, via observeAuthorizationDenied. Asserted so the
 	// wiring cannot be silently removed: without it a permanent 403 on a read falls back to the runtime's
@@ -171,9 +201,9 @@ func assertDeleteDoesNotReach(t *testing.T, fset *token.FileSet, calls map[strin
 	//
 	// Only for that guard: an endpoint refusal on the OBSERVE path is a separate decision nobody has
 	// taken, and asserting it here would pin a behaviour that does not exist.
-	if guard == "stopOnAuthorizationDenied" {
+	if slices.Contains(entryPoints, "stopOnAuthorizationDenied") {
 		require.True(t, reaches["Observe"],
-			"Observe no longer reaches %s, so a permanent 403 on a read is reported as a generic observe "+
-				"failure and rolls up as converging rather than failed (#436)", guard)
+			"Observe no longer reaches %v, so a permanent 403 on a read is reported as a generic observe "+
+				"failure and rolls up as converging rather than failed (#436)", entryPoints)
 	}
 }
