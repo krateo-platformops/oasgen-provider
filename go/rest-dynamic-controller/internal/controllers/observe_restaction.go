@@ -176,8 +176,11 @@ func writeObservedStatus(mg *unstructured.Unstructured, result map[string]interf
 		status = map[string]interface{}{}
 	}
 	for k, v := range result {
-		// Never let the composed result clobber runtime-managed status fields.
-		if k == "conditions" || k == "observedGeneration" {
+		// Never let the composed result clobber runtime-managed status fields. The list is shared with
+		// clearStatusFields (issue 667) so the two sites cannot drift apart; it adds
+		// resolvedResolversDigest here, which no RESTAction composes and which is controller-owned
+		// either way.
+		if isControllerOwnedStatusKey(k) {
 			continue
 		}
 		status[k] = v
