@@ -60,11 +60,26 @@ one crosses the gate and has its CRD re-rendered. Where a kind's old served vers
 consumed, that regeneration unserves it and can block renders that pin it until a parent pin moves.
 Raised by a consumer who is about to be exactly that first adopter.
 
-On any upgrade, note that re-applying the RestDefinition is **not** required for this: a provider
-upgrade re-renders every managed CRD on its own, because `generatorChanged` is OR'd with the content
-hashes and defaults on. To stage it — upgrade the provider, keep the CRDs where they are, and
-regenerate deliberately later — set `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false`. That gate scopes
-only the render: the generated controllers are still deployed and still take the new image.
+**AND THE REGENERATION KNOB DOES NOT DEFER THAT ONE.** `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false`
+is the supported way to stage an upgrade — upgrade the provider, keep the CRDs where they are,
+regenerate deliberately later — and the gate it suppresses scopes only the render, so the generated
+controllers are still deployed and still take the new image. But the regeneration gate is a
+three-clause OR:
+
+```go
+if oasHash != cr.Status.OASHash || resHash != cr.Status.ResourceHash || generatorChanged {
+```
+
+and the knob only suppresses the third. `resourceHash` is a digest of the whole of `spec.resource`,
+so **adopting a `secretRef` is itself a `spec.resource` change** and moves the second clause. The knob
+defers a regeneration caused by an *upgrade*; it does not defer one caused by the *adoption*. Those
+read as the same thing from a release note and they are not.
+
+Two consequences. An upgrade alone does re-render every managed CRD without anyone re-applying
+anything, because `generatorChanged` defaults on. And anyone trying to construct a pre-0.65.0 CRD on a
+0.65.0 provider — to see what an un-regenerated consumer experiences — has to apply the definition
+**before** the upgrade, not after: applying it afterwards moves `resourceHash` and regenerates, with
+the knob off and nothing appearing wrong. Both found by a consumer building that exact state.
 
 **It says so when it cannot work.** After writing, the digest is read back from the object the
 apiserver returned. If it is absent, the resource reports `ResolverDigestRecorded=False` with reason
