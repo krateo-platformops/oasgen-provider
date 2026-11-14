@@ -13,6 +13,195 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-14 — 0.68.0
+
+**One defect, fixed on both sides: a create that reached the vendor is no longer reported as a failed
+create, and the runtime no longer dispatches a create in the pass that proved it unnecessary.** A
+status write that lost a race after a successful create was returned as an error, so the runtime
+retried a non-idempotent operation — which on a vendor that mints the identifier means a **duplicate
+external resource**.
+
+`git log 0.67.0..0.68.0` holds **four** commits. Two change behaviour and they are the two halves of
+the same defect: **#681** (the handler) and **#683** (`unstructured-runtime` v1.17.1 → v1.18.0, which
+carries the runtime's #88). **#680** adds `retracted-versions.yaml` at the repo root — it retracts
+**0.66.0**, which is a fact about the *previous* release — and **#PENDING** is this section. Listed so
+the range reconciles.
+
+The scope was originally the handler fix alone, on the grounds that the runtime half was not yet even
+a PR. It was released while this was being prepared, so the scope was reconsidered rather than
+inherited: shipping one half would have made the consumer's deliberate race reproduction ambiguous,
+because a `create` + 409 pair could mean "the handler fix failed" or "the runtime half is missing".
+
+### A status-write failure is not a create failure (#676, #681)
+
+Three sites in `CreateWithResult` sit **after** a vendor call and returned the status-write error.
+The external resource existed; the handler reported a create failure. They now return
+`CreateResult{Requested: true}` with a Warning event recording that status could not be written and
+will be repopulated by the next Observe.
+
+**The sites were enumerated rather than assumed, and that disproved the issue's own guess.** #676 said
+the async and pending ones "may be safe to keep as errors — they should be enumerated rather than
+assumed." They are not safe. All three have a vendor call behind them: the delegated RESTAction create
+(idempotent by contract), the **dispatch** (not idempotent — a retry fires the action a second time),
+and the ordinary create.
+
+**Not gated on the error being a conflict**, deliberately. The two shapes go wrong differently and
+both are wrong, read off `unstructured-runtime` v1.17.1 rather than inferred:
+
+| the handler's error | marker | consequence |
+|---|---|---|
+| a status conflict | `worker.go:1272` returns before the marker at `:1284`; `pending` stays open | `ExternalCreateIncomplete` is true, recovery runs |
+| any other write error | `:1284` closes `pending` with `create-failed` | no loop, but a create that **landed** is recorded as failed |
+
+### Measured, and the count is what makes it an explanation
+
+keycloak-provider-kog on real Keycloak, 0.66.0, applying the CR and then immediately a second field
+manager's partial apply:
+
+```
+15:56:04.656  Observe  "Absence was inferred from an unmatched findby listing … a create will be attempted"
+              POST succeeded -- Keycloak has the client
+15:56:04.807  Create   ERROR "Updating status": status write conflicted with a newer write
+15:56:05.933           "Recovered from incomplete external create", resourceExists=true
+15:56:06.136  Create   "Performing REST call" -> 409 "Client mk-co already exists"
+              … that create+409 SIX TIMES, to ~15:59
+```
+
+The CR read `Creating: create failed: unexpected status: 409` for about three minutes. **No duplicate
+was produced only because Keycloak refuses a second client with the same `clientId`** — nothing in
+this codebase prevented one.
+
+Six attempts over three minutes is the workqueue's exponential backoff — 2s, 4s, 8s, 16s, 32s, 64s —
+which is *why* the chain below is an explanation rather than a story that fits the symptom.
+
+### There is a second, complementary defect, and it is the runtime's
+
+The repeats are not this fix's doing. After the conflict, the **Create** event is requeued unchanged
+(`worker.go:391` re-adds `obj`), the recovery confirms the resource exists and stamps `succeeded` at
+`:724` — and the same pass then falls through to `:754 case ctrlevent.Create: handleCreate(...)` with
+**no guard on what it just established**. That is the create 203ms after `resourceExists=true`.
+
+core-provider confirmed it at their own main and is changing it so a Create event in a pass whose
+recovery found the resource dispatches as **Observe**. Their test: a Create requeued after a quiet
+conflict with `Exists=true` produces zero Create calls; the control, `Exists=false` past the grace,
+produces one.
+
+**This fix stays handler-side by design**, which is core-provider's decision and not expedience: the
+runtime deliberately routes "the create's result is unknown" through its existence check with a
+two-minute grace, and **only the handler knows the vendor call landed** — which is what `CreateResult`
+exists for.
+
+**rest-dynamic-controller's `Exists` is not implicated.** `exists.go:159` catches a synthesised 404 — a
+findby that listed successfully and matched nothing — *before* the vendor-404 case, and returns an
+error rather than `false`, because nothing matched is not proof of absence (#371). The only arm that
+may return `false` is a definite vendor 404.
+
+### The runtime half (#683, runtime #88)
+
+`unstructured-runtime` v1.18.0 adds sixteen lines to `worker.go` and removes none, immediately after
+`Recovered from incomplete external create`:
+
+```go
+if resourceExists && evt.EventType == ctrlevent.Create {
+    evt.EventType = ctrlevent.Observe
+}
+```
+
+A recovery that found the resource **absent** past the grace period still dispatches the Create. That
+control arm is what makes it narrow rather than a blanket suppression of recovered creates.
+
+**#681 stops the cascade starting; #88 stops it continuing** for anything else that returns an error
+after a vendor call.
+
+The tag also carries an **opt-in** `coordination.k8s.io` Lease (`Options.Ownership`) and a log line,
+both inert here: `Ownership:` appears **zero** times in this repo against a `Pluralizer:` control of
+24. The one thing in the bump that needed checking was `readyz.go`, whose logic was **inverted** in
+that release so that the nil path now routes through a new `ownershipReadyzError()` — which returns
+`nil` when ownership is unset, so `ReadyzCheck` is unchanged. Had it not, a dependency bump would have
+altered the readiness probe.
+
+### Who is affected, measured on two corpora
+
+github-provider-kog split their 32 create verbs against GitHub's spec as pinned in their chart:
+
+| group | count | a second create |
+|---|---|---|
+| idempotent PUT | 10 | no duplicate |
+| **duplicates for certain** | **3** | `Issue`, `RepoDeployment`, `Release` with `draft:true` — measured by COUNTING objects, with Issue and RepoDeployment as positive controls |
+| refusal documented in the OAS | 3 | refused |
+| refused by the vendor, measured | 16 | refused with 422 or 409 |
+
+`Release` was the row I had recorded as unverified; probing it found the **draft** form duplicates
+while the published form is refused, because a draft does not create the tag the uniqueness check is
+on. The six **org-level** kinds were deliberately not probed (repo-level writes only), so
+`RunnerGroup` name uniqueness remains an assumption, and `DeployKey` is **void** — an org policy
+refused both attempts, so neither create ran.
+
+aruba-provider-kog: 34 of 36 kinds declare a create, 31 of those declare `additionalStatusFields`, and
+on that corpus Observe infers absence from an unmatched findby and a create is then attempted —
+measured as `AbsenceInferredFromUnmatchedListing` ×2 followed by `CannotCreateExternalResource`. For
+Aruba the outcome is a vendor-dependent convergence failure rather than a clean duplicate.
+
+So "the vendor refuses the second create" is common, and that is what kept the measured case free.
+
+> **Known issue (2026-11-14, issue 682): a create whose response carries no identifier leaves the CR
+> permanently `Ready=True`/`Available` with the external resource UNMANAGED, and this release makes that
+> state MORE reachable.** Measured on a cluster against real GitHub with a positive control. A duplicate
+> create answered with `303 See Other` is followed by Go's HTTP client, the 200 list body is read as the
+> created object, and every identifier is silently skipped. Observe then takes the findby branch, finds no
+> findby verb declared, and falls through to "assume up-to-date" at `restResources.go:442` — setting
+> `Available` and returning `{exists, upToDate}` **without making any HTTP request**. Two observes, zero
+> requests, `Ready=True` forever. A spec edit would never reach the vendor.
+>
+> **The trigger is generic**: no resolvable identifier, plus no `findby` declared, plus a previous
+> reconcile that did not error. The redirect is only one cause of the first condition.
+>
+> This is #347's latch reached by a route its guard was not built for. #347 keys on `Synced ==
+> ReconcileError` — "did the previous reconcile error" — and this shape is "the previous reconcile
+> **succeeded** and still produced no identifier".
+>
+> **And #681 above makes it more reachable, which is this release's own cost.** Before it, a status-write
+> failure returned an error, so `Synced=ReconcileError`, the guard fired, and the resource entered a noisy
+> create loop. Now the create reports success, so for a kind declaring no `findby` the same situation lands
+> in this silent latch instead. #681 is still right — a duplicate external resource is worse than either —
+> but it trades a visible loop for a false green on that combination, and saying otherwise would be
+> claiming a clean win this release does not have.
+>
+> **Detection, fleet-wide, with no cluster change**: the latch sets a literal message.
+>
+> ```
+> kubectl get <kind> -A -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Ready")].message}{"\n"}{end}' | grep "API call not found for FindBy"
+> ```
+>
+> A match on a resource that should be addressable is an instance. **Do not simply delete the CR**: for a
+> kind whose identifier was never recorded, the external resource exists and nothing references it, so
+> deleting the CR orphans it rather than cleaning up.
+>
+> No fix in this release. The two obvious ones are both wrong — reporting not-exists re-creates a resource
+> that already exists, and latching `Available` is the defect — so it needs a decision rather than a patch.
+> Tracked in #682.
+
+### Known limitation
+
+> **Known issue (2026-11-14, issue 466): the Warning event is the only record of a status-write
+> failure, and events expire.** If a status write fails *repeatedly* on a resource that does exist,
+> the CR's own status is by construction the thing that cannot record it. `status.observedGeneration`
+> is the durable channel for this — it works because the signal is the **absence of advance** rather
+> than a write made at the bad moment, and `metadata.generation` sits on the main resource so it stays
+> readable while status writes fail. The field is already **declared** (plumbing's crdgen injects it;
+> aruba-provider-kog measured it served on 36/36 CRDs at two pins), but **nothing in
+> rest-dynamic-controller writes it**. Raised by aruba-provider-kog; tracked in #466.
+
+### Verification
+
+`go test -race -tags=unit ./...` across both modules: 42 packages ok, 0 failures, no data race. The
+tests are mutation-verified on five arms, each expected to fail for a named reason and all five did —
+including one that moved the source test's anchor so its **control** had to fire rather than its count,
+checked by reading which message appeared rather than by the test going red.
+
+**Not exercised at the time of tagging.** Nothing in 0.68.0 has run on a cluster. keycloak-provider-kog
+will reproduce the race deliberately on the shape that produced it.
+
 ## 2026-11-14 — 0.67.0
 
 **One change: `unstructured-runtime` v1.17.0 → v1.17.1, which stops a no-`create`-verb kind writing
