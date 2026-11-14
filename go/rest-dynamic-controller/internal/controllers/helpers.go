@@ -3,6 +3,7 @@ package restResources
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/comparison"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/deepcopy"
@@ -31,7 +32,33 @@ const (
 // compareScope selects which spec fields participate: "" / "fullSpec" compares the whole spec;
 // "identifiersAndStatus" and "updatable" both restrict the comparison to scopeFields, which the caller has
 // populated accordingly (identifiers + additionalStatusFields, or the update body's expressible paths).
-func isCRUpdated(mg *unstructured.Unstructured, rm map[string]interface{}, compareScope string, scopeFields []string, listSemantics comparison.ListSemantics) (comparison.ComparisonResult, error) {
+// resolverSourcePaths returns the CR-side paths that stripResolverSources removes from a request body
+// for this verb, normalised the way the comparison looks them up (#663).
+//
+// IT MIRRORS stripResolverSources EXACTLY -- the same `Resolver != nil && InCustomResource != ""`
+// condition and the same chained TrimPrefix of "spec." then "status." (builder.go:739). The two must
+// agree about which paths the request never carried, and the failure of disagreement is silent in both
+// directions: a path this function misses is compared against a vendor that never received it, and a
+// path it invents stops being compared at all.
+func resolverSourcePaths(verb *getter.VerbsDescription) []string {
+	if verb == nil {
+		return nil
+	}
+	var out []string
+	for _, m := range verb.FieldMapping {
+		if m.Resolver == nil || m.InCustomResource == "" {
+			continue
+		}
+		trimmed := strings.TrimPrefix(strings.TrimPrefix(m.InCustomResource, "spec."), "status.")
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func isCRUpdated(mg *unstructured.Unstructured, rm map[string]interface{}, compareScope string, scopeFields []string, cmp *comparison.Comparer) (comparison.ComparisonResult, error) {
 	//log.Print("isCRUpdated - starting comparison between mg spec and rm")
 	if mg == nil {
 		return comparison.ComparisonResult{
@@ -66,11 +93,17 @@ func isCRUpdated(mg *unstructured.Unstructured, rm map[string]interface{}, compa
 		}
 	}
 
-	// listSemantics names what the OAS declares about the shape of this operation's arrays: sets
-	// (`uniqueItems: true` with scalar items) are compared as multisets (#617), and map-lists
-	// (`x-kubernetes-list-type: map`) are matched by their declared keys (#650). Every other array
-	// stays positional, and the zero value yields a comparer identical to the historical one.
-	return listSemantics.Comparer().CompareExisting(m, rm)
+	// THE COMPARER IS ASSEMBLED BY THE CALLER, not here. It needs three unrelated facts -- what the
+	// document says about this operation's arrays (#617, #650) and what this controller strips from the
+	// request body (#663) -- and only the call site has all of them. Passing them in as parameters
+	// instead would have made this a six-argument function whose arguments must be kept in the right
+	// order by hand.
+	//
+	// A nil comparer is the historical behaviour, so every existing caller and test is unaffected.
+	if cmp == nil {
+		cmp = comparison.NewComparer(nil)
+	}
+	return cmp.CompareExisting(m, rm)
 }
 
 // projectSpecFields returns a new map containing only the given dot-notation paths that are present in spec,

@@ -101,6 +101,11 @@ type Comparer struct {
 	// setPaths holds dot-notation paths, with array indices removed, of arrays whose schema declares
 	// `uniqueItems: true` with scalar items.
 	setPaths map[string]struct{}
+	// strippedPaths holds dot-notation paths, with array indices removed, that the REQUEST never
+	// carries: the CR-side source of a resolver, which stripResolverSources removes from the body
+	// before the call (#663). The vendor therefore cannot hold them, so comparing them is never
+	// meaningful.
+	strippedPaths map[string]struct{}
 	// mapListKeys holds, for the same kind of path, the key names an array's OBJECT elements are
 	// identified by -- from `x-kubernetes-list-type: map` plus `x-kubernetes-list-map-keys` (#650).
 	//
@@ -153,6 +158,59 @@ func (c *Comparer) WithMapListKeys(keys map[string][]string) *Comparer {
 		c.mapListKeys = nil
 	}
 	return c
+}
+
+// WithStrippedPaths declares the CR-side paths the request never carries -- a resolver's
+// inCustomResource, which stripResolverSources removes from the body (#663).
+//
+// NOT PART OF ListSemantics, deliberately. Those describe what a DOCUMENT says about the shape of its
+// arrays and are read from the OAS; this is a fact about what this controller DOES to the request
+// body, derived from the RestDefinition's own fieldMapping with no document read at all. Merging them
+// would put two unrelated derivations behind one name.
+func (c *Comparer) WithStrippedPaths(paths []string) *Comparer {
+	if len(paths) == 0 {
+		return c
+	}
+	c.strippedPaths = make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		c.strippedPaths[p] = struct{}{}
+	}
+	if len(c.strippedPaths) == 0 {
+		c.strippedPaths = nil
+	}
+	return c
+}
+
+// isStrippedPath reports whether this path is a resolver source the request never carried.
+func (c *Comparer) isStrippedPath(path []string) bool {
+	if len(c.strippedPaths) == 0 || len(path) == 0 {
+		return false
+	}
+	joined, ok := normalisePath(path)
+	if !ok {
+		return false
+	}
+	_, found := c.strippedPaths[joined]
+	return found
+}
+
+// comparableKeyCount returns how many of mg's keys at this path the request could actually have
+// carried -- that is, all of them except resolver sources.
+func (c *Comparer) comparableKeyCount(mg map[string]interface{}, path []string) int {
+	if len(c.strippedPaths) == 0 {
+		return len(mg)
+	}
+	n := 0
+	for key := range mg {
+		if c.isStrippedPath(childPath(path, key)) {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // normalisePath strips array index segments and joins the rest, so a declaration-derived path and a
@@ -260,7 +318,24 @@ func (c *Comparer) CompareExisting(mg map[string]interface{}, rm map[string]inte
 	// It does not disturb the absent-key rule below, which #309's remedy depends on: a responseTransform
 	// that DELETES a masked field makes the key absent, not empty, and absent is still skipped. The two
 	// compose -- deliberately unobservable stays silent, observably-empty now speaks.
-	if len(mg) > 0 && len(rm) == 0 {
+	// A RESOLVER SOURCE IS NOT CONTENT THE VENDOR COULD HAVE HELD (#663), so it does not count here.
+	//
+	// stripResolverSources removes a resolver's inCustomResource from the request body, leaving the
+	// containing object present-but-EMPTY. The vendor stores `{}` because that is what it was sent, and
+	// the check below then correctly observed a CR-populated object against a remote-empty one. Two
+	// individually-correct mechanisms: my strip created the asymmetry my comparison flagged. Measured
+	// on a live Ironic node -- `extra` holding only `bmc_secret` burned five real PATCHes at 180s
+	// intervals and latched at DriftNotConverging, while the SAME definition converged on a node whose
+	// `extra` had other keys, so the fleet divided into permanently-broken and healthy as a function of
+	// when the bridge script had run.
+	//
+	// SO ONLY THE KEYS THE REQUEST COULD HAVE CARRIED ARE COUNTED. That keeps this check at full
+	// strength for the case it exists for -- which is the OTHER real Ironic measurement in the comment
+	// above: `instance_info: {}` against a CR carrying image_source and image_checksum. Those are
+	// ordinary API fields, the request DID carry them, no key is discounted, and it stays drift. The two
+	// cases are the same shape with opposite correct answers, discriminated by exactly one thing:
+	// whether the request ever sent the key.
+	if c.comparableKeyCount(mg, path) > 0 && len(rm) == 0 {
 		return ComparisonResult{
 			IsEqual: false,
 			Reason: &Reason{
@@ -298,6 +373,16 @@ func (c *Comparer) CompareExisting(mg map[string]interface{}, rm map[string]inte
 		value := mg[key]
 		currentPath := childPath(path, key)
 		pathStr := fmt.Sprintf("%v", currentPath)
+
+		// A RESOLVER SOURCE IS SKIPPED OUTRIGHT (#663), before the absent-key rule rather than relying
+		// on it. The absent-key rule already covers the usual case -- the vendor cannot return a key the
+		// request never sent -- but a vendor that echoes unknown fields back WOULD return it, and
+		// comparing the CR's `{name, key}` pointer against whatever it echoed is meaningless either way.
+		// Skipping on the declaration rather than on the response makes the outcome independent of how
+		// chatty the vendor is.
+		if c.isStrippedPath(currentPath) {
+			continue
+		}
 
 		rmValue, ok := rm[key]
 		if !ok {
