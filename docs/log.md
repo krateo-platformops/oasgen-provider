@@ -24,7 +24,7 @@ external resource**.
 `git log 0.67.0..0.68.0` holds **four** commits. Two change behaviour and they are the two halves of
 the same defect: **#681** (the handler) and **#683** (`unstructured-runtime` v1.17.1 → v1.18.0, which
 carries the runtime's #88). **#680** adds `retracted-versions.yaml` at the repo root — it retracts
-**0.66.0**, which is a fact about the *previous* release — and **#PENDING** is this section. Listed so
+**0.66.0**, which is a fact about the *previous* release — and **#686** is this section. Listed so
 the range reconciles.
 
 The scope was originally the handler fix alone, on the grounds that the runtime half was not yet even
