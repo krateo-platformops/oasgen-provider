@@ -215,6 +215,10 @@ func (m *mockAsyncClient) SetTypedArrayPaths(httpMethod string, path string) ([]
 	return nil, nil
 }
 
+func (m *mockAsyncClient) ListMapKeyPaths(httpMethod string, path string) (map[string][]string, error) {
+	return nil, nil
+}
+
 func (m *mockAsyncClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
 	return nil, nil
 }

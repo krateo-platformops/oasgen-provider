@@ -31,7 +31,7 @@ const (
 // compareScope selects which spec fields participate: "" / "fullSpec" compares the whole spec;
 // "identifiersAndStatus" and "updatable" both restrict the comparison to scopeFields, which the caller has
 // populated accordingly (identifiers + additionalStatusFields, or the update body's expressible paths).
-func isCRUpdated(mg *unstructured.Unstructured, rm map[string]interface{}, compareScope string, scopeFields []string, setTypedPaths []string) (comparison.ComparisonResult, error) {
+func isCRUpdated(mg *unstructured.Unstructured, rm map[string]interface{}, compareScope string, scopeFields []string, listSemantics comparison.ListSemantics) (comparison.ComparisonResult, error) {
 	//log.Print("isCRUpdated - starting comparison between mg spec and rm")
 	if mg == nil {
 		return comparison.ComparisonResult{
@@ -66,10 +66,11 @@ func isCRUpdated(mg *unstructured.Unstructured, rm map[string]interface{}, compa
 		}
 	}
 
-	// setTypedPaths names the arrays the OAS declares as sets (`uniqueItems: true` with scalar items).
-	// Those are compared as multisets; every other array stays positional, and an empty list yields a
-	// comparer identical to the historical one (#617).
-	return comparison.NewComparer(setTypedPaths).CompareExisting(m, rm)
+	// listSemantics names what the OAS declares about the shape of this operation's arrays: sets
+	// (`uniqueItems: true` with scalar items) are compared as multisets (#617), and map-lists
+	// (`x-kubernetes-list-type: map`) are matched by their declared keys (#650). Every other array
+	// stays positional, and the zero value yields a comparer identical to the historical one.
+	return listSemantics.Comparer().CompareExisting(m, rm)
 }
 
 // projectSpecFields returns a new map containing only the given dot-notation paths that are present in spec,

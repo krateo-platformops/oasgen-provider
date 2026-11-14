@@ -1,6 +1,7 @@
 package restResources
 
 import (
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/comparison"
 	"testing"
 
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
@@ -262,7 +263,7 @@ func TestIsCRUpdated(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// nil set paths: every array compared positionally, which is what this table has always
 			// asserted and must keep asserting (#617).
-			result, err := isCRUpdated(tt.mg, tt.rm, tt.compareScope, tt.scopeFields, nil)
+			result, err := isCRUpdated(tt.mg, tt.rm, tt.compareScope, tt.scopeFields, comparison.ListSemantics{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("isCRUpdated() error = %v, wantErr %v", err, tt.wantErr)
 				return

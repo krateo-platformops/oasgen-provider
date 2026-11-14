@@ -14,6 +14,7 @@ import (
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/apiaction"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/comparison"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/fieldmapping"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
@@ -717,25 +718,35 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		// positionally, which is what this code did before -- so the cost of a derivation error is the
 		// old behaviour rather than a stalled resource. It is logged rather than swallowed, because the
 		// old behaviour includes the re-PUT loop and nobody should have to infer that from silence.
-		var setTypedPaths []string
+		//
+		// BOTH HALVES FROM THE SAME CLIENT AND THE SAME OPERATION, in one loop. Deriving the map-list
+		// keys in a second loop would be two chances to pick a different verb or a different client
+		// for one comparison, with nothing to catch the mismatch -- the two are one fact about one
+		// operation, which is why they travel as one value.
+		var listSemantics comparison.ListSemantics
 		for _, v := range clientInfo.Resource.VerbsDescription {
 			if !strings.EqualFold(v.Action, string(apiaction.Update)) {
 				continue
 			}
 			ucli, serr := cs.For(ctx, string(apiaction.Update))
 			if serr != nil {
-				log.Error(serr, "Deriving set-typed array paths for drift comparison; every array will be compared positionally")
+				log.Error(serr, "Deriving list semantics for drift comparison; every array will be compared positionally")
 				break
 			}
-			setTypedPaths, serr = ucli.SetTypedArrayPaths(v.Method, v.Path)
+			listSemantics.SetPaths, serr = ucli.SetTypedArrayPaths(v.Method, v.Path)
 			if serr != nil {
 				log.Error(serr, "Deriving set-typed array paths for drift comparison; every array will be compared positionally")
-				setTypedPaths = nil
+				listSemantics.SetPaths = nil
+			}
+			listSemantics.MapListKeys, serr = ucli.ListMapKeyPaths(v.Method, v.Path)
+			if serr != nil {
+				log.Error(serr, "Deriving map-list keys for drift comparison; arrays of objects will be compared positionally")
+				listSemantics.MapListKeys = nil
 			}
 			break
 		}
 
-		res, err := isCRUpdated(mg, b, clientInfo.Resource.CompareScope, scopeFields, setTypedPaths)
+		res, err := isCRUpdated(mg, b, clientInfo.Resource.CompareScope, scopeFields, listSemantics)
 		if err != nil {
 			log.Error(err, "Checking if CR is updated")
 			return controller.ExternalObservation{}, err

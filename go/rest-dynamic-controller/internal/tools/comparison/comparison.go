@@ -101,6 +101,15 @@ type Comparer struct {
 	// setPaths holds dot-notation paths, with array indices removed, of arrays whose schema declares
 	// `uniqueItems: true` with scalar items.
 	setPaths map[string]struct{}
+	// mapListKeys holds, for the same kind of path, the key names an array's OBJECT elements are
+	// identified by -- from `x-kubernetes-list-type: map` plus `x-kubernetes-list-map-keys` (#650).
+	//
+	// A SEPARATE FIELD RATHER THAN A WIDER setPaths, because the two arms answer different questions
+	// and a path can only be one of them: a set is matched BY VALUE and needs scalar elements, a
+	// map-list is matched BY KEY and needs object elements. Merging them would make "which arm" a
+	// property of the data rather than of the declaration, which is the guess this feature exists to
+	// remove.
+	mapListKeys map[string][]string
 }
 
 // NewComparer returns a Comparer that treats the given dot-notation paths as sets.
@@ -122,6 +131,82 @@ func NewComparer(setTypedPaths []string) *Comparer {
 	return c
 }
 
+// WithMapListKeys declares arrays whose object elements are identified by key, keyed by the same
+// dot-notation path as setPaths. The map comes from UnstructuredClient.ListMapKeyPaths.
+//
+// A MODIFIER RATHER THAN A SECOND CONSTRUCTOR. NewComparer has existing callers and tests that must
+// stay unaffected, and a NewComparerWithListSemantics beside it would be two ways to build one thing
+// -- the shape where a future edit keeps the decorative one. Returns the receiver so the single call
+// site reads as one expression.
+func (c *Comparer) WithMapListKeys(keys map[string][]string) *Comparer {
+	if len(keys) == 0 {
+		return c
+	}
+	c.mapListKeys = make(map[string][]string, len(keys))
+	for path, names := range keys {
+		if path == "" || len(names) == 0 {
+			continue
+		}
+		c.mapListKeys[path] = names
+	}
+	if len(c.mapListKeys) == 0 {
+		c.mapListKeys = nil
+	}
+	return c
+}
+
+// normalisePath strips array index segments and joins the rest, so a declaration-derived path and a
+// runtime path meet. Shared by both arms so they cannot disagree about what a path is.
+func normalisePath(path []string) (string, bool) {
+	if len(path) == 0 {
+		return "", false
+	}
+	kept := make([]string, 0, len(path))
+	for _, seg := range path {
+		if _, err := strconv.Atoi(seg); err == nil {
+			continue
+		}
+		kept = append(kept, seg)
+	}
+	if len(kept) == 0 {
+		return "", false
+	}
+	return strings.Join(kept, "."), true
+}
+
+// keyedListKeys returns the declared key names for this path, or nil.
+func (c *Comparer) keyedListKeys(path []string) []string {
+	if len(c.mapListKeys) == 0 {
+		return nil
+	}
+	joined, ok := normalisePath(path)
+	if !ok {
+		return nil
+	}
+	return c.mapListKeys[joined]
+}
+
+// ListSemantics is everything a document declares about how its arrays should be compared, carried as
+// one value because both halves are derived from the SAME operation's request body and must not be
+// derived separately.
+//
+// The previous shape passed only the set paths, as a bare []string parameter. Adding the map-list
+// keys beside it would have made a sixth parameter on isCRUpdated and, worse, allowed the two to be
+// derived from different operations or different clients without anything noticing.
+type ListSemantics struct {
+	// SetPaths: arrays declared `uniqueItems: true` with scalar items, compared as multisets (#617).
+	SetPaths []string
+	// MapListKeys: arrays declared `x-kubernetes-list-type: map`, keyed by the named properties and
+	// matched by key rather than by position (#650).
+	MapListKeys map[string][]string
+}
+
+// Comparer builds the comparer these semantics describe. The zero value yields one identical to the
+// historical behaviour, so a caller that derives nothing is unaffected.
+func (ls ListSemantics) Comparer() *Comparer {
+	return NewComparer(ls.SetPaths).WithMapListKeys(ls.MapListKeys)
+}
+
 // isSetPath reports whether the array at this path is a declared set.
 //
 // ARRAY INDICES ARE STRIPPED FIRST, and that is load-bearing rather than tidy. The walk appends the
@@ -133,18 +218,12 @@ func (c *Comparer) isSetPath(path []string) bool {
 	if len(c.setPaths) == 0 || len(path) == 0 {
 		return false
 	}
-	kept := make([]string, 0, len(path))
-	for _, seg := range path {
-		if _, err := strconv.Atoi(seg); err == nil {
-			continue
-		}
-		kept = append(kept, seg)
-	}
-	if len(kept) == 0 {
+	joined, ok := normalisePath(path)
+	if !ok {
 		return false
 	}
-	_, ok := c.setPaths[strings.Join(kept, ".")]
-	return ok
+	_, found := c.setPaths[joined]
+	return found
 }
 
 // CompareExisting compares a CR's spec against a remote body, positionally. It is the historical entry
@@ -385,6 +464,21 @@ func (c *Comparer) compareSlices(valueSlice, rmSlice []interface{}, path []strin
 	// positional walk rather than guessing.
 	if c.isSetPath(path) && allScalar(valueSlice) && allScalar(rmSlice) {
 		return compareAsMultiset(valueSlice, rmSlice, path), nil
+	}
+
+	// A DECLARED MAP-LIST IS MATCHED BY KEY, not by position (#650).
+	//
+	// The twin of the arm above, for the case its comment used to send readers elsewhere for: an array
+	// of OBJECTS that a vendor stores as a set and returns in an arbitrary order. Position then means
+	// nothing, and a positional walk reports a difference no update can retire -- the element it
+	// rewrites comes back in a different slot next time.
+	//
+	// Only when the schema says so, via `x-kubernetes-list-type: map` plus
+	// `x-kubernetes-list-map-keys`, and only when BOTH sides actually hold objects. If the data
+	// disagrees with the declaration this falls through to the positional walk rather than guessing,
+	// exactly as the set arm does for objects-where-scalars-were-declared.
+	if keys := c.keyedListKeys(path); len(keys) > 0 && allObjects(valueSlice) && allObjects(rmSlice) {
+		return c.compareAsKeyedList(valueSlice, rmSlice, keys, path)
 	}
 
 	for i, v := range valueSlice {
@@ -733,4 +827,173 @@ func compareAsMultiset(valueSlice, rmSlice []interface{}, path []string) Compari
 		}
 	}
 	return ComparisonResult{IsEqual: true}
+}
+
+// allObjects reports whether every element is a JSON object, which is what key matching needs.
+//
+// The mirror of allScalar, and the two are deliberately exclusive: an array cannot be matched both by
+// value and by key, so a path declared as one kind whose data is the other falls back to positional
+// rather than taking the arm that cannot work on it.
+func allObjects(s []interface{}) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, v := range s {
+		if _, ok := v.(map[string]interface{}); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// keyTupleOf builds the identity of a map-list element from its declared key names.
+//
+// LENGTH-PREFIXED, not joined on a separator. `{a: "x|y", b: "z"}` and `{a: "x", b: "y|z"}` are
+// different elements and a `|`-joined tuple makes them the same string -- the collision is silent and
+// turns two elements into one match. Writing each value's length ahead of it makes the encoding
+// injective, which is the same reason the resolver digest is built that way.
+//
+// A MISSING OR NON-SCALAR KEY IS NOT AN EMPTY KEY. It means this element cannot be identified by the
+// declared keys at all, which is a declaration problem rather than a difference, so it is reported
+// with its own reason instead of being silently grouped with every other element that also lacks one.
+func keyTupleOf(elem map[string]interface{}, keys []string) (string, string) {
+	var b strings.Builder
+	for _, k := range keys {
+		v, present := elem[k]
+		if !present || v == nil {
+			return "", k
+		}
+		switch v.(type) {
+		case map[string]interface{}, []interface{}:
+			return "", k
+		}
+		part := fmt.Sprintf("%v", v)
+		fmt.Fprintf(&b, "%d:%s\n", len(part), part)
+	}
+	return b.String(), ""
+}
+
+// describeKeys renders an element's key values for a human reading a condition message. "name=foo" is
+// actionable where "element 3" is not, which is the whole point of matching by key.
+func describeKeys(elem map[string]interface{}, keys []string) string {
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if v, ok := elem[k]; ok {
+			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+		} else {
+			parts = append(parts, k+"=<absent>")
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// compareAsKeyedList matches elements by their declared key tuple and compares each matched pair.
+//
+// The caller has already established that the lengths are equal and that both sides hold objects, so
+// an unmatched CR element implies an unmatched remote element and neither side needs a second pass.
+//
+// A DUPLICATE TUPLE IS REPORTED, NOT RESOLVED. The apiserver refuses duplicate keys in a map-list, so
+// the CR side cannot hold them once its CRD declares the type -- but nothing constrains the vendor,
+// and an older CRD does not constrain the CR either. Picking one of two elements with the same
+// identity would make the result depend on map iteration order, and falling back to positional would
+// silently restore the bug. Reporting it names the declaration that needs fixing, and the
+// non-convergence guard bounds the cost at a handful of writes.
+func (c *Comparer) compareAsKeyedList(valueSlice, rmSlice []interface{}, keys []string, path []string) (ComparisonResult, error) {
+	index := make(map[string]map[string]interface{}, len(rmSlice))
+	for _, raw := range rmSlice {
+		elem := raw.(map[string]interface{})
+		tuple, missing := keyTupleOf(elem, keys)
+		if missing != "" {
+			return ComparisonResult{
+				IsEqual: false,
+				Reason: &Reason{
+					Reason: fmt.Sprintf("the remote has an element with no usable value for declared list key %q, "+
+						"so x-kubernetes-list-map-keys cannot identify it", missing),
+					FirstValue: valueSlice, SecondValue: elem, Path: path,
+				},
+			}, nil
+		}
+		if _, clash := index[tuple]; clash {
+			return ComparisonResult{
+				IsEqual: false,
+				Reason: &Reason{
+					Reason: fmt.Sprintf("the remote has more than one element with %s, so the declared "+
+						"x-kubernetes-list-map-keys do not identify elements at this path",
+						describeKeys(elem, keys)),
+					FirstValue: valueSlice, SecondValue: rmSlice, Path: path,
+				},
+			}, nil
+		}
+		index[tuple] = elem
+	}
+
+	seen := make(map[string]struct{}, len(valueSlice))
+	for i, raw := range valueSlice {
+		elem := raw.(map[string]interface{})
+		tuple, missing := keyTupleOf(elem, keys)
+		if missing != "" {
+			return ComparisonResult{
+				IsEqual: false,
+				Reason: &Reason{
+					Reason: fmt.Sprintf("the custom resource has an element with no usable value for declared "+
+						"list key %q, so x-kubernetes-list-map-keys cannot identify it", missing),
+					FirstValue: elem, SecondValue: rmSlice, Path: path,
+				},
+			}, nil
+		}
+		if _, dup := seen[tuple]; dup {
+			return ComparisonResult{
+				IsEqual: false,
+				Reason: &Reason{
+					Reason: fmt.Sprintf("the custom resource has more than one element with %s, so the declared "+
+						"x-kubernetes-list-map-keys do not identify elements at this path",
+						describeKeys(elem, keys)),
+					FirstValue: valueSlice, SecondValue: rmSlice, Path: path,
+				},
+			}, nil
+		}
+		seen[tuple] = struct{}{}
+
+		counterpart, ok := index[tuple]
+		if !ok {
+			return ComparisonResult{
+				IsEqual: false,
+				Reason: &Reason{
+					Reason:     fmt.Sprintf("no element with %s on the remote", describeKeys(elem, keys)),
+					FirstValue: elem, SecondValue: rmSlice, Path: path,
+				},
+			}, nil
+		}
+
+		// THE MATCHED PAIR IS COMPARED WITH THE ORDINARY RULES, through the RECEIVER, including the
+		// absent-key skip -- so a cluster-only field inside an element is no more drift here than
+		// anywhere else, and a set or map-list declared INSIDE an element keeps its semantics.
+		//
+		// `c.CompareExisting`, not the package-level function: that one builds a zero-value Comparer,
+		// which would silently drop every declaration for everything nested inside a keyed element.
+		//
+		// THE PATH CARRIES THE CR-SIDE INDEX, not the key values, and this is the opposite of what it
+		// first looked like it should be. Keys read better in a message -- but the path is also what
+		// the DECLARATION lookup normalises, so a `name=foo` segment would make a nested declared
+		// array arrive as `rules.name=foo.conditions` and match no schema path at all, losing its
+		// semantics for exactly the documents this feature is for. The CR-side index is schema-shaped
+		// AND stable between polls, because the CR is the side that does not reorder: the remote's
+		// order is arbitrary, the CR's is whatever the author wrote. So the drift signature stays put
+		// and the nested lookups still resolve.
+		//
+		// The key values go in the REASON instead, where "name=foo" is actionable and an index is not.
+		elemPath := childPath(path, strconv.Itoa(i))
+		inner, ierr := c.CompareExisting(elem, counterpart, elemPath...)
+		if ierr != nil {
+			return ComparisonResult{IsEqual: false}, ierr
+		}
+		if !inner.IsEqual {
+			if inner.Reason != nil {
+				inner.Reason.Reason = fmt.Sprintf("%s (element matched by %s)",
+					inner.Reason.Reason, describeKeys(elem, keys))
+			}
+			return inner, nil
+		}
+	}
+	return ComparisonResult{IsEqual: true}, nil
 }

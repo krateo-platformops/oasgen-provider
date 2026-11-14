@@ -130,6 +130,10 @@ func (r *recordingClient) SetTypedArrayPaths(httpMethod string, path string) ([]
 	return nil, nil
 }
 
+func (r *recordingClient) ListMapKeyPaths(httpMethod string, path string) (map[string][]string, error) {
+	return nil, nil
+}
+
 func (r *recordingClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
 	return nil, nil
 }

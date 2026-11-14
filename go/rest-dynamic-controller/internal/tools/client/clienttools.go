@@ -99,6 +99,9 @@ type UnstructuredClientInterface interface {
 	// introspection that a caller holding the interface needs, in this case to know which arrays the
 	// document declares as sets so the drift comparison does not report a reordered set as drift (#617).
 	SetTypedArrayPaths(httpMethod string, path string) ([]string, error)
+	// ListMapKeyPaths is here for the same reason: it answers a question about the DOCUMENT, and the
+	// comparison needs it at the same moment it needs the set-typed paths.
+	ListMapKeyPaths(httpMethod string, path string) (map[string][]string, error)
 	FindBy(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration, findByAction *getter.VerbsDescription) (Response, error)
 	Call(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration) (Response, error)
 	// ServerURL is the EXTERNAL endpoint this client calls -- the document's servers[0].url. Here for the
@@ -507,11 +510,15 @@ func (u *UnstructuredClient) UpdatableBodyPaths(httpMethod string, path string) 
 // (#617). Keycloak stores a realm's `enabledEventTypes` as a Java Set and returns it in hash order, so 23
 // unchanged names were reported as drift on every resync and the realm was re-PUT every three minutes.
 //
-// SCALAR ITEMS ONLY, because that is what can be matched by value. A multiset of objects needs a key to
-// match elements by, which is a different question answered elsewhere by identifiersMatchPolicy. It also
-// matches where the CRD lands: plumbing's crdgen turns `uniqueItems` plus scalar items into
-// `x-kubernetes-list-type: set` and gives non-scalar arrays a CEL rule instead, so the scalar arm is the
-// one that is actually a declared set on both sides.
+// SCALAR ITEMS ONLY, because that is what can be matched by value. An array of OBJECTS needs a key to
+// match elements by, which is ListMapKeyPaths below (#650) -- NOT identifiersMatchPolicy, which this
+// comment used to name and which governs findby matching rather than array elements.
+//
+// It also matches where the CRD lands: plumbing's crdgen turns `uniqueItems` plus scalar items into
+// `x-kubernetes-list-type: set`. A non-scalar array used to get only a CEL rule, which is why this
+// comment once said the scalar arm was the only one declared on both sides; since #658 a document can
+// declare `x-kubernetes-list-type: map` on an array of objects and have it reach the CRD, so the two
+// arms are now symmetric.
 //
 // Mirrors UpdatableBodyPaths deliberately -- same document resolution, same media-type handling, same
 // "no schema is a true answer rather than a dropped one" -- so the two cannot drift apart in how they
@@ -545,6 +552,135 @@ func (u *UnstructuredClient) SetTypedArrayPaths(httpMethod string, path string) 
 	var out []string
 	collectSetTypedArrayPaths(schema, "", &out, 0)
 	return out, nil
+}
+
+// ListMapKeyPaths returns, for every declared map-list within the given operation's request body, the
+// dot-notation path of the array and the key names its elements are identified by (#650).
+//
+// THE TWIN OF SetTypedArrayPaths, and deliberately a mirror of it: same document resolution, same
+// media-type handling, same "an operation with no request body schema is a true empty answer rather
+// than a dropped one". Those three are the things that must not drift between the two, because a
+// third sibling resolving operations its own way is how they come to disagree about which operation
+// they are even looking at.
+//
+// BOTH EXTENSIONS ARE REQUIRED. `x-kubernetes-list-map-keys` without `x-kubernetes-list-type: map` is
+// not a declared map-list, and honouring the keys anyway would give a half-declared document
+// different comparison semantics with nothing saying so. The generator side already refuses to emit a
+// malformed value rather than silently passing it through; this is the same choice at the other end.
+func (u *UnstructuredClient) ListMapKeyPaths(httpMethod string, path string) (map[string][]string, error) {
+	if u.DocScheme == nil || u.DocScheme.Model.Paths == nil {
+		return nil, fmt.Errorf("document scheme or model is nil")
+	}
+	pathItem, ok := u.DocScheme.Model.Paths.PathItems.Get(path)
+	if !ok {
+		return nil, fmt.Errorf("path not found: %s", path)
+	}
+	op, ok := pathItem.GetOperations().Get(strings.ToLower(httpMethod))
+	if !ok {
+		return nil, fmt.Errorf("operation not found: %s", httpMethod)
+	}
+	if op.RequestBody == nil || op.RequestBody.Content == nil {
+		return nil, nil
+	}
+	bodySchema, _, mErr := resolveRequestBodyMedia(op.RequestBody)
+	if mErr != nil {
+		return nil, fmt.Errorf("resolving request body media type for %s %s: %w", httpMethod, path, mErr)
+	}
+	if bodySchema == nil {
+		return nil, nil
+	}
+	schema, err := bodySchema.Schema.BuildSchema()
+	if err != nil {
+		return nil, fmt.Errorf("building schema for %s: %w", path, err)
+	}
+	out := map[string][]string{}
+	collectListMapKeyPaths(schema, "", out, 0)
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// listMapKeysOf reads the two extensions off one array schema and returns the declared key names, or
+// nil when this array is not a declared map-list.
+//
+// A BARE SCALAR IS LIFTED into a single-element list, matching what the generator does: a document
+// writing `x-kubernetes-list-map-keys: name` rather than a sequence is a plausible authoring mistake,
+// and the generator already normalises it rather than emitting something the apiserver would refuse.
+// The two ends must agree about what that document means, or the CRD says one thing and the
+// comparison does another.
+func listMapKeysOf(schema *base.Schema) []string {
+	if schema == nil || schema.Extensions == nil {
+		return nil
+	}
+	typeNode := schema.Extensions.GetOrZero("x-kubernetes-list-type")
+	if typeNode == nil {
+		return nil
+	}
+	var listType string
+	if err := typeNode.Decode(&listType); err != nil || listType != "map" {
+		return nil
+	}
+	keysNode := schema.Extensions.GetOrZero("x-kubernetes-list-map-keys")
+	if keysNode == nil {
+		return nil
+	}
+	var keys []string
+	if err := keysNode.Decode(&keys); err == nil && len(keys) > 0 {
+		return keys
+	}
+	var single string
+	if err := keysNode.Decode(&single); err == nil && single != "" {
+		return []string{single}
+	}
+	return nil
+}
+
+// collectListMapKeyPaths walks a request-body schema and records every declared map-list.
+//
+// Shaped like collectSetTypedArrayPaths: allOf flattened at each level, depth bounded so a
+// self-referential schema cannot loop, descending INTO array items so a map-list nested inside an
+// array of objects is found, and emitting item paths with NO index segment because the comparison
+// strips numeric segments from the runtime path before looking one up.
+func collectListMapKeyPaths(schema *base.Schema, prefix string, out map[string][]string, depth int) {
+	if schema == nil || depth > 20 {
+		return
+	}
+	populateFromAllOf(schema)
+
+	if len(schema.Type) > 0 && schema.Type[0] == "array" {
+		if schema.Items == nil || schema.Items.N != 0 {
+			return
+		}
+		items, err := schema.Items.A.BuildSchema()
+		if err != nil || items == nil {
+			return
+		}
+		// The declaration lives on the ARRAY, not on its items, which is where Kubernetes puts it.
+		if prefix != "" && !isScalarSchema(items) {
+			if keys := listMapKeysOf(schema); len(keys) > 0 {
+				out[prefix] = keys
+			}
+		}
+		// Descend regardless, so a map-list declared inside these items is found too.
+		collectListMapKeyPaths(items, prefix, out, depth+1)
+		return
+	}
+
+	if schema.Properties == nil || schema.Properties.Len() == 0 {
+		return
+	}
+	for prop := schema.Properties.First(); prop != nil; prop = prop.Next() {
+		child, err := prop.Value().BuildSchema()
+		if err != nil {
+			continue
+		}
+		next := prop.Key()
+		if prefix != "" {
+			next = prefix + "." + prop.Key()
+		}
+		collectListMapKeyPaths(child, next, out, depth+1)
+	}
 }
 
 // collectSetTypedArrayPaths walks a request-body schema and appends the dot-notation path of every
