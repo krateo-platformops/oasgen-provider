@@ -107,8 +107,21 @@ creation, and the being-deleted refusal already returned `Requested:false`.
 > kubectl get <kind> -A -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.krateo\.io/external-create-succeeded}{"\n"}{end}'
 > ```
 >
-> A non-empty value on a resource that was never created is an instance; removing the annotation
-> restores the diagnostic. The durable fix is cross-repo and is tracked in #672.
+> A non-empty value on a resource that was never created is an instance.
+>
+> **Do NOT remove only that annotation.** A falsely-stamped CR carries **both**
+> `external-create-pending` and `external-create-succeeded` — the runtime's success path sets
+> `succeeded` and does not clear `pending`. `meta.ExternalCreateIncomplete` returns
+> `pending.After(latest)` where `latest` is `succeeded` (or `failed`, if later), so deleting
+> `succeeded` alone makes `latest` the zero time, `pending.After(zero)` becomes **true**, and the
+> resource flips into the `errCreateIncomplete` state: *"cannot determine creation result - remove the
+> krateo.io/external-create-pending annotation if it is safe to proceed."* That trades a suppressed
+> diagnostic for a resource demanding human adjudication of a create that never happened — worse than
+> the state it was in.
+>
+> **Remove both annotations, or delete and recreate the CR.** For a no-`create`-verb kind the recreate
+> costs nothing at the vendor, because nothing was ever created there — which makes it the better
+> advice for exactly these kinds. The durable fix is cross-repo and is tracked in #672.
 
 ### An array of objects returned reordered can converge (#650, #658, #669)
 
