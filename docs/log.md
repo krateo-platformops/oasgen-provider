@@ -13,6 +13,19 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+**Annotations.** Indented blockquotes inside a release's section are labelled, and the label says what
+kind of claim it is. The distinction is load-bearing: only the first means the text above it is wrong.
+
+| label | means |
+|---|---|
+| `Correction (date)` | **the text above was wrong.** A retraction of this file's own claim |
+| `Known issue (date, issue N)` | later news: a defect found after that release shipped. The text above stands |
+| `Runtime verification (date)` | someone measured it on a cluster afterwards, and this is what they found |
+| `Note (date)` | context that is neither a retraction nor a defect |
+
+An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
+annotation about the release.
+
 ## 2026-11-14 — 0.68.0
 
 **One defect, fixed on both sides: a create that reached the vendor is no longer reported as a failed
@@ -180,6 +193,30 @@ So "the vendor refuses the second create" is common, and that is what kept the m
 > No fix in this release. The two obvious ones are both wrong — reporting not-exists re-creates a resource
 > that already exists, and latching `Available` is the defect — so it needs a decision rather than a patch.
 > Tracked in #682.
+
+> **Note (2026-11-14): this release CHANGED the observable signature of a status-write conflict after
+> a create, so a consumer's detector keyed on the old one reads zero while the race is happening.** On
+> 0.67.0 that path logged `Updating status` with the conflict as its payload. It now routes through
+> #681's helper, which logs *"The create reached the vendor but its status write failed; reporting the
+> create as requested so it is not retried"* — the error text survives, the message does not.
+>
+> Worse for a detector: the handler no longer returns the conflict as an error, so **the runtime's own
+> `Status write lost a race to a newer write` line is not emitted for the create path either**. Both of
+> the obvious strings go quiet.
+>
+> What to key on instead, in order of robustness:
+>
+> 1. the **Warning event** on the CR, reason `Created`, message containing `status could not be
+>    written` — independent of log level and of pod restarts within the retention window;
+> 2. the log payload `status write conflicted with a newer write`, which is `tools.ErrStatusConflict`'s
+>    own text and a constant in the runtime;
+> 3. `the object has been modified`, which is the **apiserver's** wording and varies by Kubernetes
+>    version — present today, not guaranteed.
+>
+> Raised by azuredevops-provider-kog, who asked which string to use before building a probe on it
+> rather than after. A status conflict is still written exactly once and never retried
+> (unstructured-runtime #30, removed in core-provider #359), so a silent internal retry is not an
+> explanation for a detector reading zero.
 
 ### Known limitation
 
