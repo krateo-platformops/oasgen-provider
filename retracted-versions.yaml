@@ -1,0 +1,49 @@
+# Published versions of this repo's charts that must not be pinned.
+#
+# A tag cannot be withdrawn: it stays in the registry and looks like any other release. This list is
+# how a release is marked bad WHERE A PINNING SESSION WILL SEE IT -- installer's CI reads it and
+# refuses a pin on a listed version, so nothing depends on anyone having been told. A "do not pin
+# 0.66.0" sentence in a release note is not a control: nothing evaluates it, and the only thing
+# between a cluster and a bad version is a human reading prose at the moment of pinning.
+#
+# `charts` names the CHART, as in the `chart:` field of installer's component-pins.yaml -- NOT the
+# component. Those differ for twelve components there (authn-crd/authn-crds,
+# frontend-crd/frontend-crds, and ours: component `oasgen-provider-crd` -> chart
+# `oasgen-provider-crds`). An entry naming a component is scoped out and retracts NOTHING, silently,
+# which is worse than no entry at all. This repo publishes exactly three charts:
+#
+#     oasgen-provider
+#     oasgen-provider-crds
+#     controller-render-service
+#
+# ALL THREE ARE DECLARED MEMBERS OF INSTALLER'S `oasgen` VERSION LINE, and its check-same-version-line
+# gate refuses a pin where they are not in step. So a retraction must name all three even when the
+# defect lives in one of them: retracting only the provider would leave the matching
+# controller-render-service pinnable at the same bad version, with the line gate confirming they are
+# "in step".
+#
+# THE RULE FOR ADDING AN ENTRY: retract what is ACTIVELY HARMFUL, not what is merely superseded. A
+# version a consumer legitimately holds today stays available. Installer's gate has no opinion on
+# this -- it enforces whatever is listed -- so the judgement is ours and the list must not become a
+# way to push upgrades.
+#
+# AND `use:` MUST ALREADY EXIST when the entry lands. An entry whose replacement is unpublished tells
+# a pinning session to stop without telling it where to go.
+#
+# Remove an entry only when the version becomes safe again, which for a code defect means never.
+
+retracted:
+  - version: 0.66.0
+    charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
+    use: 0.67.0
+    reason: >-
+      A kind declaring no `create` verb writes krateo.io/external-create-pending about five times a
+      second, for as long as the process lives, and the CR's conditions stay correct throughout so
+      nothing in its status shows it (#674). #664 made that path return a non-error result, which lost
+      the workqueue's exponential backoff, and the runtime turns a delete of that annotation into an
+      immediate Create event -- so each pass scheduled the next. Measured on two consumers
+      independently: ~296 passes/minute, and a bisect showing 0.65.0 backing off at 2s, 2s, 4s, 8s,
+      16s where 0.66.0 does not back off at all. Every fresh install of a chart whose kind reads a
+      resource created alongside it lands here. 0.67.0 is 0.66.0 plus unstructured-runtime v1.17.1,
+      which closes the pending marker instead of deleting it; it carries 0.66.0's three fixes
+      (#668, #669, #670) unchanged, so there is no reason to pin 0.66.0 once 0.67.0 exists.
