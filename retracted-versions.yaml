@@ -31,6 +31,35 @@
 # a pinning session to stop without telling it where to go.
 #
 # Remove an entry only when the version becomes safe again, which for a code defect means never.
+#
+# WHO ENFORCES THIS LIST, and why that has to be written down. A retraction is only a control where
+# something reads it, so this mechanism's coverage is EXACTLY the set of repos that have wired it in --
+# and nothing about the mechanism makes that set visible. A version can be retracted here, declared
+# correctly, and still shipped, with every gate green everywhere, simply because the shipping repo's CI
+# never consults this file.
+#
+# That is not hypothetical. krateo-blueprints/azuredevops-provider-kog released 0.7.0 pinned to the
+# retracted 0.66.0 while this list said not to. Their pin comes straight from a blueprint repo and never
+# passes through installer's CI, so the list was never asked. Raised by the installer session, whose
+# point was that "the list is only as good as its reach and the reach is currently invisible".
+#
+# So: keep this current. An entry below is enforced for a consumer ONLY if it appears here.
+#
+#     krateo-platformops/installer            CI gate, PR #922. Fails CLOSED (rc 2) on an unreadable
+#                                             list, because a tolerated 404 reads exactly like every
+#                                             pin being clean. Proven to bite with three controls:
+#                                             all three charts at 0.66.0 fails, all three at 0.67.0
+#                                             passes, and the provider alone at 0.66.0 also fails.
+#
+#     krateo-blueprints/azuredevops-provider-kog
+#                                             hack/check-retracted.py, modelled on installer's. Reads
+#                                             the pin from $OASGEN_IMAGE, distinguishes rc 1 (refused)
+#                                             from rc 2 (unreadable) so an unreadable list can never be
+#                                             mistaken for a refusal, and was tested against THIS live
+#                                             list rather than a fixture before shipping.
+#
+# NOT a consumer: krateo-platformops/frontend keeps its own retracted-versions.yaml for its own charts.
+# It is a sibling publisher using the same format, not a reader of this file.
 
 retracted:
   - version: 0.66.0
