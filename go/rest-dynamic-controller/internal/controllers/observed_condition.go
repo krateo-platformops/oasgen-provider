@@ -40,10 +40,18 @@ import (
 //
 // WHAT IS STILL TRUE, and why this function stays. tools.UpdateStatus issues an UNCONDITIONAL API write:
 // it does not diff. So a resource whose observe never returns a body would get a status API round trip on
-// every single reconcile for as long as it exists. What that costs is now a wasted request rather than a
-// real write -- with the timestamp preserved, the object the apiserver receives is identical, so
-// resourceVersion does not move and no watcher is woken. The guard is a request-rate guard, not a
-// correctness guard, and the returned bool is what the caller uses to skip the write.
+// every single reconcile for as long as it exists. That is write amplification and it is reason enough on
+// its own -- both core-provider and openstack-ironic-operator-kog, who reported the stale half above,
+// said independently that this half stands and the guard should not be removed.
+//
+// WHAT I HAVE NOT MEASURED, stated rather than asserted: with the timestamp now preserved the object sent
+// should be byte-identical when nothing changed, in which case the apiserver's no-op semantics would mean
+// resourceVersion does not move and no watcher wakes -- i.e. the cost would be a wasted REQUEST rather
+// than a real write. That is apiserver behaviour this repo has not exercised (no local cluster), and the
+// two fakes in our own tests disagree about it: controller-runtime's bumps resourceVersion on a no-op
+// Update, client-go's dynamic fake keeps it. So treat the round trip as the known cost and the rest as
+// unverified. Either way the guard earns its place, and the returned bool is what the caller uses to skip
+// the write.
 //
 // Status AND reason are compared, not status alone: the two states carry different reasons, and a future
 // third reason on the same status would otherwise be swallowed. Note what that means NOW -- a
