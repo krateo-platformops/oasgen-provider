@@ -13,6 +13,81 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-14 — 0.67.0
+
+**One change: `unstructured-runtime` v1.17.0 → v1.17.1, which stops a no-`create`-verb kind writing
+`external-create-pending` about five times a second forever.** Cut on the bump alone rather than
+bundling other work, because the defect is live on every fresh install of a shipped chart and the
+affected consumer has no downgrade path.
+
+`git log 0.66.0..0.67.0` holds **three** commits, and only one is a change to this release: **#677**,
+the bump. **#673** and **#675** are the two known-issue blockquotes added to 0.66.0's section below —
+they document the previous release and are listed here only so the range reconciles for anyone
+checking it against this section.
+
+### The 0.66.0 write loop is fixed (#674)
+
+0.66.0's #664 made the no-create path return `Requested:false` with a **nil error**, which lost the
+workqueue's exponential backoff. The trigger was the runtime's own recovery registration:
+
+```go
+watchAnnotations.Add(ctrlevent.Create, meta.AnnotationKeyExternalCreatePending, ctrlevent.OnDelete, false)
+```
+
+**Deleting `external-create-pending` fires a `Create` event**, and `createNotRequested` deleted it
+unconditionally on every not-requested pass — so each pass scheduled the next immediately. v1.17.1
+**closes** the marker with a new `krateo.io/external-create-not-requested` timestamp instead of
+deleting it, so nothing re-triggers and the next pass waits for the normal resync.
+
+**The loop never consulted Observe**, which is why it continued after the resource became observable
+and why only a pod restart cleared it: the Create events came from the annotation delete, so nothing
+in the cycle asked whether the resource now existed. That also made the latch look in-memory.
+
+### Visible change
+
+A CR that hits the not-requested path now carries **`krateo.io/external-create-not-requested`**
+(RFC3339) and **keeps** `external-create-pending`. The pending marker is no longer deleted.
+`ExternalCreateIncomplete` counts the new marker beside `succeeded` and `failed`, so the intermittent
+incomplete-create state 0.66.0 produced on these CRs is gone with the same change.
+
+### Who was affected
+
+Any CR of a kind declaring **no `create` verb**. Two consumers, independently:
+
+- a fleet whose `LoadBalancer` and `AiKey` can never be created — held at 0.65.0 and never exposed;
+- a per-realm singleton (`get` + `update`, no create, no findby) whose chart creates it alongside the
+  realm it reads, so the first observe 404s. **Every fresh install of that chart landed here**, and it
+  could not pin 0.65.0 because its own floor requires 0.66.0's keyed array comparison.
+
+The second case is why this shipped alone. 0.66.0's section carries a known-issue note pointing here.
+
+### Evidence, since this is someone else's fix and I only bumped it
+
+The runtime owner's pass count through the real loop (informer, queue, workers, annotation watches), on
+a no-create object over 2s with a 30s resync:
+
+```
+fixed                                      1 create pass
+v1.17.0's delete restored             21,795
+v1.17.0's delete WITHOUT the watch         1      <- isolates the TRIGGER from the write
+```
+
+A consumer measured the pass **type** on a cluster — `"event":"create"` 5, `"event":"observe"` 0 —
+which ruled out the generic-informer explanation this repo had originally filed, by channel rather
+than by argument. And a second consumer bisected the backoff loss directly: on 0.65.0 the same shape
+retried at `:25, :27, :29, :33, :41, :57`, doubling; on 0.66.0 it did not back off at all.
+
+I read the v1.17.0→v1.17.1 diff rather than taking the description, and checked separately that
+`ExternalCreateIncomplete` counts the new marker — because the intermittent incomplete state was a
+second symptom and a fix for one is not automatically a fix for the other.
+
+### Not in this release
+
+**#676** — a successful create whose status write loses a race leaves `external-create-pending`
+unclosed, so the object enters the incomplete-create state and its recovery re-enters `Create`;
+measured as six `409`s on a vendor with a unique key, and duplicates on any vendor without one. Three
+releases old, needs a concurrent field manager to trigger, fix not yet written. Goes to 0.68.0.
+
 ## 2026-11-14 — 0.66.0
 
 **A slow update was silently losing a credential rotation; a create that was never requested stops
