@@ -13,6 +13,147 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-14 — 0.65.0
+
+**A rotated `secretRef` Secret is now detected as drift and pushed, which it never was; a condition
+removed because it could not win; and two claims in 0.64.0's own section below were wrong, one of
+them now measured on a cluster.**
+
+### A rotated Secret's value now reaches the vendor (#598, #646, #649)
+
+**A value sourced from a `secretRef` never appeared in the CR's spec**, because its mapping points at
+a Secret rather than a spec path — and a vendor that masks it does not return it in the observe body
+either. So the drift comparison compared nothing that moved when the Secret's content changed, and
+the rotated value was never pushed. A rotation shipped only if something *else* in the spec happened
+to change, which for a resource at steady state is never.
+
+The generated CRD now declares `status.resolvedResolversDigest`, and the controller compares it on
+observe and records it after a successful update.
+
+**IT DOES NOT HASH THE SECRET VALUE, and the issue asked for that.** #598 proposed a digest of the
+resolved values salted with the resource UID. The salt does not work: the UID is readable by the same
+`get` that reads the digest. Measured single-threaded on one machine against a UID-salted SHA-256 of
+the value — a 6-digit PIN falls out in **0.25 seconds**, eight lowercase letters in about ten seconds
+on one mid-range GPU. The values a `secretRef` points at are, by construction, ones the CR's readers
+were not granted. So each referenced Secret is fingerprinted by **name + key + `resourceVersion`**
+instead, and no secret material enters the digest or is read during observe at all. The cost is that
+a write to a Secret which does not change its value still moves the `resourceVersion`, so an update
+re-sends an unchanged value — one idempotent request, visible and attributable.
+
+**Scope is the UPDATE verb's resolvers only.** A digest difference's only remedy is an update, so a
+resolver the update does not send is one whose rotation an update cannot push — including it would
+report a difference every update fails to retire: one vendor write per poll, per CR, forever. A
+`secretRef` on `create` but not `update` is therefore deliberately not rotation-detected, and a kind
+with no `update` verb is out of scope entirely.
+
+**An absent digest is a bootstrap, not a difference**, and that is what keeps an older CRD from
+becoming an update loop. The generated status is a closed schema, so a CRD generated before this
+release **prunes** the field — the write exits 0 and returns no error. Treating the resulting empty
+value as "differs from everything" would mean compare, differ, update, write, pruned, repeat, forever,
+on every consumer that has not regenerated. Instead the current fingerprints are adopted, no update
+is issued, and the first real rotation afterwards is detected normally.
+
+**THE FIRST CONSUMER TO ADOPT A `secretRef` ON AN UPDATE VERB PAYS A CRD REGENERATION**, and nothing
+in the change advertises it. The field is declared *conditionally* — only when the update verb carries
+a `secretRef` — which keeps every other kind's CRD byte-identical, and means a definition that adopts
+one crosses the gate and has its CRD re-rendered. Where a kind's old served version is still being
+consumed, that regeneration unserves it and can block renders that pin it until a parent pin moves.
+Raised by a consumer who is about to be exactly that first adopter.
+
+**AND THE REGENERATION KNOB DOES NOT DEFER THAT ONE.** `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false`
+is the supported way to stage an upgrade — upgrade the provider, keep the CRDs where they are,
+regenerate deliberately later — and the gate it suppresses scopes only the render, so the generated
+controllers are still deployed and still take the new image. But the regeneration gate is a
+three-clause OR:
+
+```go
+if oasHash != cr.Status.OASHash || resHash != cr.Status.ResourceHash || generatorChanged {
+```
+
+and the knob only suppresses the third. `resourceHash` is a digest of the whole of `spec.resource`,
+so **adopting a `secretRef` is itself a `spec.resource` change** and moves the second clause. The knob
+defers a regeneration caused by an *upgrade*; it does not defer one caused by the *adoption*. Those
+read as the same thing from a release note and they are not.
+
+Two consequences. An upgrade alone does re-render every managed CRD without anyone re-applying
+anything, because `generatorChanged` defaults on. And anyone trying to construct a pre-0.65.0 CRD on a
+0.65.0 provider — to see what an un-regenerated consumer experiences — has to apply the definition
+**before** the upgrade, not after: applying it afterwards moves `resourceHash` and regenerates, with
+the knob off and nothing appearing wrong. Both found by a consumer building that exact state.
+
+**It says so when it cannot work.** After writing, the digest is read back from the object the
+apiserver returned. If it is absent, the resource reports `ResolverDigestRecorded=False` with reason
+`DigestFieldAbsent`, naming the remedy — re-apply the RestDefinition to regenerate the CRD. That is on
+a condition type of its own and deliberately not on `Ready`: `Ready` is decided elsewhere on that
+path, so a write there would be overwritten and inert, which is the defect #637 shipped. The report
+survives exactly where the field does not — `status` is closed, but `conditions.items.properties.type`
+is a plain string with no enum, so a new condition type is storable on precisely the un-regenerated
+CRDs that prune the digest.
+
+### `NoCreateVerbDeclared` is gone, because it could not win (#645)
+
+0.64.0 added that reason to a findby-only kind's `Ready` condition. It is removed. The condition was
+written and persisted, and then the runtime's create-failure branch replaced `Ready` with `Creating` a
+moment later in the same reconcile — so it existed briefly and was gone from any settled CR.
+
+Keeping it would cost a status write per reconcile to produce a reason visible for under a second,
+which is worse for an alert rule than no reason at all: whether the rule sees it depends on poll
+timing. The full explanation still reaches clients, on `Synced=False` / `ReconcileError`, carrying the
+error text verbatim. If the runtime's contract changes so a provider-set `Ready` reason can survive
+`Create`, this becomes viable again.
+
+### Corrections to 0.64.0's section below
+
+Both are mine, both were written here, and one is now measured rather than reasoned.
+
+> **"A findby-only kind now reports `Ready=False` with reason `NoCreateVerbDeclared`."**
+
+`Ready=False` is true. **The reason is `Creating`**, in any CR that has settled — see #645 above. A
+consumer measured the reason absent after a 240-second settle, and I had separately called the write
+"inert", which is wrong in the other direction: it was written and persisted, then overwritten. A
+settled read cannot distinguish "never written" from "overwritten", and neither of us said so.
+
+> **"the runtime then recorded a Normal `CreatedExternalResource` event … once per poll, forever"**
+
+Not once per poll. I inferred that from the mechanism — nil return every reconcile, therefore event
+every reconcile — and never looked at the recorder.
+
+Every event goes through a **state-aware** recorder that suppresses an unchanged repeat and force-
+republishes one after `EVENTRECORDER_MAX_SILENCE` (default 5 minutes). Measured in-cluster by a
+consumer, with absolute timestamps on a 3-minute resync: a constant-message event published at
+07:48 and again at **07:54** — suppressed at 07:51, republished on the first reconcile past the
+floor — while an event whose message embeds a counter published on **every** reconcile, because a
+changing message is a different event to that recorder. There is no aggregation at all: each
+occurrence is a separate Event object with its own `firstTimestamp`, and `count`, `deprecatedCount`
+and `series.count` are never populated.
+
+So the measured rule is: **constant message → a ~5-minute floor; message carrying a counter → every
+reconcile.** Worth knowing when reading a Krateo event stream, and worth knowing that a count field
+is not there to read.
+
+### Also
+
+- **`go.opentelemetry.io/otel/sdk` and `otel/sdk/log` bumped** (#651, #652). Both indirect, neither
+  imported by this repository's own code; `otel/sdk/log` reached v1 at 1.47.0.
+- **Test arms that are permanently the only coverage are now marked as such** (#644), with the real
+  regression used as the fixture rather than a reconstruction. #629's positive path can only ever fire
+  in the defect state, so no consumer can exercise it and the synthetic arms are not interim.
+
+### What is NOT verified in this release
+
+**No part of #598 has been exercised on a cluster.** Its branches live in `Observe`, which is
+reachable only from the integration suite — that suite provisions a kind cluster and does not run
+outside CI. The evidence is the unit suites with `-race`, an 11-row cross-module contract asserted
+from both modules, source assertions on the three wiring properties whose violation is silent, and
+mutation arms for each: adding a digest write on the drift path fails, stubbing the read-back fails,
+dropping one letter from the field name fails, and swapping the bootstrap and not-applicable branches
+fails.
+
+Two consumers are running the cluster arms on this tag. The one that matters most is an **older CRD**:
+confirm `DigestFieldAbsent` appears and that **no** update is issued, because if the bootstrap rule is
+wrong the symptom is one vendor write per poll, per CR, on every consumer at the moment they upgrade.
+This section will be corrected if either arm disagrees with it.
+
 ## 2026-11-13 — 0.64.0
 
 **Two shapes that reported themselves healthy while doing nothing now say so, the `/render` body cap
