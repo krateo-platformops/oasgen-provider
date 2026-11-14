@@ -11,7 +11,7 @@ require (
 	github.com/itchyny/gojq v0.12.19
 	github.com/krateo-platformops/audit v0.6.0
 	github.com/krateo-platformops/plumbing v1.60.0
-	github.com/krateo-platformops/unstructured-runtime v1.17.0
+	github.com/krateo-platformops/unstructured-runtime v1.17.1
 	github.com/pb33f/libopenapi v0.28.0
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0
