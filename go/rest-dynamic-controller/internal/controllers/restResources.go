@@ -26,6 +26,7 @@ import (
 	unstructuredtools "github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -1464,15 +1465,27 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			// The referent goes on the CR, not just in this Debug line (#323): Pending alone cannot be
 			// acted on, and this path has no operation to poll, so a referent that never appears waits
 			// forever indistinguishably from an async create in flight.
-			if cerr := unstructuredtools.SetConditions(mg, customcondition.PendingReferent(err.Error())); cerr != nil {
-				log.Error(cerr, "Setting condition")
-				return controller.CreateResult{}, cerr
-			}
-			_, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
-				Pluralizer:    h.pluralizer,
-				DynamicClient: h.dynamicClient,
-			})
-			return controller.CreateResult{}, uerr
+			// RETURNED, NOT WRITTEN FROM HERE (#258). The runtime upserts a CreateResult's conditions
+			// and persists them itself, so writing status inside this call would be a second write of
+			// the same thing -- and the status write this replaced existed only because a nil return
+			// had no other channel to carry the reason.
+			//
+			// A WAIT, NOT A REFUSAL, so this returns its Ready condition and NO Synced. The runtime
+			// stamps Synced=ReconcileSuccess when a handler returns no TypeSynced, which is correct
+			// here: the reconcile did its job and the resource may yet exist once the referent
+			// appears. A refusal (no create action declared) returns both halves instead, because
+			// reporting a successful sync on a resource that can never exist would be the opposite of
+			// the truth.
+			return controller.CreateResult{
+				Requested: false,
+				// Log-only (the runtime logs CreateResult.Reason), so this names the SITE. The
+				// condition's own Reason stays "Pending" deliberately: Observe guards on
+				// IsConditionSet(mg, Pending()), which compares Type, Status and Reason, so a
+				// distinct condition reason would silently turn a waiting resource into one
+				// reported as not existing.
+				Reason:     "PendingReferent",
+				Conditions: []metav1.Condition{customcondition.PendingReferent(err.Error())},
+			}, nil
 		}
 		log.Error(err, "Provisioning secretRef RBAC / resolving field mapping resolvers")
 		return controller.CreateResult{}, err
