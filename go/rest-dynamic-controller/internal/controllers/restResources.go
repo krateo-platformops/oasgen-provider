@@ -1321,6 +1321,50 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	return err
 }
 
+// createReachedTheVendor returns the result for a create that REACHED THE VENDOR and whose STATUS
+// WRITE then failed. It reports the create as requested, because it was (issue 676).
+//
+// WHY A STATUS-WRITE FAILURE MUST NOT BE REPORTED AS A CREATE FAILURE. The runtime sets
+// krateo.io/external-create-pending before calling this handler and closes it on the success path. An
+// error return leaves early, so the marker is never closed -- and with pending set and neither
+// succeeded nor failed present, meta.ExternalCreateIncomplete returns true, the object enters the
+// incomplete-create state, and its recovery re-enters Create. Measured on a real Keycloak: six create
+// attempts answering 409 "already exists" over three minutes, with the condition reading
+// `Creating: create failed: unexpected status: 409` throughout.
+//
+// NOT A CREATE FAILURE AND NOT THE RUNTIME'S FAULT. unstructured-runtime already special-cases a
+// status conflict -- "A lost status race is not an error: requeue quietly, record nothing" -- so it
+// records no failure and emits no warning. The defect is entirely that leaving early skips the marker
+// that would close the pass. Returning Requested:true closes it via external-create-succeeded, which
+// is also simply TRUE: the create was requested and it landed.
+//
+// NOT GATED ON THE ERROR BEING A CONFLICT, deliberately -- but the two cases go wrong DIFFERENTLY, and
+// both are wrong. Read off unstructured-runtime v1.17.1's handleCreate, not inferred:
+//
+//	a status conflict      worker.go:1272 requeues quietly and RETURNS, before the marker at :1284. So
+//	                       pending stays open, meta.ExternalCreateIncomplete is true, and the recovery
+//	                       re-enters Create. This is the measured Keycloak loop.
+//	any other write error  :1284 stamps external-create-failed, which DOES close pending -- so there is
+//	                       no re-create, but a create that LANDED is recorded as having failed, with a
+//	                       "Cannot create external resource" warning naming an error that belongs to
+//	                       the status write and not to the create.
+//
+// Gating on a conflict would fix the first and leave the second standing.
+//
+// THE STATUS FIELDS ARE NOT LOST. Observe repopulates them from the vendor on the next pass, which is
+// the only place they can be derived anyway. What a retried CREATE risks is a duplicate external
+// resource, and on a vendor without a uniqueness constraint it would produce one -- Keycloak refuses a
+// second client with the same clientId, which is the only reason the measured case cost nothing.
+func (h *handler) createReachedTheVendor(mg *unstructured.Unstructured, werr error, log logging.Logger) (controller.CreateResult, error) {
+	log.Error(werr, "The create reached the vendor but its status write failed; reporting the create as "+
+		"requested so it is not retried. Status will be repopulated by the next observe",
+		"kind", mg.GetKind(), "name", mg.GetName())
+	h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", fmt.Errorf(
+		"the external resource was created but its status could not be written (%w); the create will not "+
+			"be retried and status will be repopulated on the next reconcile", werr)))
+	return controller.CreateResult{Requested: true}, nil
+}
+
 func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstructured) (controller.CreateResult, error) {
 	log := h.logger.WithValues("op", "Create").
 		WithValues("apiVersion", mg.GetAPIVersion()).
@@ -1403,9 +1447,8 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			return controller.CreateResult{}, err
 		}
 		if _, err := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{Pluralizer: h.pluralizer, DynamicClient: h.dynamicClient}); err != nil {
-			log.Error(err, "Updating status")
-			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", err))
-			return controller.CreateResult{}, err
+			// The RESTAction was already invoked, so this is issue 676's shape.
+			return h.createReachedTheVendor(mg, err, log)
 		}
 		h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Create", fmt.Sprintf("Invoked create RESTAction for: %s", mg.GetName())))
 		return controller.CreateResult{Requested: true}, nil
@@ -1430,8 +1473,10 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			return controller.CreateResult{}, err
 		}
 		if _, err := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{Pluralizer: h.pluralizer, DynamicClient: h.dynamicClient}); err != nil {
-			log.Error(err, "Updating status")
-			return controller.CreateResult{}, err
+			// The dispatch already fired, so this is issue 676's shape -- and a dispatch is NOT
+			// idempotent the way a delegated RESTAction is required to be, so a retry would invoke the
+			// action a second time.
+			return h.createReachedTheVendor(mg, err, log)
 		}
 		return controller.CreateResult{Requested: true}, nil
 	}
@@ -1659,9 +1704,8 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		DynamicClient: h.dynamicClient,
 	})
 	if err != nil {
-		log.Error(err, "Updating status")
-		h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", err))
-		return controller.CreateResult{}, err
+		// The POST already landed -- this is issue 676's measured shape.
+		return h.createReachedTheVendor(mg, err, log)
 	}
 
 	h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Create", fmt.Sprintf("Created external resource: %s", mg.GetName())))
