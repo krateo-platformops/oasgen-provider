@@ -84,6 +84,19 @@ func TestTheMissingCreateActionBranchRequestsNothingAndReportsWhy(t *testing.T) 
 	branch := strings.Join(code, "\n")
 	require.NotEmpty(t, branch, "the branch has no non-comment lines, which cannot compile")
 
+	// COLLAPSE WHITESPACE BEFORE ASSERTING ON A STRUCT LITERAL'S SHAPE, because gofmt emits three
+	// different spacings for the same field and a needle can only match one of them. Measured:
+	//
+	//     CreateResult{Requested: true}                 -> ONE space   (single line)
+	//     CreateResult{\n Requested:  true\n Conditions: -> TWO spaces  (aligned to the longest key)
+	//     CreateResult{\n Requested: true\n Reason:      -> ONE space
+	//
+	// The first version of this test asserted on the two-space form. `Contains` merely became
+	// brittle, which fails LOUDLY. But `NotContains("Requested:  true")` failed OPEN: a single-line
+	// `return CreateResult{Requested: true}, nil` -- the exact regression it exists to catch -- does
+	// not contain that substring, so the guard would have passed while the branch claimed a create.
+	branch = collapseSpaces(branch)
+
 	// THE CONTRACT CHANGED IN SUBSTANCE, NOT IN PURPOSE. Until 0.65.0 this branch returned an error,
 	// because an error was the only way to stop the runtime recording a phantom
 	// "Successfully requested creation of external resource" (#624). The cost was that the runtime's
@@ -92,7 +105,7 @@ func TestTheMissingCreateActionBranchRequestsNothingAndReportsWhy(t *testing.T) 
 	// CreateResult{Requested: false} buys the same suppression from the runtime directly, and the
 	// conditions survive. So the assertions invert: the branch must NOT return a bare error, and it
 	// MUST declare Requested: false.
-	assert.Contains(t, branch, "Requested:  false",
+	assert.Contains(t, branch, "Requested: false",
 		"the missing-create-action branch no longer returns Requested: false. Without it the runtime "+
 			"reads the nil error as a successful create, stamps external-create-succeeded, and emits "+
 			"the Normal CreatedExternalResource event for a resource that does not exist (#624, #657)")
@@ -105,7 +118,7 @@ func TestTheMissingCreateActionBranchRequestsNothingAndReportsWhy(t *testing.T) 
 
 	// A BARE `return nil` WOULD BE THE OLD DEFECT. Requested defaults to false on a zero value, so the
 	// dangerous shape is not `return nil` any more -- it is returning a result that claims Requested.
-	assert.NotContains(t, branch, "Requested:  true",
+	assert.NotContains(t, branch, "Requested: true",
 		"this branch claims a create was requested. Nothing was called.")
 
 	// The three escapes must still be named SOMEWHERE the operator reads. They moved from an error
@@ -167,5 +180,56 @@ func TestTheRevivedConditionCarriesBothHalves(t *testing.T) {
 		assert.Contains(t, ready.Message, want,
 			"the condition message must name %q: it replaced the error text as the only place the "+
 				"cause appears", want)
+	}
+}
+
+// collapseSpaces reduces every run of spaces and tabs to a single space, so an assertion on a struct
+// literal's shape is independent of gofmt's key alignment. Newlines are preserved: the branch
+// assertions above rely on line structure.
+func collapseSpaces(s string) string {
+	var b strings.Builder
+	space := false
+	atLineStart := true
+	for _, r := range s {
+		if r == ' ' || r == '\t' {
+			space = true
+			continue
+		}
+		// A pending run of whitespace becomes ONE space -- unless it is leading indentation or sits
+		// before a newline, where it becomes nothing. Emitting a space there was the first bug this
+		// function's own control caught: `\n\tRequested:` normalised to `\n Requested:`, which is
+		// harmless for Contains but makes the function's output hard to predict and reason about.
+		if space {
+			if r != '\n' && !atLineStart {
+				b.WriteByte(' ')
+			}
+			space = false
+		}
+		b.WriteRune(r)
+		atLineStart = r == '\n'
+	}
+	return b.String()
+}
+
+// TestCollapseSpacesActuallyCollapses is the control for the normaliser the shape assertions depend
+// on. Without it, a normaliser that silently stopped working would restore the fail-open hole it was
+// added to close -- and every assertion above would still pass.
+func TestCollapseSpacesActuallyCollapses(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"Requested:  true", "Requested: true"},
+		{"Requested:\ttrue", "Requested: true"},
+		{"Requested: true", "Requested: true"},
+		{"a  b\n\tc   d", "a b\nc d"},
+	} {
+		assert.Equal(t, tc.want, collapseSpaces(tc.in), "input %q", tc.in)
+	}
+
+	// THE POINT, stated as the thing that was broken: all three gofmt forms of the same field must
+	// normalise to ONE needle, or the NotContains assertion above fails open again.
+	one := "return controller.CreateResult{Requested: true}, nil"
+	two := "return controller.CreateResult{\n\t\tRequested:  true,\n\t\tConditions: nil,\n\t}, nil"
+	for _, form := range []string{one, two} {
+		assert.Contains(t, collapseSpaces(form), "Requested: true",
+			"a gofmt form of Requested:true did not normalise to the single-space needle")
 	}
 }
