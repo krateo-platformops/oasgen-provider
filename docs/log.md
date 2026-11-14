@@ -13,6 +13,141 @@ Curated history (notable changes, decisions); release notes stay in GitHub Relea
 Both components ship from one tag at identical versions, so entries below cover the
 provider and the rest-dynamic-controller together.
 
+## 2026-11-14 — 0.66.0
+
+**A slow update was silently losing a credential rotation; a create that was never requested stops
+reporting success; and an array of objects a vendor returns reordered can now converge. Six PRs,
+derived from `git log 0.65.0..0.66.0` rather than from memory.**
+
+### A status clear no longer destroys the keys this controller owns (#667, #668)
+
+**UPGRADE CONSEQUENCE, and the reason to take this release.** `clearStatusFields` removed the whole
+`status` subtree — on every `Create` and every `Update` with a response body — while
+`populateStatusFields` wrote back only identifiers and `additionalStatusFields`. Its stated purpose is
+stale identifiers, and three keys the controller owns were collateral: `conditions`,
+`observedGeneration` and `resolvedResolversDigest`.
+
+Two consequences, the second serious:
+
+- **every condition type except the one the caller re-added was destroyed.** `Ready` survived only
+  because Observe re-decides it each pass, which made the surviving set *"whatever something else
+  happens to rewrite"* — a property nobody declared. `ResolverDigestRecorded` was the first condition
+  whose write is gated on a non-recurring branch (`if bootstrappedDigest`), so it never came back at
+  all;
+- **a pending update lost the rotation.** The clear ran *before* the pending/success split, so it
+  wiped `status.resolvedResolversDigest` on both branches. The success branch re-records it; the
+  **pending** branch deliberately does not, because a pending update has not landed — but the digest
+  was already gone, so the next Observe saw `recorded == ""`, took the bootstrap path and **adopted
+  the rotated fingerprints**. The rotation was retired without ever reaching the vendor, while every
+  visible signal said healthy.
+
+That second one is the exact failure #598's own comment says the design avoids. The comment is right
+about the branch it guards and blind to the clear running above it.
+
+**If you rotated a Secret on 0.65.0 and the vendor still shows the old value, this is why.** Verify
+out of band rather than trusting a quiet CR: a write-only field has no response-side backstop, so a
+retired rotation is indistinguishable from a landed one by any means a client has.
+
+Fixed by giving `clearStatusFields` the preserve-list `writeObservedStatus` already had, so the two
+sites share one rule — **the list is the contract, and it is three keys.** Anything new in a generated
+Kind's status must be added to it; everything else in `status` is still dropped, which is what the
+function is for.
+
+**How it was found, because the method matters more than the fix.** A consumer reported
+`ResolverDigestRecorded` present before a rotation and absent after — one reading, on a cluster
+already torn down, and they said plainly they could not tell whether it was removed or never re-added.
+Their script's verdict line would have printed a tidy *"the digest was recorded"*; they corrected it to
+separate the measured count from the inference and reported the thing they actually read. **A clean
+summary would have given nobody a reason to open the code.**
+
+### Create can now say it created nothing (#657, #660, #664)
+
+Adopts `unstructured-runtime` v1.17.0's `ResultCreator`. The runtime read **every** `nil` return from
+`Create` as "a create was requested": it stamped `external-create-succeeded` and emitted a Normal
+`CreatedExternalResource` event reading *"Successfully requested creation of external resource"*.
+Three of this handler's paths had called nothing, so those CRs durably claimed a create that never
+happened, and the false annotation kept them out of incomplete-create recovery.
+
+| path | now returns |
+|---|---|
+| no `create` verb declared | `Requested:false`, **both** Ready and Synced |
+| `PendingReferent` — a `dependentLookup` whose referent is absent | `Requested:false`, Ready only: a wait, not a refusal |
+| `AuthorizationDenied` — a permanent 403 | `Requested:false`, both halves |
+
+`NoCreateVerbDeclared` is revived and **now survives**, which is why #645 had removed it as inert.
+**Pair it with core-provider >= 2.13.96**, whose rollup classifies that reason as `childFailed` rather
+than `childConverging` — so a composition containing a kind that can never be created stops reporting
+as still converging forever.
+
+**And it removes a suppressor of the sibling arm.** `createIsUnreachable` requires
+`external-create-succeeded` to be unset, so a CR whose create had hit one of the three false-success
+paths had `CreateUnreachable` suppressed **permanently**. 0.64.0 was a floor for that arm, not a
+ceiling.
+
+Both remaining `nil` returns are correct and were left alone: an async 202 really did request a
+creation, and the being-deleted refusal already returned `Requested:false`.
+
+### An array of objects returned reordered can converge (#650, #658, #669)
+
+`x-kubernetes-list-type` and `x-kubernetes-list-map-keys` pass through from an OAS document into the
+generated CRD (#658), and the drift comparison honours them (#669): a declared map-list is matched by
+**key tuple** instead of by position. Opt-in through the document; every other array stays positional.
+
+Measured, not theorised: `KeycloakClient.spec.protocolMappers` declared `[groups, mcp-audience]` and
+returned `[mcp-audience, groups]`, with `the update has been issued 7 times without resolving it`
+while the client was correct in Keycloak — and `krateo-keycloak-realm` 0.5.x's `krateo-ide` client
+disabled by default because of it.
+
+Three things it deliberately does **not** do. A duplicate key tuple is **reported**, not resolved —
+picking one of two elements with the same identity would make the verdict depend on map iteration
+order. The key tuple is **length-prefixed**, because `{ns:"x|y",name:"z"}` and `{ns:"x",name:"y|z"}`
+are different elements that a separator-joined tuple would silently match. And the **length** rule is
+unchanged, so a vendor that *adds* elements of its own still reports drift — pre-existing, and a
+different question that needs a different answer.
+
+### A resolver pointer the request never carried is not drift (#663, #670)
+
+Two individually-correct mechanisms produced a resource that could not converge.
+`stripResolverSources` removes a resolver's `inCustomResource` from the request body, leaving the
+containing object present-but-**empty**; `CompareExisting` reports a CR-populated object against a
+remote-**empty** one as drift. So a `secretRef` whose pointer sits inside an object the vendor echoes
+back sent `extra: {}`, the vendor stored `{}`, and the comparison correctly flagged it. **The strip
+created the asymmetry the comparison flagged.** Measured on a live Ironic node: five real PATCHes at
+180s intervals before the non-convergence guard latched it.
+
+**It was intermittent, which is worse than permanent.** `extra` on that Node also carries operational
+keys — written at **runtime** by a bridge script, not by any template — so the same definition fires on
+a freshly-enrolled node and converges on that node later. A fleet divides into permanently-latched and
+healthy with no apparent pattern, and the healthy ones read as proof the definition is fine. It also
+means "add a sibling key" is not a mitigation: the sibling's presence is a property of *when you look*.
+
+**The fix counts keys rather than weakening the check**, and that distinction is the whole change. The
+remote-empty check exists for another measured case on the same vendor — `instance_info: {}` against a
+CR carrying `image_source` and `image_checksum`, which reported no drift, issued no PATCH and went
+`Synced=True` having never applied its desired state. Same shape, opposite correct answers,
+discriminated by one thing: **whether the request could ever have carried the key.**
+
+`inCustomResource` remains **optional**, and omitting it skips the strip entirely — still the better
+authoring wherever the vendor tolerates the pointer in the payload, because this fix changes the
+comparison and not the request.
+
+### Two comments corrected (#665)
+
+Both argued against something that was later built, and neither was retracted by the change that built
+it — the replacement arrived as a *new* comment elsewhere, which contradicts nothing a reader has
+already read.
+
+One claimed no durable warnings surface existed and that `status.generationWarnings` was an open
+proposal. `status.schemaWarnings` has existed since #462, written **unconditionally** so it clears when
+the warnings clear, **36 lines below that comment in the same function** — and the stale note produced
+a wrong public claim in #662 before anyone noticed. The other called `maxPages` *"the field proposed in
+#119"* when #119 closed COMPLETED and `maxPages` shipped with it: required, no default, in the
+published CRD, enforced per walk.
+
+The second was found by **enumeration, not by symptom** — grep every non-test comment citing an issue
+as open or proposed, then ask the *server* for each issue's state. The symptom gave one; the
+enumeration gave both.
+
 ## 2026-11-14 — 0.65.0
 
 **A rotated `secretRef` Secret is now detected as drift and pushed, which it never was; a condition
