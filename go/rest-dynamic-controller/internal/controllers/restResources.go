@@ -421,6 +421,51 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 					"kind", mg.GetKind(), "name", mg.GetName())
 				return controller.ExternalObservation{}, nil
 			}
+			// A KIND THAT DECLARES A GET VERB IS OBSERVABLE IN PRINCIPLE, so reaching here means the
+			// IDENTIFIER is missing -- not that the resource cannot be looked at. Refuse to answer
+			// (issue 682).
+			//
+			// IsResourceKnown collapses two different situations into one `false`: no get verb declared,
+			// and a get verb whose request will not validate because its identifier is absent. Only the
+			// second is a defect, and declaresVerb is what separates them.
+			//
+			// MEASURED, on a cluster against real GitHub. A duplicate create answered 303, Go's client
+			// followed it, the 200 list body was read as the created object, and populateStatusFields
+			// skipped every identifier it could not find in it -- silently, with a bare `continue`. The
+			// CR then reached this branch and was reported Ready=True/Available, with no HTTP request
+			// made, for as long as it existed. GitHub held the policy; the CR held nothing.
+			//
+			// NOT not-exists, deliberately. That sends the runtime back to Create, and on a vendor that
+			// mints the identifier it duplicates the resource on every pass. Both plausible answers are
+			// destructive in opposite directions.
+			//
+			// WRAPPED IN ReadyAssessed, which is load-bearing: handleObserve's error path otherwise
+			// replaces whatever Ready holds with ObserveFailed, so the reason naming the cause would be
+			// gone and the operator would be told "could not observe" -- a true statement that hides
+			// which of eight reasons applied. Same contract the async failure branch uses.
+			if declaresVerb(clientInfo.Resource.VerbsDescription, string(apiaction.Get)) {
+				detail := fmt.Sprintf("the create reported success but no identifier was recorded in status, "+
+					"so the %s cannot be addressed; this kind declares a get verb but no findby, so it cannot "+
+					"be re-found either. The external resource MAY EXIST and be unreferenced -- do not delete "+
+					"this resource to clear the condition, because that would orphan it", mg.GetKind())
+				log.Info("Refusing to assume up-to-date: no identifier was ever recorded",
+					"kind", mg.GetKind(), "name", mg.GetName())
+				if cerr := unstructuredtools.SetConditions(mg, customcondition.NoIdentifierRecorded(detail)); cerr != nil {
+					log.Error(cerr, "Setting condition")
+					return controller.ExternalObservation{}, cerr
+				}
+				if _, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
+					Pluralizer:    h.pluralizer,
+					DynamicClient: h.dynamicClient,
+				}); uerr != nil {
+					log.Error(uerr, "Updating status")
+					return controller.ExternalObservation{}, uerr
+				}
+				return controller.ExternalObservation{}, controller.ReadyAssessed(errors.New(detail))
+			}
+
+			// A kind declaring NEITHER get NOR findby is unobservable by declaration, not by accident.
+			// There is no better answer available for it, so this keeps the historical behaviour.
 			log.Debug("API call not found", "action", apiaction.FindBy)
 			log.Debug("No get or findby action found for the resource.")
 			log.Debug("Resource is assumed to be up-to-date.")

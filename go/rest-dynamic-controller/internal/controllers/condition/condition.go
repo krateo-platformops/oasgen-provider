@@ -53,8 +53,13 @@ const (
 	ReasonCreateFailed string = "CreateFailed"
 	ReasonUpdateFailed string = "UpdateFailed"
 	// ReasonResponseObtained and ReasonNoResponseBody are the two states of TypeObserved below.
-	ReasonResponseObtained string = "ResponseObtained"
-	ReasonNoResponseBody   string = "NoResponseBody"
+	// ReasonNoIdentifierRecorded says the create reported success but the response carried none of the
+	// declared identifiers, so the external resource cannot be addressed. It is NOT "the create failed"
+	// -- the create may well have landed, which is exactly why this is dangerous: the resource can exist
+	// with nothing referencing it (issue 682).
+	ReasonNoIdentifierRecorded string = "NoIdentifierRecorded"
+	ReasonResponseObtained     string = "ResponseObtained"
+	ReasonNoResponseBody       string = "NoResponseBody"
 )
 
 // TypeObserved reports whether the last observe obtained a response body to populate status FROM, which is
@@ -388,5 +393,33 @@ func NoCreateVerbDeclaredConditions() []metav1.Condition {
 			Reason:             ReasonNoCreateVerbDeclared,
 			Message:            msg,
 		},
+	}
+}
+
+// NoIdentifierRecorded reports that this resource cannot be observed because no identifier was ever
+// recorded for it, on a kind that DECLARES a get verb and so is observable in principle.
+//
+// WHY THIS IS NOT Available, WHICH IS WHAT IT REPLACED. The branch that returns this used to assume the
+// resource was up to date, set Available, and return {exists: true, upToDate: true} -- WITHOUT MAKING ANY
+// HTTP REQUEST. Measured on a cluster against real GitHub (issue 682): a duplicate create answered 303,
+// the redirect's list body was read as the created object, every identifier was silently skipped, and the
+// CR then sat at Ready=True/Available for as long as it existed with the external resource unmanaged. Two
+// observes, zero requests. A spec edit would never have reached the vendor.
+//
+// WHY IT IS NOT "not exists" EITHER. Reporting not-exists sends the runtime back to Create, and on a
+// vendor that mints the identifier that creates a duplicate on every pass. Both plausible answers are
+// destructive in opposite directions, so the honest answer is neither: refuse, and say why.
+//
+// This is the FOURTH place in this codebase where "I could not determine this" has to be its own answer,
+// after Exists (a synthesised 404 is not proof of absence), liveInstanceCount (a failed LIST is not zero
+// instances) and the delete guard (unverifiable must not read as deleted). All four are paths where the
+// plausible value is also the destructive one.
+func NoIdentifierRecorded(detail string) metav1.Condition {
+	return metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonNoIdentifierRecorded,
+		Message:            detail,
 	}
 }
