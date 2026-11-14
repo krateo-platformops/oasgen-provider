@@ -509,9 +509,23 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 	// and a paginator that never reports done walked forever (#119).
 	//
 	// This is a SAFETY BACKSTOP, not a policy knob. It exists to make a runaway terminate, and is set
-	// high enough that no legitimate search reaches it. The per-RestDefinition bound an author actually
-	// wants -- "scan at most N pages for this resource" -- is the `maxPages` field proposed in #119, and
-	// belongs with that design rather than being smuggled in as a constant here.
+	// high enough that no legitimate search reaches it.
+	//
+	// THE PER-DEFINITION BOUND EXISTS AND IS NOT A PROPOSAL. This note used to say that the bound an
+	// author actually wants -- "scan at most N pages for this resource" -- "is the `maxPages` field
+	// proposed in #119". #119 was closed COMPLETED, and `maxPages` shipped with it: it is a REQUIRED
+	// field with no default on `pagination.pageNumber` (`PageNumberConfig.MaxPages`), present in the
+	// published RestDefinition CRD, validated at construction (`pagination/paginator.go:67` refuses it
+	// unset, and `:70` refuses a value above the ceiling below) and enforced per walk at
+	// `pagination/page_number.go:83`. A reader following the old wording would conclude the only bound
+	// is this constant and could reasonably add a knob that already exists, required, two packages over.
+	//
+	// WHAT IS STILL TRUE, and is the narrower fact worth keeping: `continuationToken` has no author-set
+	// bound at all. `ContinuationTokenConfig` carries no `maxPages`, so for that strategy this constant
+	// is the ONLY cap, and a vendor whose cursor never reports done is bounded here and nowhere else.
+	// That asymmetry is deliberate -- a cursor-based walk is expected to terminate on the vendor's
+	// signal -- but it means "the author sets the bound" is true of pageNumber and false of
+	// continuationToken, and the two must not be described as one.
 	pagesScanned := 0
 
 	for {

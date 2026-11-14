@@ -1296,12 +1296,28 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	// That is exactly the case where nobody has a reason to go tailing debug logs -- everything visible
 	// says the system is fine. An accurate warning nobody can reach is close to worthless.
 	//
-	// An EVENT rather than a new status field, deliberately. The issue proposes status.generationWarnings,
-	// which is an API change on a published CRD and brings staleness with it: a warning describing a fixed
-	// problem is worse than none, because it teaches people to ignore the field. Events expire on their
-	// own, are already where an operator looks (`kubectl describe restdefinition`), and follow the
-	// SkippedSecuritySchemes precedent immediately below. Status surface remains open in #151 if these
-	// turn out not to be enough.
+	// AN EVENT **AND** A STATUS FIELD. This note used to say "an EVENT rather than a new status field,
+	// deliberately", and argued against a status surface on the grounds that it brings staleness: a
+	// warning describing a fixed problem is worse than none, because it teaches people to ignore the
+	// field. That was the design until #462, which added one -- and answered the staleness objection
+	// rather than ignoring it, by making the write UNCONDITIONAL so the field clears when the warnings
+	// clear. See the comment above `cr.Status.SchemaWarnings = renderWarnings(all)` below, which spells
+	// that out and says in as many words that the Event was wrong only as the SOLE record of a standing
+	// condition.
+	//
+	// THE STALE VERSION OF THIS NOTE CAUSED A WRONG PUBLIC CLAIM, which is why it is corrected in place
+	// rather than deleted. Writing #662 (a proposed warning for secret-shaped request fields reaching a
+	// CR spec), its filer read this comment, took it as current, and published a channel analysis built
+	// on the premise that no durable surface existed and that `status.generationWarnings` was still an
+	// open proposal -- with the assignment that refutes it 36 lines below, in this same function. A
+	// design note explaining why something was NOT built outlives the decision and reads as current;
+	// the replacement arriving as a second comment further down does not retract the first.
+	//
+	// So: the Event remains the right channel for "this just happened" (it is where an operator already
+	// looks, `kubectl describe restdefinition`, and it follows the SkippedSecuritySchemes precedent
+	// immediately below). `status.schemaWarnings` is the durable record of what the CURRENT render
+	// found. Discoverability -- nothing telling an operator the field exists -- is the remaining gap and
+	// is tracked in #578, not here.
 	//
 	// ONE aggregated event rather than one per warning: this runs on every CRD generation, and a document
 	// with a dozen unresolvable fields should not write a dozen events. The log keeps the full detail.
