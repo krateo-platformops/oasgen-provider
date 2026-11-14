@@ -14,16 +14,50 @@ import (
 //
 // Both halves of that matter, and neither is an optimisation.
 //
-// condition.Upsert replaces an existing entry WHOLESALE, and the constructors stamp
-// LastTransitionTime: metav1.Now() on every call. Setting unconditionally would therefore rewrite the
-// timestamp on every reconcile, which breaks exactly the property this condition was chosen for: a
-// metav1.Condition's lastTransitionTime is supposed to mark when the status last CHANGED, and a reader
-// who sees it move every few seconds learns nothing from it. Comparing first makes it mean what it says.
+// CORRECTED 2026-11-14. This comment used to say that condition.Upsert "replaces an existing entry
+// WHOLESALE", so an unconditional set would rewrite lastTransitionTime on every reconcile. THAT WAS TRUE
+// WHEN WRITTEN AND IS NOT TRUE OF ANY VERSION THIS MODULE HAS EVER SHIPPED AGAINST. Measured across the
+// cached versions:
 //
-// And tools.UpdateStatus issues an unconditional API write -- it does not diff. Since the stamped
-// timestamp differs every call, an unguarded set would make every write a real one, so a resource whose
-// observe never returns a body would get a status update on every single reconcile for as long as it
-// exists. The caller uses the returned bool to skip the write when there is nothing to record.
+//	v1.7.1   overwrites wholesale   <- what the original claim described
+//	v1.9.0   PRESERVES
+//	v1.14.0  PRESERVES
+//	v1.17.1  PRESERVES
+//	v1.18.0  PRESERVES              <- what we ship
+//
+// unstructured-runtime's #40 added the guard, in v1.7.5 by core-provider's account; the boundary this
+// repo can see is between v1.7.1 and v1.9.0. pkg/tools/unstructured/condition/condition.go:276 now reads:
+//
+//	if el.Status == co.Status && !el.LastTransitionTime.IsZero() {
+//	    co.LastTransitionTime = el.LastTransitionTime   // not a transition: keep when it became true
+//	}
+//
+// WHY THE STALE VERSION COST SOMETHING. The openstack-ironic-operator-kog session quoted this comment as
+// evidence that core-provider's #498 stall clock could not work -- a reader cannot date a comment, and a
+// claim about a dependency reads as current forever while the dependency moves underneath it. The
+// refutation was one grep away in the module cache. See also the `default:` arm this file's package has
+// had corrected for the same reason.
+//
+// WHAT IS STILL TRUE, and why this function stays. tools.UpdateStatus issues an UNCONDITIONAL API write:
+// it does not diff. So a resource whose observe never returns a body would get a status API round trip on
+// every single reconcile for as long as it exists. That is write amplification and it is reason enough on
+// its own -- both core-provider and openstack-ironic-operator-kog, who reported the stale half above,
+// said independently that this half stands and the guard should not be removed.
+//
+// WHAT I HAVE NOT MEASURED, stated rather than asserted: with the timestamp now preserved the object sent
+// should be byte-identical when nothing changed, in which case the apiserver's no-op semantics would mean
+// resourceVersion does not move and no watcher wakes -- i.e. the cost would be a wasted REQUEST rather
+// than a real write. That is apiserver behaviour this repo has not exercised (no local cluster), and the
+// two fakes in our own tests disagree about it: controller-runtime's bumps resourceVersion on a no-op
+// Update, client-go's dynamic fake keeps it. So treat the round trip as the known cost and the rest as
+// unverified. Either way the guard earns its place, and the returned bool is what the caller uses to skip
+// the write.
+//
+// Status AND reason are compared, not status alone: the two states carry different reasons, and a future
+// third reason on the same status would otherwise be swallowed. Note what that means NOW -- a
+// reason-only change still sets, and Upsert keeps the old lastTransitionTime because the status did not
+// transition. That is the correct outcome and it is worth stating, because the guard and Upsert key on
+// different things and only their combination gets it right.
 //
 // Status AND reason are compared, not status alone: the two states carry different reasons, and a future
 // third reason on the same status would otherwise be swallowed.
