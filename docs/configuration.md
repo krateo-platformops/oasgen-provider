@@ -103,6 +103,93 @@ container args by the rendered Deployment; the rest can be set via `rdc.env.*`:
 The managed GVR is appended to `OTEL_RESOURCE_ATTRIBUTES` as `krateo.io/rest-gvr`, so
 telemetry is attributable per dynamic CR type.
 
+## Comparing an array the vendor returns reordered — `x-kubernetes-list-type`
+
+A vendor that stores an array as a set returns it in an arbitrary order, and the drift comparison is
+positional by default. So a correct resource reports drift on every poll, the update rewrites the
+array, the vendor returns it in its own order again, and nothing converges — measured on a real
+Keycloak as `the update has been issued 7 times without resolving it` on a client whose configuration
+was correct.
+
+Two declarations fix that, and they are read from **your OAS document**, not from the RestDefinition.
+Add them to the array's schema and they pass through to the generated CRD.
+
+### Scalar elements — `uniqueItems: true`
+
+```yaml
+enabledEventTypes:
+  type: array
+  uniqueItems: true          # with SCALAR items
+  items: {type: string}
+```
+
+Compared as a **multiset**: order is ignored, content is not. Nothing else is needed, and this is the
+older of the two arms.
+
+### Object elements — `x-kubernetes-list-type: map`
+
+```yaml
+protocolMappers:
+  type: array
+  x-kubernetes-list-type: map
+  x-kubernetes-list-map-keys: [name]
+  items:
+    type: object
+    required: [name]         # see the apiserver constraint below
+    properties:
+      name:   {type: string}
+      config: {type: object}
+```
+
+Elements are matched by their **key tuple** instead of by position. **Both extensions are required**:
+keys without `x-kubernetes-list-type: map` are not a declaration and are ignored, so that a
+half-declared document does not quietly get different comparison semantics.
+
+Everything not declared stays positional. The opt-in is **per array**, deliberately: whether a vendor
+reorders a given array is a per-array fact, not a property of the vendor. Keycloak reorders a client's
+`protocolMappers` and **preserves** the order of `KeycloakUserProfile.attributes`; GitHub canonicalises
+`bypass_actors` and leaves `allowed_actors` in the submitted order.
+
+### Three things that will refuse or surprise you
+
+**The apiserver requires each map key to be `required` or defaulted on the items.** Measured:
+*"this property is in x-kubernetes-list-map-keys, so it must have a default or be a required
+property"* — the CRD is refused outright. So an array whose natural key is **optional** cannot use
+this at all. GitHub's `bypass_actors` is the worked example: its key is `actor_id`, which
+`OrganizationAdmin` and `DeployKey` do not have.
+
+**A key that cannot identify an element is reported, not guessed.** An element with no usable value for
+a declared key, or two elements sharing a key tuple, produces a named difference that no update can
+retire — deliberately, because picking one of two elements with the same identity would make the
+verdict depend on map iteration order. If you see `x-kubernetes-list-map-keys cannot identify it`, the
+declaration is wrong rather than the data.
+
+**Declaring `map` is NOT inert in the CRD: it changes server-side-apply merge semantics**, and one
+consequence is sharp enough to decide whether to adopt it. Measured on a bare CRD with both list kinds:
+
+```
+                      apply []  by SSA            apply []  by merge patch (Helm 3.19)
+atomic list           keeps []                     keeps []
+x-kubernetes-list-type: map   REMOVES THE FIELD    keeps []
+```
+
+So **an SSA applier loses the ability to express "empty"** on a declared map-list; it gets "absent"
+instead. Where a KOG treats an absent array as *no opinion* and an empty one as *remove everything* —
+which is exactly how a representation-based vendor API behaves — **"remove all" under SSA silently
+becomes "stop managing"**. Clear such an array with a merge patch or through Helm, not with
+`kubectl apply --server-side`.
+
+Under `map`, `managedFields` also records ownership **per key** (`k:{"name":"a"}`) rather than for the
+whole array, so two managers can co-own different elements — and an element co-owned by a second
+manager survives being dropped by the first.
+
+### What it does not change
+
+The comparison still checks **lengths** before either arm, so an element the vendor **adds** on its own
+is still reported as drift. That is a different problem from reordering and needs a different answer; it
+has not come up in a measured corpus (GitHub returns exactly the declared rules, Keycloak exactly the
+declared mappers).
+
 ## Per-resource configuration: the `*Configuration` CRD
 
 Runtime API parameters and credentials do not live in chart values at all: they live in
