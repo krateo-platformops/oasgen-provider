@@ -194,17 +194,21 @@ So "the vendor refuses the second create" is common, and that is what kept the m
 > that already exists, and latching `Available` is the defect — so it needs a decision rather than a patch.
 > Tracked in #682.
 
-> **Note (2026-11-14): this release CHANGED the observable signature of a status-write conflict after
-> a create, so a consumer's detector keyed on the old one reads zero while the race is happening.** On
-> 0.67.0 that path logged `Updating status` with the conflict as its payload. It now routes through
-> #681's helper, which logs *"The create reached the vendor but its status write failed; reporting the
-> create as requested so it is not retried"* — the error text survives, the message does not.
+> **Note (2026-11-14): this release moved WHERE a status-write conflict after a create is reported, so
+> a detector keyed on either log MESSAGE goes quiet while the race is still happening.** Two messages
+> changed and one channel did not:
 >
-> Worse for a detector: the handler no longer returns the conflict as an error, so **the runtime's own
-> `Status write lost a race to a newer write` line is not emitted for the create path either**. Both of
-> the obvious strings go quiet.
+> | signal | 0.67.0 | 0.68.0 |
+> |---|---|---|
+> | the handler's log message | `Updating status` | *"The create reached the vendor but its status write failed…"* |
+> | the runtime's own `Status write lost a race to a newer write`, create path | emitted | **not emitted** — the handler no longer returns the conflict as an error |
+> | the wrapped error TEXT | present | **present**, in the handler's log payload and in a Warning event |
 >
-> What to key on instead, in order of robustness:
+> So the error text survives. `tools.UpdateStatus` wraps a conflict as
+> `fmt.Errorf("%w: %w", ErrStatusConflict, err)`, which carries both
+> `status write conflicted with a newer write` and the apiserver's own wording.
+>
+> What to key on, in order of robustness:
 >
 > 1. the **Warning event** on the CR, reason `Created`, message containing `status could not be
 >    written` — independent of log level and of pod restarts within the retention window;
@@ -213,10 +217,14 @@ So "the vendor refuses the second create" is common, and that is what kept the m
 > 3. `the object has been modified`, which is the **apiserver's** wording and varies by Kubernetes
 >    version — present today, not guaranteed.
 >
-> Raised by azuredevops-provider-kog, who asked which string to use before building a probe on it
-> rather than after. A status conflict is still written exactly once and never retried
-> (unstructured-runtime #30, removed in core-provider #359), so a silent internal retry is not an
-> explanation for a detector reading zero.
+> Raised by azuredevops-provider-kog, who asked which string to key on before building a probe rather
+> than after. **An earlier version of this note claimed their first choice would have read zero. That
+> was wrong**: their grep matched the apiserver's text anywhere in the log rather than being anchored
+> on the old message, so it would have worked. I inferred the anchoring from their question instead of
+> reading their script, which I had never seen — the correction is theirs.
+>
+> A status conflict is still written exactly once and never retried (unstructured-runtime #30, removed
+> in core-provider #359), so a silent internal retry is not an explanation for a detector reading zero.
 
 ### Known limitation
 
