@@ -87,6 +87,29 @@ ceiling.
 Both remaining `nil` returns are correct and were left alone: an async 202 really did request a
 creation, and the being-deleted refusal already returned `Requested:false`.
 
+> **Known issue (2026-11-14, issue 672): this stops NEW false stamps and cannot clean up OLD ones, and
+> the affected population is every existing installation.** Up to and including **0.63.1** this branch
+> returned `nil`, so the runtime stamped `krateo.io/external-create-succeeded` on CRs whose create had
+> never been attempted. **Nothing in rest-dynamic-controller ever clears that annotation** — every
+> reference is a read except one that sets it. And `createIsUnreachable` gates the #629 diagnostic on
+> `GetExternalCreateSucceeded(mg).IsZero()`.
+>
+> So a CR of a no-`create`-verb kind that was reconciled under ≤ 0.63.1 carries a false stamp
+> permanently, and `CreateUnreachable` stays suppressed for it on **every** later version, 0.66.0
+> included. The resource reports `Ready=True`/`Available` while its only effect never fires, which is
+> the inverted health signal #629 exists to remove.
+>
+> **This is not an edge case.** Anyone pinning 0.66.0 on a cluster with history has no-`create` CRs
+> that predate the fix by definition. A fresh cluster is unaffected — there is no path to the stamp —
+> which is also why a validation run on one cannot see this. Detection needs no cluster change:
+>
+> ```
+> kubectl get <kind> -A -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.krateo\.io/external-create-succeeded}{"\n"}{end}'
+> ```
+>
+> A non-empty value on a resource that was never created is an instance; removing the annotation
+> restores the diagnostic. The durable fix is cross-repo and is tracked in #672.
+
 ### An array of objects returned reordered can converge (#650, #658, #669)
 
 `x-kubernetes-list-type` and `x-kubernetes-list-map-keys` pass through from an OAS document into the
