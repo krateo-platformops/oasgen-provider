@@ -424,6 +424,17 @@ func convertLibopenapiSchemaWithVisited(
 		domainSchema.Nullable = true
 	}
 
+	// The Kubernetes list-semantics extensions, allowlisted (#650). Assigned HERE, in the single
+	// recursive converter, because every body, response and parameter schema of BOTH document
+	// versions passes through it -- so an array at any nesting depth is covered by one assignment.
+	//
+	// The only schema that does NOT reach this function is a Swagger 2.0 non-body parameter, which is
+	// hand-built by synthesiseV2ParameterSchema. That is deliberate and not a gap: 2.0's Items Object
+	// cannot be `type: object`, so a non-body parameter cannot express an array of objects, which is
+	// the only shape these extensions are for. Stating it because the v2/v3 split is exactly where
+	// #249 and #255 each reached one version and missed the other.
+	domainSchema.Extensions = allowedExtensions(s.Extensions)
+
 	// Format handling
 	// Preserve the format on the domain schema so numeric widths (notably int64)
 	// survive into the generated JSON schema / CRD instead of being downgraded to
