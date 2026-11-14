@@ -9,6 +9,21 @@ import (
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/jqengine"
 )
 
+// declaresVerb reports whether the resource declares a verb for action.
+//
+// Used to tell two cases apart that IsResourceKnown collapses into one `false`: a kind with NO get verb
+// (unobservable by declaration) and a kind WITH a get verb whose identifier is missing (observable in
+// principle, and we have lost the handle). Only the second is a defect, and only the second must refuse
+// to answer (issue 682).
+func declaresVerb(verbs []getter.VerbsDescription, action string) bool {
+	for _, v := range verbs {
+		if strings.EqualFold(v.Action, action) {
+			return true
+		}
+	}
+	return false
+}
+
 // notFoundBodyForAction returns the NotFoundBody predicate declared on the verb matching action, or nil.
 func notFoundBodyForAction(verbs []getter.VerbsDescription, action string) *getter.JQProgram {
 	for _, v := range verbs {
