@@ -1819,6 +1819,10 @@ func (m *mockUnstructuredClient) SetTypedArrayPaths(httpMethod string, path stri
 	return nil, nil
 }
 
+func (m *mockUnstructuredClient) ListMapKeyPaths(httpMethod string, path string) (map[string][]string, error) {
+	return nil, nil
+}
+
 func (m *mockUnstructuredClient) UpdatableBodyPaths(httpMethod, path string) ([]string, error) {
 	return nil, nil
 }
