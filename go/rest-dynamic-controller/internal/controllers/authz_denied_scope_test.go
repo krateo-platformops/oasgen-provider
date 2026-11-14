@@ -64,7 +64,7 @@ func TestDeleteNeverStopsOnAuthorizationDenied(t *testing.T) {
 		"%s is called nowhere in restResources.go: either it was renamed or the #313 guard was removed, "+
 			"and this test cannot say anything about Delete until it is reached", guard)
 
-	require.Contains(t, callers, "Create",
+	require.Contains(t, callers, "CreateWithResult",
 		"Create does not guard a denied 403, so it retries a refused create forever (#313)")
 	require.Contains(t, callers, "Update",
 		"Update does not guard a denied 403, so it retries a refused update forever (#313)")
@@ -152,7 +152,7 @@ func assertDeleteDoesNotReach(t *testing.T, fset *token.FileSet, calls map[strin
 
 	// PREMISE, so a renamed guard or a broken walk fails loudly instead of passing vacuously: the two
 	// verbs that are SUPPOSED to reach it must be found by this same traversal.
-	require.True(t, reaches["Create"],
+	require.True(t, reaches["CreateWithResult"],
 		"the transitive walk does not find Create reaching %s, so it cannot say anything about Delete: "+
 			"either the guard was renamed or this traversal is broken", guard)
 	require.True(t, reaches["Update"],

@@ -1252,7 +1252,23 @@ func (h *handler) stopOnAuthorizationDenied(ctx context.Context, mg *unstructure
 	return true, nil
 }
 
+// Create satisfies controller.ExternalClient, which the runtime still requires even from a handler
+// that implements ResultCreator. The runtime calls CreateWithResult INSTEAD of this when the handler
+// implements it (unstructured-runtime worker.go), so in this build Create is unreachable from the
+// reconcile loop -- it exists so the type keeps satisfying the older interface, and so that a future
+// runtime that drops the ResultCreator branch degrades to today's behaviour rather than failing to
+// compile.
+//
+// It DISCARDS the CreateResult, which is the whole reason the result exists -- so if this ever becomes
+// the live path again, a Requested:false outcome reads to the runtime as "created" and the phantom
+// event (#657) returns. That is today's behaviour, not a regression, but it is the one thing to
+// re-check if the interface wiring ever changes.
 func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) error {
+	_, err := h.CreateWithResult(ctx, mg)
+	return err
+}
+
+func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstructured) (controller.CreateResult, error) {
 	log := h.logger.WithValues("op", "Create").
 		WithValues("apiVersion", mg.GetAPIVersion()).
 		WithValues("kind", mg.GetKind()).
@@ -1291,17 +1307,17 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create",
 			fmt.Errorf("refused to create an external resource for a custom resource that is being "+
 				"deleted: creating now would leave it orphaned once the delete completes")))
-		return nil
+		return controller.CreateResult{Requested: false, Reason: "ResourceBeingDeleted"}, nil
 	}
 
 	if h.swaggerInfoGetter == nil {
-		return fmt.Errorf("swagger info getter must be specified")
+		return controller.CreateResult{}, fmt.Errorf("swagger info getter must be specified")
 	}
 
 	clientInfo, err := h.swaggerInfoGetter.Get(mg)
 	if err != nil {
 		log.Error(err, "Getting REST client info")
-		return err
+		return controller.CreateResult{}, err
 	}
 
 	// One set per reconcile, resolving each verb to the document IT declares (#220). Configuration lives
@@ -1311,7 +1327,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	cli, err := cs.For(ctx, string(apiaction.Create))
 	if err != nil {
 		log.Error(err, "Building REST client")
-		return err
+		return controller.CreateResult{}, err
 	}
 
 	// If create is delegated to a RESTAction, invoke the provisioning sequence instead of the create verb
@@ -1327,19 +1343,19 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", err))
 			// statusCode 0: delegated, so the vendor's status is snowplow's to report, not ours.
 			h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, err)
-			return err
+			return controller.CreateResult{}, err
 		}
 		h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, nil)
 		if err := unstructuredtools.SetConditions(mg, condition.Creating()); err != nil {
-			return err
+			return controller.CreateResult{}, err
 		}
 		if _, err := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{Pluralizer: h.pluralizer, DynamicClient: h.dynamicClient}); err != nil {
 			log.Error(err, "Updating status")
 			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", err))
-			return err
+			return controller.CreateResult{}, err
 		}
 		h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Create", fmt.Sprintf("Invoked create RESTAction for: %s", mg.GetName())))
-		return nil
+		return controller.CreateResult{Requested: true}, nil
 	}
 
 	// A dispatch resource has no create verb -- the dispatch IS its create -- so this must come before the
@@ -1353,24 +1369,24 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		if derr != nil {
 			log.Error(derr, "Dispatching")
 			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Dispatch", derr))
-			return derr
+			return controller.CreateResult{}, derr
 		}
 		// Creating, not Available: the invocation is not confirmed until the next Observe finds the token
 		// in the collection, which is the only evidence a 204-empty trigger leaves behind.
 		if err := unstructuredtools.SetConditions(mg, condition.Creating()); err != nil {
-			return err
+			return controller.CreateResult{}, err
 		}
 		if _, err := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{Pluralizer: h.pluralizer, DynamicClient: h.dynamicClient}); err != nil {
 			log.Error(err, "Updating status")
-			return err
+			return controller.CreateResult{}, err
 		}
-		return nil
+		return controller.CreateResult{Requested: true}, nil
 	}
 
 	apiCall, callInfo, err := builder.APICallBuilder(cli, clientInfo, apiaction.Create)
 	if err != nil {
 		log.Error(err, "Building API call")
-		return err
+		return controller.CreateResult{}, err
 	}
 	if apiCall == nil || callInfo == nil {
 		// NO CREATE ACTION OF ANY KIND, AND THAT IS NOT A SUCCESS (#624).
@@ -1416,9 +1432,25 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		// difference is that on THAT path we own the final write and on this one the runtime does.
 		// Having found the hazard and fixed it next door, shipping it here is the part worth
 		// recording.
-		err := fmt.Errorf("no create action is declared for this resource: no create verb, no dispatch verb and no createApiRef")
-		log.Error(err, "Cannot create", "action", apiaction.Create, "kind", mg.GetKind(), "name", mg.GetName())
-		return err
+		// REQUESTED: FALSE WITH A NIL ERROR, not an error return (#657, #660).
+		//
+		// The error return was #624's fix: it stopped the runtime recording a phantom
+		// "Successfully requested creation of external resource" for a resource that was never
+		// created. It worked, and it cost two things -- the runtime's create-failure branch replaced
+		// Ready with `Creating` (so #645 removed the reason as unwinnable), and it scheduled a
+		// rate-limited retry of something no retry can change.
+		//
+		// CreateResult{Requested: false} buys the same event suppression from the runtime directly,
+		// and the conditions below SURVIVE, so the reason is reportable again. Returning nil is
+		// therefore not a regression of #624: the phantom event is suppressed by
+		// createNotRequested rather than by an error.
+		log.Info("Cannot create: the definition declares no create action; nothing will be created",
+			"action", apiaction.Create, "kind", mg.GetKind(), "name", mg.GetName())
+		return controller.CreateResult{
+			Requested:  false,
+			Reason:     customcondition.ReasonNoCreateVerbDeclared,
+			Conditions: customcondition.NoCreateVerbDeclaredConditions(),
+		}, nil
 	}
 
 	resolved, err := h.resolveRequestFields(ctx, cs, clientInfo, callInfo.FieldMapping, mg)
@@ -1434,16 +1466,16 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 			// forever indistinguishably from an async create in flight.
 			if cerr := unstructuredtools.SetConditions(mg, customcondition.PendingReferent(err.Error())); cerr != nil {
 				log.Error(cerr, "Setting condition")
-				return cerr
+				return controller.CreateResult{}, cerr
 			}
 			_, uerr := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{
 				Pluralizer:    h.pluralizer,
 				DynamicClient: h.dynamicClient,
 			})
-			return uerr
+			return controller.CreateResult{}, uerr
 		}
 		log.Error(err, "Provisioning secretRef RBAC / resolving field mapping resolvers")
-		return err
+		return controller.CreateResult{}, err
 	}
 
 	reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
@@ -1454,7 +1486,7 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		tb, terr := fieldmapping.ApplyRequestTransform(ctx, callInfo.RequestTransform, reqConfiguration.Body)
 		if terr != nil {
 			log.Error(terr, "Applying requestTransform")
-			return terr
+			return controller.CreateResult{}, terr
 		}
 		reqConfiguration.Body = tb
 	}
@@ -1468,14 +1500,14 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		// persisted (so this returns nil and stops retrying) and carries the conflict when the write
 		// deferred (so the runtime requeues). Falling through means neither applied.
 		if handled, cerr := h.stopOnAuthorizationDenied(ctx, mg, "create", err, log); handled || cerr != nil {
-			return cerr
+			return controller.CreateResult{}, cerr
 		}
 		if handled, cerr := h.stopOnEndpointRefusal(ctx, mg, "create", err, log); handled || cerr != nil {
-			return cerr
+			return controller.CreateResult{}, cerr
 		}
 		log.Error(err, "Performing REST call")
 		logVendorBody(log, "create", mg, err)
-		return err
+		return controller.CreateResult{}, err
 	}
 
 	// If create is asynchronous, drive the long-running operation. Two modes:
@@ -1490,14 +1522,14 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		if asyncRequeueEnabled(cfg) {
 			if err := h.recordAsyncOperation(ctx, mg, cfg, string(apiaction.Create), response, reqConfiguration, log); err != nil {
 				log.Error(err, "Recording async create operation")
-				return err
+				return controller.CreateResult{}, err
 			}
 			asyncRequeued = true
 		} else {
 			response, err = driveAsync(ctx, cli, clientInfo, mg, cfg, string(apiaction.Create), response, reqConfiguration, log)
 			if err != nil {
 				log.Error(err, "Driving async create operation")
-				return err
+				return controller.CreateResult{}, err
 			}
 		}
 	}
@@ -1513,18 +1545,18 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		b, ok := body.(map[string]interface{})
 		if !ok {
 			log.Error(fmt.Errorf("body is not an object"), "Performing REST call")
-			return fmt.Errorf("body is not an object")
+			return controller.CreateResult{}, fmt.Errorf("body is not an object")
 		}
 
 		if err := fieldmapping.NormalizeResponseBody(ctx, clientInfo.Resource.VerbsDescription, []string{"create"}, b); err != nil {
 			log.Error(err, "Normalizing response body (fieldMapping)")
-			return err
+			return controller.CreateResult{}, err
 		}
 
 		err = populateStatusFields(clientInfo, mg, b)
 		if err != nil {
 			log.Error(err, "Populating status fields (identifiers and additionalStatusFields)")
-			return err
+			return controller.CreateResult{}, err
 		}
 	} else {
 		log.Debug("Create response has no body, status will remain empty until discovered by next observe", "kind", mg.GetKind())
@@ -1538,13 +1570,13 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 		err = unstructuredtools.SetConditions(mg, customcondition.Pending())
 		if err != nil {
 			log.Error(err, "Setting condition")
-			return err
+			return controller.CreateResult{}, err
 		}
 	} else { // Set creating condition if not pending
 		err = unstructuredtools.SetConditions(mg, condition.Creating())
 		if err != nil {
 			log.Error(err, "Setting condition")
-			return err
+			return controller.CreateResult{}, err
 		}
 	}
 
@@ -1555,11 +1587,11 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 	if err != nil {
 		log.Error(err, "Updating status")
 		h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", err))
-		return err
+		return controller.CreateResult{}, err
 	}
 
 	h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Create", fmt.Sprintf("Created external resource: %s", mg.GetName())))
-	return nil
+	return controller.CreateResult{Requested: true}, nil
 }
 
 func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) error {

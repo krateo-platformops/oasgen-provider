@@ -322,3 +322,71 @@ func ResolverDigestFieldAbsent() metav1.Condition {
 			"provider that generated it, so the field is declared",
 	}
 }
+
+// ReasonNoCreateVerbDeclared is set when the runtime asked for a create and the definition declares
+// no create action at all -- no create verb, no dispatch, no createApiRef.
+//
+// REMOVED IN 0.65.0 (#645) AND REVIVED HERE, and the round trip is the useful part of its history.
+//
+// It was written on TypeReady inside Create, persisted, and then replaced by the runtime's
+// create-failure branch in the same reconcile -- so it existed for under a second and never reached a
+// settled CR. #645 removed it on the grounds that a write which cannot win costs a status write per
+// reconcile to produce a transient nobody can key on, and a reason whose visibility depends on poll
+// timing is worse for an alert rule than no reason at all.
+//
+// What changed is not the condition but who owns the write. Under unstructured-runtime's
+// ResultCreator (v1.17.0), a handler returning CreateResult{Requested: false} with a nil error has
+// its conditions UPSERT and KEPT: setCreateConditions stamps the default Synced=ReconcileSuccess only
+// when the handler returns no TypeSynced of its own. So the reason survives, and #645's argument no
+// longer applies.
+//
+// THE COST #645 DID NOT ACCOUNT FOR, which is why reviving it matters rather than merely being
+// possible: with no specific reason, such a resource settles at Ready=False/Creating, and
+// core-provider's rollup classifies `Creating` as childConverging -- so a composition containing a
+// kind that can never be created reports Ready=False/Creating FOREVER while nothing progresses
+// (#660). That hole is not closable in the rollup, because `Creating` is genuinely ambiguous between
+// a create in flight and a create that is impossible, and no arm can separate what the reason does
+// not distinguish. Only a specific reason from this side closes it. core-provider's arm mapping this
+// exact string to childFailed is merged ahead of its arrival.
+//
+// DISTINCT FROM ReasonCreateUnreachable on purpose, and both are mapped. There the create exists and
+// cannot be queued, and the remedy is to change the identifiers or use a dispatch verb. Here there is
+// nothing to queue, and the remedy is to declare a create verb or accept that the Kind only observes.
+// Folding them together would give an operator one reason and two incompatible fixes.
+const ReasonNoCreateVerbDeclared string = "NoCreateVerbDeclared"
+
+// NoCreateVerbDeclaredConditions returns BOTH conditions a refusal must carry, for a handler
+// returning CreateResult{Requested: false}.
+//
+// TWO, NOT ONE, and the Synced half is deliberate. The runtime stamps Synced=ReconcileSuccess when a
+// handler returns no TypeSynced -- which is correct for a WAIT (the reconcile did its job and the
+// resource may yet exist) and wrong for a REFUSAL, where reporting a successful sync on a resource
+// that can never exist tells a reader the opposite of the truth. So a refusal returns its own Synced
+// and the runtime leaves it.
+//
+// Not Ready-only, and not an error either: an error return would take the runtime's error path, which
+// is what used to overwrite the reason, and would also reintroduce a rate-limited retry of something
+// no retry can change.
+func NoCreateVerbDeclaredConditions() []metav1.Condition {
+	const msg = "the runtime asked for this resource to be created, but its definition declares no " +
+		"create action: no create verb, no dispatch verb and no createApiRef. Nothing will be " +
+		"created for it. If the vendor exposes a creation endpoint, declare it in " +
+		"spec.resource.verbsDescription; if it does not, this Kind can only observe"
+	now := metav1.Now()
+	return []metav1.Condition{
+		{
+			Type:               condition.TypeReady,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             ReasonNoCreateVerbDeclared,
+			Message:            msg,
+		},
+		{
+			Type:               condition.TypeSynced,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             ReasonNoCreateVerbDeclared,
+			Message:            msg,
+		},
+	}
+}
