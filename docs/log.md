@@ -35,7 +35,7 @@ whenever no identifier was resolvable and the kind declared no `findby` verb. Th
 never reaching the vendor.
 
 `git log 0.68.0..0.69.0` holds four commits. One changes behaviour — **#687** — and three are
-documentation: **#685**, **#688** and **#PENDING** (this section). Listed so the range reconciles.
+documentation: **#685**, **#688** and **#689** (this section). Listed so the range reconciles.
 
 ### A create with no identifier is no longer reported healthy (#682, #687)
 
