@@ -26,6 +26,127 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-14 — 0.69.0
+
+**One fix: "I cannot look" is no longer reported as "up to date".** Observe assumed a resource was up to
+date, set `Available` and returned `{exists: true, upToDate: true}` **without making any HTTP request**,
+whenever no identifier was resolvable and the kind declared no `findby` verb. The CR then read
+`Ready=True`/`Available` for as long as it existed, with the external resource unmanaged and spec edits
+never reaching the vendor.
+
+`git log 0.68.0..0.69.0` holds four commits. One changes behaviour — **#687** — and three are
+documentation: **#685**, **#688** and **#PENDING** (this section). Listed so the range reconciles.
+
+### A create with no identifier is no longer reported healthy (#682, #687)
+
+Measured by `github-provider-kog` on a cluster against real GitHub, with a positive control:
+
+```
+DUP  POST -> 303 See Other -> GET Location -> 200 {"total_count":2,"branch_policies":[...]}
+     status.id=None, status.name=None
+     observed 19:16:11 and 19:19:11 -- "up to date" both times, ZERO HTTP requests
+     Ready=True/Available, Synced=True/ReconcileSuccess, NO Observed condition
+CTRL POST -> 200 -> status.id=66732937, Observed=True/ResponseObtained   (control passed)
+```
+
+GitHub held the policy; the CR held nothing.
+
+**This was #347's latch reached by a route its guard was not built for.** #347 keys on
+`Synced == ReconcileError` — *"did the previous reconcile error"* — and this shape is *"the previous
+reconcile **succeeded** and still produced no identifier"*. **0.68.0's #681 made it more reachable**, as
+that release's own section records: a status-write failure used to error and produce a visible create
+loop, and now reports success and lands here instead.
+
+### The discriminator is the get verb, not the identifier count
+
+`IsResourceKnown` collapses two different situations into one `false`:
+
+| situation | observable? | answer |
+|---|---|---|
+| no `get` verb declared | no, **by declaration** | nothing better exists — the historical assume-up-to-date path is kept |
+| `get` declared, identifier absent | **yes in principle** — the handle was lost | refuse to answer |
+
+A test asserts the fallback still exists **and** that the refusal precedes it, because a refusal placed
+after the fallback would be unreachable code that still compiles.
+
+### Visible change
+
+A CR in that state now carries **`Ready=False`** with reason **`NoIdentifierRecorded`** and a message
+naming the cause, instead of `Ready=True`/`Available`. The message warns that the external resource
+**may exist and be unreferenced**, and says explicitly not to delete the CR to clear the condition,
+because that orphans it.
+
+**Nothing in rest-dynamic-controller clears this state**, and that is deliberate rather than an
+oversight: the get path needs the identifier that is missing, there is no findby to search with, and
+Observe is the only thing that writes identifiers into status. It clears on a write to the CR's status,
+or on a RestDefinition change declaring a `findby` — after which the kind becomes self-healing. Not on
+anything the vendor does.
+
+core-provider's composition rollup maps the reason to **childFailed** beside `CreateUnreachable` and
+`NoCreateVerbDeclared` (their #510), so a parent composition reads `Unavailable` and names the child
+rather than converging forever.
+
+### Why neither plausible answer was available
+
+Reporting **not-exists** sends the runtime back to Create, which on a vendor that mints the identifier
+duplicates the resource on every pass. Assuming **Available** is the defect itself. So this refuses, and
+returns the error wrapped in `controller.ReadyAssessed` — which is load-bearing: `handleObserve`
+otherwise replaces `Ready` with `ObserveFailed`, and the reason naming the cause would be overwritten
+before anyone read it.
+
+This is the **fourth** place in this codebase where "I could not determine this" has to be its own
+answer, after `Exists` (a synthesised 404 is not proof of absence), `liveInstanceCount` (a failed LIST is
+not zero instances) and the delete guard (unverifiable must not read as deleted). All four are paths
+where the plausible value is also the destructive one.
+
+### Known limitation
+
+> **Known issue (2026-11-14, issue 682): the CAUSE measured in that run is still unfixed.** A create
+> answered with a 3xx is still followed by Go's HTTP client, and the redirect's body is still read as the
+> created object — `clearStatusFields` wipes status and `populateStatusFields` skips every identifier it
+> cannot find, silently. What changed is the *report*: such a CR now says `NoIdentifierRecorded` instead
+> of claiming to be healthy. The create is still wrong.
+>
+> `snowplow.go:48` already installs `CheckRedirect: refuseRedirects` on its own clients, with a
+> documented argument; every other client in the repo follows redirects. Fixing that is a decision rather
+> than a patch, because a vendor answering 308 on a moved endpoint is a legitimate shape, and the two
+> candidate shapes differ — refuse 3xx outright, or keep following but refuse to populate status from a
+> response whose request was redirected.
+
+### Documentation in this release
+
+- **#685** corrects a claim in `observed_condition.go` that `condition.Upsert` rewrites
+  `lastTransitionTime` on every reconcile. True when written, false since `unstructured-runtime` v1.7.5
+  — swept across the cached versions: v1.7.1 overwrites, v1.9.0 onward preserve. The
+  `openstack-ironic-operator-kog` session had quoted it to argue that core-provider's stall clock could
+  not work. The guard stays, with its justification corrected from a correctness argument to a
+  request-rate one.
+- **#688** documents this file's four annotation labels, which had been applied to 14 of its 20
+  blockquotes and defined nowhere, and adds a `Note` to 0.68.0's section recording that the release
+  moved where a status-write conflict is reported — both obvious log messages went quiet while the
+  wrapped error text survived.
+
+### Verification
+
+`go test -race -tags=unit ./...`: 21 packages ok, 0 failures. #687's tests are mutation-verified on five
+arms, each expected to fail for a named reason and all five did — including one that moved the source
+test's slice anchor so its **control** had to fire rather than its assertion, confirmed by reading which
+message appeared.
+
+**Not exercised at the time of tagging.** The latch this replaces was measured on a cluster; the refusal
+itself has only run in unit tests. keycloak-provider-kog has stated in advance that #682 is
+**unreachable on their corpus** — their kinds resolve identifiers from spec, so `IsResourceKnown` is
+true and the branch cannot be entered — and will report it as unreachable rather than as verified.
+That is the right answer and is recorded here so a later reader does not mistake a missing
+verification for a skipped one.
+
+**0.68.0 below it IS exercised.** keycloak-provider-kog passed every arm with nothing voided: the
+#676 race fired on two of three CRs with a no-race control on the third, one create POST each, zero
+409s, `external-create-succeeded` set and no `external-create-failed`, and exactly one Keycloak client
+per clientId counted from a full listing with a positive control. Their own tooling printed a blank
+Keycloak count at one point, because a 300-character truncation broke the JSON — they recounted rather
+than reading the blank as "none".
+
 ## 2026-11-14 — 0.68.0
 
 **One defect, fixed on both sides: a create that reached the vendor is no longer reported as a failed
