@@ -178,12 +178,81 @@ func populateStatusFields(clientInfo *getter.Info, mg *unstructured.Unstructured
 	return nil
 }
 
-// clearStatusFields removes the status field from the Custom Resource.
-// This is used during Create and Update operations to ensure no stale fields remain.
+// controllerOwnedStatusKeys are the status keys this controller writes about ITSELF, as opposed to
+// values copied out of a vendor response. They must survive a status clear.
+//
+// ONE LIST, USED BY BOTH SITES. writeObservedStatus already guarded `conditions` and
+// `observedGeneration` -- "never let the composed result clobber runtime-managed status fields" --
+// while clearStatusFields removed the whole subtree. Two sites disagreeing about the same rule is the
+// defect one level up, and it is why this was not found by reading: a reader who finds the guarded
+// site reasonably assumes the rule is applied.
+var controllerOwnedStatusKeys = []string{
+	"conditions",
+	"observedGeneration",
+	statusResolvedResolversDigest,
+}
+
+func isControllerOwnedStatusKey(k string) bool {
+	return slices.Contains(controllerOwnedStatusKeys, k)
+}
+
+// clearStatusFields drops the RESPONSE-DERIVED status fields of a Custom Resource, so that no stale
+// value survives into the next reconcile. Used during Create and Update.
+//
+// WHAT IT MUST NOT DROP, and why this is not a whole-subtree removal (issue 667). The stated purpose
+// is stale identifiers: a `status.id` left over from a previously-deleted external resource deadlocks
+// Observe. Removing all of `status` also destroyed three keys the controller owns, with two distinct
+// consequences:
+//
+//   - EVERY condition type except the one the caller re-adds was destroyed. Ready survived only
+//     because Observe re-decides it every pass, so the surviving set was "whatever something else
+//     happens to rewrite" -- a property nobody declared. ResolverDigestRecorded was simply the first
+//     condition whose write is gated on a non-recurring branch (`if bootstrappedDigest`), so it never
+//     came back at all. Scoping a fix to that one condition would hold only until the next one.
+//
+//   - status.resolvedResolversDigest was wiped BEFORE the pending/success split. The success branch
+//     re-records it; the PENDING branch deliberately does not, because a pending update has not
+//     landed -- so the digest was already gone, the next Observe saw recorded == "" and ADOPTED the
+//     rotated fingerprints, and the rotation was retired without ever reaching the vendor.
+//
+// PRESERVE BY CONSTRUCTION, NOT BY RE-RECORDING. Re-recording the digest on more branches shrinks
+// that window; keeping it out of what this function touches closes it. The distinction matters
+// because the branch that was missed is the one that only occurs when an update is SLOW -- so the
+// rotation was retired by the act of being slow, and slowness is a vendor property, not a code path
+// anyone here controls. For a write-only field the only safe behaviour is to preserve the prior
+// digest untouched and never re-derive it.
 func clearStatusFields(mg *unstructured.Unstructured) {
 	if mg == nil {
 		return
 	}
 
-	unstructured.RemoveNestedField(mg.Object, "status")
+	status, _, err := unstructured.NestedMap(mg.Object, "status")
+	if err != nil || status == nil {
+		// Unreadable or absent: there is nothing worth preserving, and the old behaviour is still the
+		// right answer for a malformed status.
+		unstructured.RemoveNestedField(mg.Object, "status")
+		return
+	}
+	for k := range status {
+		if isControllerOwnedStatusKey(k) {
+			continue
+		}
+		delete(status, k)
+	}
+	if len(status) == 0 {
+		// NOTHING SURVIVED, so remove the key rather than leaving `status: {}`.
+		//
+		// This keeps the pre-667 result byte-identical whenever there was nothing to preserve, which
+		// is what TestClearCRStatusFields pins -- and it caught this on the first run. The
+		// distinction is not cosmetic in this codebase: CompareExisting reports a CR-populated object
+		// against a remote-EMPTY one as drift while treating an ABSENT key as equal
+		// (comparison.go:184 vs :223, issue 663). Leaving an empty map where there used to be no key
+		// is exactly the absent-versus-empty difference that bug turns on.
+		unstructured.RemoveNestedField(mg.Object, "status")
+		return
+	}
+	if serr := unstructured.SetNestedMap(mg.Object, status, "status"); serr != nil {
+		// SetNestedMap only fails on a non-map at the path, which NestedMap just ruled out.
+		unstructured.RemoveNestedField(mg.Object, "status")
+	}
 }
