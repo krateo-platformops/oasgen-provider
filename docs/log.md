@@ -123,6 +123,34 @@ creation, and the being-deleted refusal already returned `Requested:false`.
 > costs nothing at the vendor, because nothing was ever created there — which makes it the better
 > advice for exactly these kinds. The durable fix is cross-repo and is tracked in #672.
 
+> **Known issue (2026-11-14, issue 674): this release makes a no-`create`-verb kind write
+> `external-create-pending` about five times a second, forever, and NOTHING IN THE CR SHOWS IT.**
+> Measured on these released images by a consumer: 2839 and 3918 watch deliveries in eleven minutes
+> for two such CRs, ~4-6 writes/second each, flat — while the conditions stayed correct and stable at
+> `Ready=False/NoCreateVerbDeclared` + `Synced=False/NoCreateVerbDeclared` throughout. **Correct
+> conditions are exactly what hides this**, so look at the write rate rather than at `status`.
+>
+> The cause is this release's own change. `Requested:false` with a **nil error** replaced a branch that
+> returned an **error**, and the error path both kept `external-create-pending` and took the
+> workqueue's backoff. The runtime registers
+> `watchAnnotations.Add(Create, AnnotationKeyExternalCreatePending, OnDelete, …)`, so **deleting that
+> annotation fires a `Create` event** — and `createNotRequested` deletes it unconditionally on every
+> not-requested pass. Each pass therefore schedules the next immediately.
+>
+> A second symptom follows: at a read where `pending` happens to be present — roughly half of them —
+> `succeeded` and `failed` are both absent, so `ExternalCreateIncomplete` returns true. Intermittent,
+> not permanent; the known issue above is the same state reached from the opposite direction.
+>
+> **Affected shape:** any CR of a kind declaring **no `create` verb**. The only known instances
+> anywhere are one consumer's two kinds, and they are **holding at 0.65.0**, so no fleet is exposed —
+> which is luck about who has the shape, not a narrow defect. `PendingReferent` and
+> `AuthorizationDenied` take the same route and would loop identically; both are unreachable in every
+> probed corpus, which is the only reason this is one shape rather than three.
+>
+> **Do not take 0.66.0 for a composition containing a no-`create`-verb kind.** The fix belongs in
+> `unstructured-runtime` — no handler return avoids it, since an error is the pre-#664 behaviour with
+> the condition overwritten — and 0.67.0 will carry the bump. Tracked in #674.
+
 ### An array of objects returned reordered can converge (#650, #658, #669)
 
 `x-kubernetes-list-type` and `x-kubernetes-list-map-keys` pass through from an OAS document into the
