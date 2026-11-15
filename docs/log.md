@@ -33,7 +33,7 @@ read `Synced == ReconcileError` to mean "the create failed, retry it" — a cond
 sets, including 0.69.0's own no-identifier refusal. So the refusal produced the error the retry branch
 read as a failed create, and the pair looped.
 
-`git log 0.70.0..0.71.0` holds two commits: **#697**, the fix, and **#PENDING**, this section.
+`git log 0.70.0..0.71.0` holds two commits: **#697**, the fix, and **#698**, this section.
 
 ### The retry branch keys on the create's own outcome (#696, #697)
 
