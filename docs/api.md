@@ -38,7 +38,7 @@ the CRDs it generates from it. Sources of truth:
 | `verbsDescription[]` | ✔︎ | ✖︎ | The action → endpoint mappings (below). |
 | `identifiers[]` | ✖︎ | ✔︎ | Human-friendly unique fields `findby` matches on; surfaced in status. Only meaningful with a `findby` verb. |
 | `additionalStatusFields[]` | ✖︎ | append-only | Extra response fields surfaced in status (typically technical ids used by `get`). **Append-only, not immutable** — you may add entries at the end; existing ones cannot be removed, renamed, reordered or changed. |
-| `excludedSpecFields[]` | ✖︎ | ✔︎ | Fields excluded from the generated spec (server-generated ids etc.). Dots inside a single field name are escaped bracket-style: `'["searchCriteria.title"]'`. |
+| `excludedSpecFields[]` | ✖︎ | ✖︎ | Fields excluded from the generated spec (server-generated ids etc.). Dots inside a single field name are escaped bracket-style: `'["searchCriteria.title"]'`. **Mutable since 0.72.0** and deliberately not append-only — the recovery an author needs is *removing* an entry they should never have added, which append-only forbids. Editing it regenerates the CRD (`excludedSpecFields` is inside `spec.resource`, and `status.resourceHash` hashes all of it, so the edit is drift on the next Observe). Removing an entry widens the spec and is always safe; **adding** one prunes a property the CRD may already be serving, so generation emits a warning naming the field in `status.schemaWarnings` and as a Warning event rather than refusing — the apiserver prunes it from stored CRs without consulting the provider, so refusing would protect nothing. |
 | `includedSpecFields[]` | ✖︎ | append-only | The **allowlist** counterpart: when set, the generated spec keeps only these fields. Mutually exclusive with `excludedSpecFields` (CEL — an allowlist and a blocklist over the same fields is a contradiction, not a merge). Max 256 entries, dot-notation; naming a parent keeps its whole subtree, naming a child keeps the parent and only the listed children. A listed field that does **not** exist is fatal, where `excludedSpecFields` only warns — a typo in a blocklist leaves a field in, where it is visible; a typo in an allowlist leaves one out, and the author sees a CR rejected on a field they believed they had included. Four things are kept whether listed or not, because the resource cannot function without them: `configurationRef`, spec fields derived from **required** OAS parameters, and the identifier selectors materialised into a create-less resource's spec. |
 | `configurationFields[]` | ✖︎ | ✔︎ | OAS parameters lifted into the generated `*Configuration` CRD: `fromOpenAPI.{name,in}` + `fromRestDefinition.actions` (`["*"]` = all actions, min 1 item). |
 | `compareScope` | ✖︎ | mutable | Drift-comparison scope. `fullSpec` (default) compares every spec field against the observed response. `identifiersAndStatus` compares only identifiers + additionalStatusFields (requires at least one of them; CEL-enforced). `updatable` compares only the fields the **update verb's request body can express**, derived from the OAS rather than declared by hand — a field the update cannot send is one the controller cannot fix, so comparing it would loop forever; requires an update verb (CEL-enforced). |
@@ -50,13 +50,13 @@ someone work: it told readers they could not append a status field when appendin
 rule permits.
 
 Strictly immutable (`self == oldSelf`) — changing one means deleting and recreating the RestDefinition:
-`resourceGroup`, `kind`, `identifiers`, `excludedSpecFields`, `configurationFields`.
+`resourceGroup`, `kind`, `identifiers`, `configurationFields`.
 
 **Append-only** (`size(self) >= size(oldSelf) && oldSelf.all(i, v, self[i] == v)`) — you may add entries
 at the end, but existing entries cannot be removed, renamed, reordered or changed:
 `additionalStatusFields`, `includedSpecFields`.
 
-So **five strict and two append-only**, seven rules in total. The authority is the marker on each field in
+So **four strict and two append-only**, six rules in total. (It was five strict until 0.72.0; #666 unfroze `excludedSpecFields`.) The authority is the marker on each field in
 `apis/restdefinitions/v1alpha1/types.go`; counting them by grepping the rendered CRD for `oldSelf`
 over-counts, because two of the matches are inside a `description` rather than a `rule`.
 

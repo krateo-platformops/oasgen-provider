@@ -994,16 +994,36 @@ type Resource struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="ConfigurationFields are immutable, you cannot change them once the CRD has been generated"
 	// +optional
 	ConfigurationFields []ConfigurationField `json:"configurationFields,omitempty"`
-	// ExcludedSpecFields: the list of fields to exclude from the spec of the generated CRD (for example server-generated technical IDs could be excluded)
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="ExcludedSpecFields are immutable, you cannot change them once the CRD has been generated"
+	// ExcludedSpecFields: the list of fields to exclude from the spec of the generated CRD (for example
+	// server-generated technical IDs could be excluded)
+	//
+	// MUTABLE, and deliberately not append-only (#666). It was strictly immutable until 0.72.0, which made a
+	// blocklist unrecoverable: a wide vendor schema inverts badly -- Keycloak's RealmRepresentation has 152
+	// fields, so "I want 30 of them" means naming ~122 exclusions, and one wrong entry could only be undone by
+	// deleting the RestDefinition and with it every CR of that kind. Append-only would not have helped, because
+	// the recovery an author needs is REMOVING an entry they should never have added.
+	//
+	// Changing it regenerates the CRD rather than being silently accepted: excludedSpecFields lives in
+	// spec.resource, and status.resourceHash is a sha256 over the WHOLE of spec.resource, so an edit here is
+	// drift on the next Observe and Update re-renders. That is the property that makes this safe to unfreeze,
+	// and it is the one to re-check before unfreezing anything else in this struct.
+	//
+	// REMOVING an entry widens the spec, which is always safe. ADDING one prunes a property the CRD may
+	// already be serving, and any CR that still sets it will be rejected on its next apply -- so generation
+	// emits a warning naming the field (status.schemaWarnings plus a Warning event) rather than refusing. The
+	// apiserver prunes the field from stored CRs without consulting this provider, so refusing the edit would
+	// not protect anything that is not already at risk; the author is the only one who can say whether the
+	// field is still wanted.
 	// +optional
 	ExcludedSpecFields []string `json:"excludedSpecFields,omitempty"`
 	// IncludedSpecFields: the ALLOWLIST counterpart of excludedSpecFields. When set, the generated spec keeps
 	// ONLY these fields (plus the machinery described below); when unset, nothing changes.
 	//
 	// A blocklist inverts badly on a wide vendor schema. Keycloak's RealmRepresentation has 152 fields, so
-	// "I want 30 of them" means naming ~122 exclusions, and because excludedSpecFields is immutable, getting
-	// that list wrong once is unrecoverable without deleting the RestDefinition and its CRs. The Keycloak KOG
+	// "I want 30 of them" means naming ~122 exclusions, and a list that long is easy to get wrong. (Until
+	// 0.72.0 excludedSpecFields was also immutable, so getting it wrong once was unrecoverable without deleting
+	// the RestDefinition and its CRs; #666 lifted that, but the INVERSION is the reason this field exists and
+	// it is unaffected -- naming 122 exclusions correctly is still worse than naming 30 inclusions.) The Keycloak KOG
 	// abandoned the vendor document over exactly this and hand-writes a curated OAS per kind -- a 328-line
 	// generator plus a vendored subset standing in for a 30-line RestDefinition.
 	//
@@ -1211,6 +1231,7 @@ type RestDefinitionStatus struct {
 	//
 	// The CRD is regenerated when the OAS content changes, which was sufficient while every input to
 	// generation was immutable. additionalStatusFields is append-only rather than immutable (a KOG chart
+	// adding a status field must be upgradable in place), and since #666 excludedSpecFields is fully mutable,
 	// adding a status field must be upgradable in place), so a RestDefinition can now change in a way that
 	// alters the generated schema while the OAS is byte-identical. Without this the apply would be accepted
 	// and then do nothing -- the CRD keeping its old status schema, looking for all the world like it had

@@ -324,9 +324,11 @@ func (g *OASSchemaGenerator) addParametersToSpec(schema *Schema) (map[string]boo
 					// declared intent and there is nothing to tell them. The consumer's argument, which
 					// inverts what I had proposed: the case worth warning about is a mapped parameter the
 					// author NEVER declared, where a CR plausibly set it before. And it is not merely
-					// noise -- ExcludedSpecFields carries `self == oldSelf` (types.go:958), so an author
-					// CANNOT remove the entry. Warning about it is a permanent message they have no action
-					// for, which is the fastest way to teach people to ignore warnings.
+					// noise. (This argument used to carry a second half -- that excludedSpecFields was
+					// `self == oldSelf`, so an author could not remove the entry and the message was
+					// permanent. #666 unfroze the field in 0.72.0 and that half is now false. The first
+					// half stands alone: an entry IS the acknowledgement, so there is nothing to tell
+					// them, and that holds however mutable the field is.)
 					// DEFERRED TO AFTER THE LOOP (#457), because propertyExists reads the schema BEING
 					// BUILT and is therefore only final once building has finished.
 					//
@@ -808,10 +810,16 @@ func (g *OASSchemaGenerator) removeExcludedSpecFields(schema *Schema, requiredPa
 			// one out of the spec, and the two declarations are meant to coexist -- gets this warning for a
 			// correct configuration. The exclusion IS inert; it is inert because the mapping did the job.
 			//
-			// AND THE AUTHOR CANNOT ACT ON IT. ExcludedSpecFields carries `self == oldSelf` (types.go), so
-			// the entry is immutable once the CRD exists. A permanent message with no action behind it is,
-			// in this file's own words about the mirror case, "the fastest way to teach people to ignore
-			// warnings".
+			// THE SUPPRESSION DOES NOT DEPEND ON IMMUTABILITY, and this paragraph used to say it did.
+			// It read: "AND THE AUTHOR CANNOT ACT ON IT. ExcludedSpecFields carries `self == oldSelf`, so
+			// the entry is immutable once the CRD exists" -- a permanent message with no action behind it.
+			// #666 unfroze excludedSpecFields in 0.72.0, so an author CAN now remove the entry, and that
+			// sentence is false.
+			//
+			// THAT IS NOT A REASON TO RE-ENABLE THE WARNING. The reason above is sufficient on its own:
+			// the configuration is CORRECT, the two declarations are meant to coexist, and the exclusion is
+			// inert because the mapping already did the job. Warning about a correct configuration is the
+			// defect #484 fixed, whether or not the author could act on the message.
 			//
 			// THE SUPPRESSION ALREADY EXISTED IN THE OTHER DIRECTION, which is what makes this a defect
 			// rather than a trade-off: the mapping-removal warning is suppressed when excludedSpecFields
