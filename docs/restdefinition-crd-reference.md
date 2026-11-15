@@ -6,7 +6,6 @@ resource: restdefinitions.ogen.krateo.io
 tags: [kog, crd, restdefinition, generated]
 timestamp: 2026-10-20T00:00:00Z
 ---
-
 # API Reference
 
 Packages:
@@ -107,7 +106,7 @@ RestDefinitionSpec is the specification of a RestDefinition.
         <td>
           The resource to manage<br/>
           <br/>
-            <i>Validations</i>:<li>!(has(self.createApiRef) && has(self.observeApiRef) && !has(self.observeApiRef.notFoundExpr)): createApiRef with observeApiRef requires observeApiRef.notFoundExpr, so a create can be triggered when the delegated observe reports the resource absent</li><li>!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby'): createApiRef requires a get or findby verb so the controller can verify the create converged (level-based convergence)</li><li>!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0): compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against</li><li>!has(self.compareScope) || self.compareScope != 'updatable' || self.verbsDescription.exists(v, v.action == 'update'): compareScope 'updatable' requires an update verb: with no update verb the set of updatable fields is empty, so nothing would ever be compared and the resource would silently never report drift</li><li>!(has(self.includedSpecFields) && has(self.excludedSpecFields)): declare at most one of includedSpecFields or excludedSpecFields: an allowlist and a blocklist over the same fields is a contradiction, not a merge</li><li>!self.verbsDescription.exists(v, v.action == 'dispatch') || !self.verbsDescription.exists(v, v.action == 'create' || v.action == 'update'): a 'dispatch' verb cannot be combined with 'create' or 'update': the dispatch IS the create, and there is nothing an update of a past invocation could mean</li><li>self.verbsDescription.filter(v, v.action == 'dispatch').size() <= 1: declare at most one 'dispatch' verb: two dispatches on one kind have no defined order and no way to tell which one a correlated invocation came from</li><li>!self.verbsDescription.exists(v, v.action == 'dispatch') || !(has(self.createApiRef) || has(self.updateApiRef) || has(self.deleteApiRef) || has(self.observeApiRef)): a 'dispatch' verb cannot be combined with any *ApiRef: delegating to a Snowplow RESTAction and declaring a correlated dispatch are the two alternative answers to the same problem, and declaring both leaves which one runs decided by the order of checks in the controller rather than by the author</li><li>!self.verbsDescription.exists(v, v.action == 'dispatch') || !has(self.compareScope): compareScope cannot be set alongside a 'dispatch' verb: a dispatch is compared on its correlation token alone, so any other scope would make an unrelated spec edit read as drift on a resource whose only response to drift is to fire the dispatch again</li>
+            <i>Validations</i>:<li>!(has(self.createApiRef) && has(self.observeApiRef) && !has(self.observeApiRef.notFoundExpr)): createApiRef with observeApiRef requires observeApiRef.notFoundExpr, so a create can be triggered when the delegated observe reports the resource absent</li><li>!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby'): createApiRef requires a get or findby verb so the controller can verify the create converged (level-based convergence)</li><li>!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0): compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against</li><li>!has(self.compareScope) || self.compareScope != 'updatable' || self.verbsDescription.exists(v, v.action == 'update'): compareScope 'updatable' requires an update verb: with no update verb the set of updatable fields is empty, so nothing would ever be compared and the resource would silently never report drift</li><li>!(has(self.includedSpecFields) && has(self.excludedSpecFields)): declare at most one of includedSpecFields or excludedSpecFields: an allowlist and a blocklist over the same fields is a contradiction, not a merge</li><li>!self.verbsDescription.exists(v, v.action == 'dispatch') || !self.verbsDescription.exists(v, v.action == 'create' || v.action == 'update'): a 'dispatch' verb cannot be combined with 'create' or 'update': the dispatch IS the create, and there is nothing an update of a past invocation could mean</li><li>self.verbsDescription.filter(v, v.action == 'dispatch').size() <= 1: declare at most one 'dispatch' verb: two dispatches on one kind have no defined order and no way to tell which one a correlated invocation came from</li><li>!self.verbsDescription.exists(v, v.action == 'dispatch') || !(has(self.createApiRef) || has(self.updateApiRef) || has(self.deleteApiRef) || has(self.observeApiRef)): a 'dispatch' verb cannot be combined with any *ApiRef: delegating to a Snowplow RESTAction and declaring a correlated dispatch are the two alternative answers to the same problem, and declaring both leaves which one runs decided by the order of checks in the controller rather than by the author</li><li>!has(self.dependentLookups) || self.dependentLookups.all(i, l, !has(l.parameters) || l.parameters.all(p, !has(p.fromLookup) || self.dependentLookups.exists(j, o, j < i && o.name == p.fromLookup))): a dependentLookups parameter's fromLookup must name a lookup declared EARLIER in the list: resolution is in declaration order, and restricting references to preceding entries makes a cycle unrepresentable rather than something detected at runtime</li><li>!self.verbsDescription.exists(v, v.action == 'dispatch') || !has(self.compareScope): compareScope cannot be set alongside a 'dispatch' verb: a dispatch is compared on its correlation token alone, so any other scope would make an unrelated spec edit read as drift on a resource whose only response to drift is to fire the dispatch again</li>
         </td>
         <td>true</td>
       </tr><tr>
@@ -119,6 +118,39 @@ RestDefinitionSpec is the specification of a RestDefinition.
             <i>Validations</i>:<li>self == oldSelf: ResourceGroup is immutable, you cannot change that once the CRD has been generated</li>
         </td>
         <td>true</td>
+      </tr><tr>
+        <td><b>serverURL</b></td>
+        <td>string</td>
+        <td>
+          ServerURL overrides the base URL the document declares in `servers[0]`, for every request this
+resource makes. It exists for a self-hosted instance of a service whose published OpenAPI document
+names the vendor's own endpoint: GitHub Enterprise Server serves the same API as github.com, at
+https://<host>/api/v3.
+
+It REPLACES servers[0] rather than adding to it, and that is a security property rather than a
+convenience. The endpoint host policy is built from the document's servers, so on a self-hosted
+install the vendor's public host stops being permitted at all -- a misconfigured install fails
+closed instead of reaching the public service with the credential meant for the private one.
+
+Give it a WHOLE base URL, scheme included, and keep the path:
+  https://ghe.corp.example.com/api/v3      correct
+  https://ghe.corp.example.com:8443/api/v3 correct, port preserved
+  ghe.corp.example.com                     REJECTED, no scheme
+  https://ghe.corp.example.com             accepted, but on GHES every request 404s -- the
+                                           /api/v3 prefix is part of the base URL, not the paths
+
+A trailing slash is tolerated. The field is deliberately NOT a host: a name containing "host"
+invites exactly the prefix-less value on the last line, which is accepted here and fails much
+later, at the vendor.
+
+It is MUTABLE, unlike resourceGroup. Correcting a self-hosted hostname is a legitimate edit, and it
+takes effect on the next reconcile with no restart, because the RestDefinition is read before the
+client is constructed at every entry point. It also sits OUTSIDE spec.resource on purpose:
+resourceHash marshals spec.resource only and that hash gates CRD regeneration, so a field inside it
+would re-apply the resource CRD on every hostname change, for a value the generated schema does not
+depend on.<br/>
+        </td>
+        <td>false</td>
       </tr></tbody>
 </table>
 
@@ -254,6 +286,32 @@ disk -> start).<br/>
 delete verb: on deletion the controller invokes the referenced RESTAction (the teardown sequence) and
 holds the finalizer until it succeeds. The RESTAction MUST be idempotent and tolerate an already-gone
 sub-resource.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourcedependentlookupsindex">dependentLookups</a></b></td>
+        <td>[]object</td>
+        <td>
+          DependentLookups declares named, pre-call reads whose selected value feeds a field of the main
+request, via a fieldMapping entry whose resolver names the lookup.
+
+This is the shape apiLookup could not express and was removed for (ff66424): its Action had to name
+a verb in verbsDescription, and that field is a closed enum, so an auxiliary endpoint could not be
+declared at all. A lookup is declared HERE, as a sibling of verbsDescription, precisely so it can
+name any endpoint in the document without widening that enum.
+
+Two consumers define this shape, filed independently by two providers:
+  - oasgen-provider#108's GitHub GitRef needs a CHAIN -- the default branch, then that branch's sha
+    -- where the second read's path parameter is the first read's result.
+  - rest-dynamic-controller#30's KeycloakClient needs client-side MATCHING over a list: find the
+    authentication flow whose alias equals a CR field, take its id.
+
+MaxItems is REQUIRED, not stylistic: the uniqueness and ordering rules below are CEL comprehensions,
+and Kubernetes costs a rule statically against the declared bound. An unbounded list estimates as
+effectively infinite and the apiserver refuses the whole CRD -- taking the install down rather than
+the RestDefinition (#169). Eight is generous; the two known consumers use two and one.<br/>
+          <br/>
+            <i>Validations</i>:<li>self.all(l, self.filter(o, o.name == l.name).size() == 1): dependentLookups names must be unique: a fieldMapping resolver names a lookup, so two lookups sharing a name leave which one runs decided by list order rather than by the author</li>
         </td>
         <td>false</td>
       </tr><tr>
@@ -1055,7 +1113,7 @@ inCustomResource — currently a secretRef, substituting a Kubernetes Secret's v
 BEFORE valueMapping, so a resolved value may still be alias/jq-transformed afterward. Valid
 only on request-direction entries (inPath/inQuery/inBody set).<br/>
           <br/>
-            <i>Validations</i>:<li>self.type == 'secretRef' ? has(self.secretRef) : true: secretRef must be set when type is 'secretRef'</li>
+            <i>Validations</i>:<li>self.type == 'secretRef' ? has(self.secretRef) : true: secretRef must be set when type is 'secretRef'</li><li>self.type == 'dependentLookup' ? has(self.dependentLookup) : true: dependentLookup must be set when type is 'dependentLookup'</li><li>self.type == 'secretRef' ? !has(self.dependentLookup) : true: dependentLookup cannot be set when type is 'secretRef'</li><li>self.type == 'dependentLookup' ? !has(self.secretRef) : true: secretRef cannot be set when type is 'dependentLookup'</li>
         </td>
         <td>false</td>
       </tr><tr>
@@ -1096,9 +1154,17 @@ only on request-direction entries (inPath/inQuery/inBody set).
         <td>
           Type selects the resolver kind.<br/>
           <br/>
-            <i>Enum</i>: secretRef<br/>
+            <i>Enum</i>: secretRef, dependentLookup<br/>
         </td>
         <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexfieldmappingindexresolverdependentlookup">dependentLookup</a></b></td>
+        <td>object</td>
+        <td>
+          DependentLookup substitutes the result of a named pre-call read (used when type is
+'dependentLookup'). The named lookup is declared in Resource.DependentLookups.<br/>
+        </td>
+        <td>false</td>
       </tr><tr>
         <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexfieldmappingindexresolversecretref">secretRef</a></b></td>
         <td>object</td>
@@ -1108,6 +1174,83 @@ Secret is always read from the Custom Resource instance's own namespace — ther
 different one.<br/>
         </td>
         <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexfieldmappingindexresolverwhen">when</a></b></td>
+        <td>object</td>
+        <td>
+          When makes this resolver conditional on the Custom Resource carrying a field. Without it a resolver
+is unconditional, which is the behaviour every definition has today.
+
+AT THE RESOLVER LEVEL, not inside secretRef, and deliberately so: the guard is about whether this
+MAPPING applies, which is independent of which resolver kind supplies the value. DependentLookupRef
+keeps its own `when` (LookupWhen) at its existing path, so no published field moves.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].fieldMapping[index].resolver.dependentLookup
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexfieldmappingindexresolver)</sup></sup>
+
+
+
+DependentLookup substitutes the result of a named pre-call read (used when type is
+'dependentLookup'). The named lookup is declared in Resource.DependentLookups.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>name</b></td>
+        <td>string</td>
+        <td>
+          Name is the dependentLookups entry to substitute from.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexfieldmappingindexresolverdependentlookupwhen">when</a></b></td>
+        <td>object</td>
+        <td>
+          When guards the lookup, so it is skipped when the value is already available. Without a guard, a CR
+that supplies the value explicitly would still pay for the read and then have the result discarded.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].fieldMapping[index].resolver.dependentLookup.when
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexfieldmappingindexresolverdependentlookup)</sup></sup>
+
+
+
+When guards the lookup, so it is skipped when the value is already available. Without a guard, a CR
+that supplies the value explicitly would still pay for the read and then have the result discarded.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>customResourceFieldAbsent</b></td>
+        <td>string</td>
+        <td>
+          CustomResourceFieldAbsent runs the lookup only when this JSONPath is absent or null in the Custom
+Resource, so an explicitly supplied value wins and costs no API calls.<br/>
+        </td>
+        <td>true</td>
       </tr></tbody>
 </table>
 
@@ -1142,6 +1285,57 @@ different one.
         <td>string</td>
         <td>
           NameFromCustomResource is a JSONPath into the Custom Resource yielding the Secret's name.<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].fieldMapping[index].resolver.when
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexfieldmappingindexresolver)</sup></sup>
+
+
+
+When makes this resolver conditional on the Custom Resource carrying a field. Without it a resolver
+is unconditional, which is the behaviour every definition has today.
+
+AT THE RESOLVER LEVEL, not inside secretRef, and deliberately so: the guard is about whether this
+MAPPING applies, which is independent of which resolver kind supplies the value. DependentLookupRef
+keeps its own `when` (LookupWhen) at its existing path, so no published field moves.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>customResourceFieldPresent</b></td>
+        <td>string</td>
+        <td>
+          CustomResourceFieldPresent resolves this mapping only when this path resolves to a non-null value on
+the Custom Resource. When the path is absent or explicitly null, the whole mapping is SKIPPED: no
+Secret is read and nothing is written to the request.
+
+An explicit null counting as absent is the existing convention (see LookupWhen): it is how a CR says
+"I am not supplying this".
+
+THE GUARD PATH IS A SEPARATE READ from the resolver's own paths. If the guard path is ambiguous --
+a [?key=value] selector matching more than one element -- that is an ERROR, not a skip. A skip would
+turn a malformed resource into one that silently reconciles without the guarded field, which is the
+exact outcome the guard exists to prevent.
+
+MinLength=1 BECAUSE AN EMPTY PATH SILENTLY DISABLES THE GUARD. The field is +required, so `when: {}`
+is already refused -- but `customResourceFieldPresent: ""` was admitted, and both evaluation sites
+treat an empty path as "no guard" and resolve unconditionally. So a templating accident that renders
+an empty string produced a definition that validates, shows the guard on `kubectl get`, and behaves
+as though it were absent. A reviewer found this; no test covered it, because an empty path reaches
+exactly the same code path as a nil guard.
+
+Safe as a tightening: this field has never shipped, so no existing definition can carry an empty one.<br/>
         </td>
         <td>true</td>
       </tr></tbody>
@@ -2369,6 +2563,363 @@ If empty, the whole module body is executed as the program. Only meaningful toge
 </table>
 
 
+### RestDefinition.spec.resource.dependentLookups[index]
+<sup><sup>[↩ Parent](#restdefinitionspecresource)</sup></sup>
+
+
+
+DependentLookup is a named, pre-call read against any endpoint in the document, whose selected value is
+substituted into a field of the main request by a fieldMapping entry naming it.
+
+Exactly one of 'select' or 'match' is configured: 'select' picks a value out of a single-object response
+(GitRef's two reads), 'match' finds one item in a list response and takes a field off it (Keycloak's
+alias -> id).
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>method</b></td>
+        <td>enum</td>
+        <td>
+          Method is the HTTP method of the lookup's operation.
+
+GET only, deliberately. A lookup is a READ, and the APIs that express a search as POST need a
+request body, which there is no field here to declare. Admitting POST without that would ship a
+discoverable value that cannot work -- the mistake apiLookup made. Neither known consumer needs it:
+GitRef chains two GETs, KeycloakClient lists with a GET. Widen it together with a way to declare
+the body, when something actually needs one.<br/>
+          <br/>
+            <i>Enum</i>: GET<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>name</b></td>
+        <td>string</td>
+        <td>
+          Name identifies this lookup. A fieldMapping resolver references it by this name, as does a later
+lookup's parameter via 'fromLookup'.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>path</b></td>
+        <td>string</td>
+        <td>
+          Path is the lookup's path, which MUST exist in the document under Method exactly as a verb's does --
+parameters are resolved against the document, so a path that is not declared there has no parameter
+schema and cannot be bound.
+
+This is a sharper constraint than it looks when transcribing an API's docs. oasgen-provider#120
+writes GitHub's git-ref read in prose as /repos/{owner}/{repo}/git/ref/heads/{default_branch}, but
+GitHub's actual operation is GET /repos/{owner}/{repo}/git/ref/{ref} -- ONE parameter, whose value
+must be formatted "heads/<branch>". The prose path would not resolve; the real one needs the prefix
+supplied, which is what a parameter's valueMapping is for.
+
+A document also has to declare the operation at all. Confirmed with the GitHub KOG: none of the five
+OAS assets it ships declares any git-ref operation today -- the only git/refs occurrences are
+git_refs_url hypermedia example strings inside the Repository schema. Adding the operation to the
+document is a prerequisite for that consumer, separate from this field existing.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourcedependentlookupsindexmatch">match</a></b></td>
+        <td>object</td>
+        <td>
+          Match finds exactly one item in a list response and takes a field off it.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>oasPath</b></td>
+        <td>string</td>
+        <td>
+          OASPath overrides the document this lookup resolves against, exactly as a verb's does (#108). A
+lookup against a different service than the resource's own verbs is the case this exists for.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourcedependentlookupsindexparametersindex">parameters</a></b></td>
+        <td>[]object</td>
+        <td>
+          Parameters binds the lookup's OWN path and query parameters, from the Custom Resource or from an
+earlier lookup's result.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>select</b></td>
+        <td>string</td>
+        <td>
+          Select is a gojq program run against the lookup's response body, yielding the single value to
+substitute, e.g. '.default_branch' or '.object.sha'.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.dependentLookups[index].match
+<sup><sup>[↩ Parent](#restdefinitionspecresourcedependentlookupsindex)</sup></sup>
+
+
+
+Match finds exactly one item in a list response and takes a field off it.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>equalsFromCustomResource</b></td>
+        <td>string</td>
+        <td>
+          EqualsFromCustomResource is a JSONPath into the Custom Resource yielding the value to match.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>selectField</b></td>
+        <td>string</td>
+        <td>
+          SelectField is the field taken off the matched item, e.g. 'id'.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>whereField</b></td>
+        <td>string</td>
+        <td>
+          WhereField is the field on each item compared against the Custom Resource value, e.g. 'alias'.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>itemsAt</b></td>
+        <td>string</td>
+        <td>
+          ItemsAt is a gojq program yielding the array to search. Defaults to '.' for a response that is
+itself a bare array.<br/>
+          <br/>
+            <i>Default</i>: .<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>onMissing</b></td>
+        <td>enum</td>
+        <td>
+          OnMissing selects what happens when no item matches.
+  - "requeue" (default): the referent may still be converging -- a flow CR that has not been
+    created yet is the expected case, not an error.
+  - "error": no match is a permanent misconfiguration.<br/>
+          <br/>
+            <i>Enum</i>: requeue, error<br/>
+            <i>Default</i>: requeue<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.dependentLookups[index].parameters[index]
+<sup><sup>[↩ Parent](#restdefinitionspecresourcedependentlookupsindex)</sup></sup>
+
+
+
+LookupParameter binds one of a lookup's own parameters. The value comes EITHER from the Custom Resource
+or from an earlier lookup's result, never both.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>fromLookup</b></td>
+        <td>string</td>
+        <td>
+          FromLookup names an EARLIER dependentLookups entry whose result supplies the value.
+
+"Earlier" is load-bearing and enforced at the Resource level: a lookup may only reference one
+declared above it. That makes a cycle unrepresentable rather than detected, so there is no solver
+and no runtime cycle check to get wrong.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>inCustomResource</b></td>
+        <td>string</td>
+        <td>
+          InCustomResource is a JSONPath into the Custom Resource supplying the value.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>inPath</b></td>
+        <td>string</td>
+        <td>
+          InPath selects a path parameter of the lookup's operation.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>inQuery</b></td>
+        <td>string</td>
+        <td>
+          InQuery selects a query parameter of the lookup's operation.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourcedependentlookupsindexparametersindexvaluemapping">valueMapping</a></b></td>
+        <td>object</td>
+        <td>
+          ValueMapping transforms the value before it is bound, using the same tiers as a fieldMapping entry.
+The jq tier is what supplies a prefix a declared path needs but the source value does not carry,
+e.g. '"heads/" + .' for GitHub's {ref}.<br/>
+          <br/>
+            <i>Validations</i>:<li>self.type == 'alias' ? has(self.aliases) : true: aliases must be set when type is 'alias'</li><li>self.type == 'jq' ? has(self.jq) : true: jq must be set when type is 'jq'</li>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.dependentLookups[index].parameters[index].valueMapping
+<sup><sup>[↩ Parent](#restdefinitionspecresourcedependentlookupsindexparametersindex)</sup></sup>
+
+
+
+ValueMapping transforms the value before it is bound, using the same tiers as a fieldMapping entry.
+The jq tier is what supplies a prefix a declared path needs but the source value does not carry,
+e.g. '"heads/" + .' for GitHub's {ref}.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>type</b></td>
+        <td>enum</td>
+        <td>
+          Type selects the transform tier.<br/>
+          <br/>
+            <i>Enum</i>: alias, jq<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourcedependentlookupsindexparametersindexvaluemappingaliasesindex">aliases</a></b></td>
+        <td>[]object</td>
+        <td>
+          Aliases is an explicit set of bidirectional CR<->API value pairs (used when type is 'alias').
+On the request the CR value is rewritten to its apiValue; on the response the apiValue is rewritten
+back to the CR value; any value without a matching pair passes through unchanged.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourcedependentlookupsindexparametersindexvaluemappingjq">jq</a></b></td>
+        <td>object</td>
+        <td>
+          JQ is a gojq program (used when type is 'jq'), supplied inline or as a referenced .jq module.
+The program is one-directional: for a round-tripping field, write the inverse program in the
+opposite-direction entry.<br/>
+          <br/>
+            <i>Validations</i>:<li>has(self.inline) != has(self.ref): exactly one of inline or ref must be set</li><li>!has(self.entrypoint) || has(self.ref): entrypoint is only valid together with ref</li>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.dependentLookups[index].parameters[index].valueMapping.aliases[index]
+<sup><sup>[↩ Parent](#restdefinitionspecresourcedependentlookupsindexparametersindexvaluemapping)</sup></sup>
+
+
+
+ValueAlias is a single bidirectional CR<->API value pair, e.g. {customResourceValue: read, apiValue: pull}.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>apiValue</b></td>
+        <td>string</td>
+        <td>
+          APIValue is the corresponding value as expressed by the external API (API domain).<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>customResourceValue</b></td>
+        <td>string</td>
+        <td>
+          CustomResourceValue is the value as expressed in the Custom Resource (CR domain).<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.dependentLookups[index].parameters[index].valueMapping.jq
+<sup><sup>[↩ Parent](#restdefinitionspecresourcedependentlookupsindexparametersindexvaluemapping)</sup></sup>
+
+
+
+JQ is a gojq program (used when type is 'jq'), supplied inline or as a referenced .jq module.
+The program is one-directional: for a round-tripping field, write the inverse program in the
+opposite-direction entry.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>entrypoint</b></td>
+        <td>string</td>
+        <td>
+          Entrypoint is the jq function defined in the referenced module to invoke, e.g. "normalize".
+If empty, the whole module body is executed as the program. Only meaningful together with ref.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>inline</b></td>
+        <td>string</td>
+        <td>
+          Inline is a gojq source literal. Best for short, single-use expressions.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>ref</b></td>
+        <td>string</td>
+        <td>
+          Ref references a self-contained .jq module asset, using the SAME URI scheme as spec.oasPath:
+  configmap://<namespace>/<name>/<key>   |   http(s)://<url><br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
 ### RestDefinition.spec.resource.observeApiRef
 <sup><sup>[↩ Parent](#restdefinitionspecresource)</sup></sup>
 
@@ -2758,6 +3309,29 @@ delete can tear down every namespace's RBAC without re-listing (possibly already
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b>generatorBuild</b></td>
+        <td>string</td>
+        <td>
+          GeneratorBuild: the build identity of the oasgen-provider that last generated this
+RestDefinition's CRD -- the string stamped in at link time via -X main.Build, the same one
+SERVICE_VERSION carries.
+
+Exists because none of the four hashes above covers the GENERATOR. oasHash covers the documents,
+resourceHash covers spec.resource, digest covers the rendered managed resources and
+authSecretDigest covers the referenced Secrets: all four describe the INPUT. Upgrading the
+provider changes the FUNCTION applied to that input and leaves every one of them equal, so
+Observe reported "up to date" and a release's generation fixes never reached a CRD that already
+existed. Worse, the rendered-digest comparison DOES carry the new RDC image to the per-definition
+Deployment -- so the runtime half of a release arrived and the generation half silently did not,
+which is the hardest shape to notice because the upgrade visibly worked (#453).
+
+Empty is meaningful and self-healing: a plain `go build` stamps nothing, so an unstamped binary
+records "" and never triggers on it, and the next stamped build sees a difference and regenerates
+once. That is correct rather than unfortunate -- the CRD really was last generated by a build
+that cannot be identified.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b>hasSecuritySchemes</b></td>
         <td>boolean</td>
         <td>
@@ -2793,6 +3367,67 @@ adding a status field must be upgradable in place), so a RestDefinition can now 
 alters the generated schema while the OAS is byte-identical. Without this the apply would be accepted
 and then do nothing -- the CRD keeping its old status schema, looking for all the world like it had
 worked.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>schemaWarnings</b></td>
+        <td>[]string</td>
+        <td>
+          SchemaWarnings: the generation and validation warnings produced by the CURRENT render of this
+RestDefinition, as rendered messages.
+
+These are deliberately non-fatal -- a RestDefinition carrying them is still Ready and still Synced,
+because failing generation over a declaration that names a missing field would break working
+installs. They are recorded here because the FACT is permanent while the channel that used to carry
+it was not: they also go to a Warning Event, and the apiserver's default --event-ttl is one hour,
+so a definition installed yesterday with broken declarations was indistinguishable from a correct
+one through every cluster-visible channel (#462).
+
+REWRITTEN ON EVERY RENDER, including to empty. A fixed declaration clears this rather than leaving a
+stale complaint, which is the property that makes it worth reading at all.
+
+"INCLUDING TO EMPTY" IS ABOUT THE FIELD AND NOT THE WIRE. An empty result is omitted from the
+serialised object rather than written as `[]`, deliberately: `schemaWarnings: []` on every healthy
+RestDefinition is noise in every `kubectl get -o yaml`.
+
+SO AN ABSENT FIELD MEANS EITHER "this render produced no warnings" OR "this RestDefinition has not
+been rendered by a version that writes the field", and the two cannot be told apart from this field
+alone. Read status.generatorBuild alongside it when that distinction matters -- for example when
+sweeping a fleet for definitions whose declarations need fixing (#492).<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>secretRefDigest</b></td>
+        <td>string</td>
+        <td>
+          SecretRefDigest: a hash of the Secret names (grouped by namespace) currently referenced by a secretRef
+fieldMapping resolver, across every instance of the GENERATED Kind.
+
+WITHOUT THIS THE GRANT IS NEVER PROVISIONED. syncSecretRefRBAC runs only from Create and Update, and
+the generated CRD is created INSIDE Create -- so Create's own collection always sees zero instances,
+because no CR of the kind can exist before its CRD does. Observe must therefore notice when the
+instances change, or nothing ever reaches Update. A consumer measured exactly this on a real cluster:
+8 CRs across 7 namespaces, 6.5 minutes, zero Roles provisioned.
+
+This is #473's lesson applied to the second caller: a digest answers "did the references change", and
+the companion existence check in Observe answers "does the Role still exist", which a digest cannot.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>secretRefRBACNamespaces</b></td>
+        <td>[]string</td>
+        <td>
+          SecretRefRBACNamespaces: the namespaces in which a namespace-scoped Role+RoleBinding currently grants
+RDC's ServiceAccount read access to the Secrets named by a secretRef fieldMapping resolver, collected
+across every instance of the GENERATED Kind (not the Configuration Kind -- see AuthSecretRBACNamespaces
+for that one).
+
+SEPARATE from AuthSecretRBACNamespaces, and the separation is load-bearing rather than tidiness.
+SyncAuthSecretRBAC deletes the Role in every namespace that is in the caller's recorded set and no
+longer in its collected set. Two callers sharing one record would each delete the other's namespaces on
+every reconcile, and the symptom -- a credential readable one moment and Forbidden the next -- would
+pass every unit test, because a single-caller test cannot observe the other caller. The Role NAMES are
+distinct for the same reason (see deploy.SecretRefRoleName).<br/>
         </td>
         <td>false</td>
       </tr></tbody>
