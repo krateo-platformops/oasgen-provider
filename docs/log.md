@@ -33,7 +33,7 @@ silently, and duplicate the external resource.** 0.69.0's #687 was meant to prev
 added a second route into it — that release's section above now carries the correction.
 
 `git log 0.69.0..0.70.0` holds five commits. Two change behaviour — **#693** and **#694** — and
-**#679**, **#691** and **#PENDING** (this section) are documentation. Listed so the range reconciles.
+**#679**, **#691** and **#695** (this section) are documentation. Listed so the range reconciles.
 
 ### The guard reads the create MARKERS, not the conditions (#692, #693)
 
