@@ -658,6 +658,40 @@ plugin's whole-body response normalizer.<br/>
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b>restsAtNotReady</b></td>
+        <td>boolean</td>
+        <td>
+          RestsAtNotReady declares that this verb's resource rests at not-ready INDEFINITELY, and that this
+is correct rather than stalled.
+
+Measured, not assumed: a kind whose create returns 202 and whose findby can never match holds
+Ready=Pending with Synced=ReconcileSuccess, no errors and exactly ONE dispatch, for as long as the
+CR exists -- the Pending condition set by the first dispatch is what suppresses every later one.
+No finite duration can express that, which is why this is a separate boolean and not a sentinel
+value of SettlesWithin.
+
+When set and the create is confirmed landed for the CURRENT generation, the controller writes
+Ready=False with reason TerminalByDesign, which core-provider's rollup maps to healthy. It is NOT
+gated on Synced being clean: on the path where a kind declares neither get nor findby, Synced is
+clean by assertion (#709).<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>settlesWithin</b></td>
+        <td>string</td>
+        <td>
+          SettlesWithin declares that this verb's resource is SLOW to converge, and how slow.
+
+A backend figure, not a total: rest-dynamic-controller adds its own resync interval before
+publishing the effective bound, because the resync wait is an operator's setting
+(REST_CONTROLLER_RESYNC_INTERVAL) that a RestDefinition author cannot see. Declaring a portable
+backend number here keeps the same definition correct on a 3-minute fleet and a 5-minute one.
+
+Mutually exclusive with RestsAtNotReady: "slow to settle" and "never settles" are different claims
+about the same state, not two magnitudes of one.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b>successCodes</b></td>
         <td>[]integer</td>
         <td>

@@ -22,6 +22,7 @@ package v1alpha1
 
 import (
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -923,6 +924,16 @@ func (in *VerbsDescription) DeepCopyInto(out *VerbsDescription) {
 		in, out := &in.Async, &out.Async
 		*out = new(AsyncConfig)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.SettlesWithin != nil {
+		in, out := &in.SettlesWithin, &out.SettlesWithin
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+	if in.RestsAtNotReady != nil {
+		in, out := &in.RestsAtNotReady, &out.RestsAtNotReady
+		*out = new(bool)
+		**out = **in
 	}
 }
 

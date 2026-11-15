@@ -545,7 +545,8 @@ type JQProgram struct {
 // +kubebuilder:validation:XValidation:rule="self.action == 'findby' || !has(self.pagination)",message="pagination can only be set for 'findby' actions"
 // +kubebuilder:validation:XValidation:rule="self.action == 'dispatch' || !has(self.correlation)",message="correlation can only be set for 'dispatch' actions"
 // +kubebuilder:validation:XValidation:rule="self.action != 'dispatch' || has(self.correlation)",message="a 'dispatch' action requires correlation: a dispatch that cannot be correlated would re-fire on every reconcile while reporting Ready"
-// +kubebuilder:validation:XValidation:rule="self.action != 'dispatch' || !has(self.async)",message="async cannot be set for 'dispatch' actions: async extracts an operation handle from the trigger response, which is the case a dispatch does not have (a 204-empty trigger carries no handle) — that is what correlation replaces"
+// +kubebuilder:validation:XValidation:rule="self.action != 'dispatch' || !has(self.async)"
+// +kubebuilder:validation:XValidation:rule="!(has(self.settlesWithin) && has(self.restsAtNotReady))",message="declare at most one of settlesWithin or restsAtNotReady: \"slow to settle\" and \"never settles\" are different claims about the same state, not two magnitudes of one",message="async cannot be set for 'dispatch' actions: async extracts an operation handle from the trigger response, which is the case a dispatch does not have (a 204-empty trigger carries no handle) — that is what correlation replaces"
 type VerbsDescription struct {
 	// Name of the action to perform when this api is called [create, update, get, delete, findby, dispatch]
 	// +kubebuilder:validation:Enum=create;update;get;delete;findby;dispatch
@@ -702,6 +703,32 @@ type VerbsDescription struct {
 	// status, turning an asynchronous API into a synchronous reconcile. Set only on create/update/delete.
 	// +optional
 	Async *AsyncConfig `json:"async,omitempty"`
+	// SettlesWithin declares that this verb's resource is SLOW to converge, and how slow.
+	//
+	// A backend figure, not a total: rest-dynamic-controller adds its own resync interval before
+	// publishing the effective bound, because the resync wait is an operator's setting
+	// (REST_CONTROLLER_RESYNC_INTERVAL) that a RestDefinition author cannot see. Declaring a portable
+	// backend number here keeps the same definition correct on a 3-minute fleet and a 5-minute one.
+	//
+	// Mutually exclusive with RestsAtNotReady: "slow to settle" and "never settles" are different claims
+	// about the same state, not two magnitudes of one.
+	// +optional
+	SettlesWithin *metav1.Duration `json:"settlesWithin,omitempty"`
+	// RestsAtNotReady declares that this verb's resource rests at not-ready INDEFINITELY, and that this
+	// is correct rather than stalled.
+	//
+	// Measured, not assumed: a kind whose create returns 202 and whose findby can never match holds
+	// Ready=Pending with Synced=ReconcileSuccess, no errors and exactly ONE dispatch, for as long as the
+	// CR exists -- the Pending condition set by the first dispatch is what suppresses every later one.
+	// No finite duration can express that, which is why this is a separate boolean and not a sentinel
+	// value of SettlesWithin.
+	//
+	// When set and the create is confirmed landed for the CURRENT generation, the controller writes
+	// Ready=False with reason TerminalByDesign, which core-provider's rollup maps to healthy. It is NOT
+	// gated on Synced being clean: on the path where a kind declares neither get nor findby, Synced is
+	// clean by assertion (#709).
+	// +optional
+	RestsAtNotReady *bool `json:"restsAtNotReady,omitempty"`
 }
 
 // Correlation declares how ONE invocation of a dispatch verb is identified afterwards, which is the only
