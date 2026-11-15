@@ -30,7 +30,30 @@
 # AND `use:` MUST ALREADY EXIST when the entry lands. An entry whose replacement is unpublished tells
 # a pinning session to stop without telling it where to go.
 #
+# WHY 0.67.0 AND 0.68.0 ARE NOT LISTED, recorded because their absence is a DECISION and not an
+# oversight. Both carry the lost-status-write route into the duplicate -- they have #347's retry branch
+# and lack 0.70.0's create-marker guard -- but that is a CODE READING. Nobody has measured a duplicate
+# on either: the consumer who predicted it had their 0.68.0 probe come back VOID for a reason unrelated
+# to the defect (the apiserver refused their own test CR), and a 0.67.0 run measured the SILENT LATCH
+# (one POST, a false Ready=True) rather than a re-create loop.
+#
+# The rule above says retract what is ACTIVELY HARMFUL and warns the list must not become a way to push
+# upgrades. A code-derived route with no measurement is exactly where that bites. If anyone measures a
+# duplicate on 0.67.0 or 0.68.0, they belong here on the same day.
+#
 # Remove an entry only when the version becomes safe again, which for a code defect means never.
+#
+# WHY THIS LIST BELONGS TO THIS REPO, in the installer session's words, because they state the
+# mechanism better than the mechanism does:
+#
+#   "An entry's value IS its authority: a publisher vouches for its own releases, and an entry naming a
+#    chart outside its set FAILS the gate rather than being obeyed. So a list that can retract anything
+#    is a list anyone can use to block anyone."
+#
+# AND THE HALF A PUBLISHER CANNOT SEE, which is what makes that authority real rather than asserted:
+# installer's gate FAILS a pull request whose pin names a chart outside this publisher's declared set.
+# So a list that overreaches is REFUSED, not obeyed. The constraint runs both ways and neither end can
+# verify it alone -- which is why both files now say it.
 #
 # WHO ENFORCES THIS LIST, and why that has to be written down. A retraction is only a control where
 # something reads it, so this mechanism's coverage is EXACTLY the set of repos that have wired it in --
@@ -62,9 +85,38 @@
 # It is a sibling publisher using the same format, not a reader of this file.
 
 retracted:
+  - version: 0.70.0
+    charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
+    use: 0.71.0
+    reason: >-
+      A create whose status write loses a race is re-issued on the next reconcile, duplicating the
+      external resource, on any kind that declares no `findby` verb. MEASURED on 0.70.0 by two consumers
+      independently: a forced-race probe duplicated at the vendor on 3 of 3 trials where the race fired
+      (2 unraced trials clean, as controls), and a 303 reproduction on real GitHub produced 3 POSTs in 5
+      minutes. The duplicate's route is #347's retry branch, which read `Synced == ReconcileError` -- a
+      condition the no-identifier refusal sets by design, so the refusal fed the branch that re-created.
+      0.70.0's own #693 DOES hold, including under contention. ONCE A DUPLICATE LANDS NOTHING IN THE CR
+      SAYS SO: it reports Ready=True/Available carrying the second object's id, with the first orphaned
+      at the vendor, so only a vendor-side count reveals it. 0.71.0 fixes the route (#697) and carries
+      0.70.0's own fixes unchanged.
+  - version: 0.69.0
+    charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
+    use: 0.71.0
+    reason: >-
+      The same duplicate as 0.70.0 and STRICTLY WORSE: 0.69.0 carries BOTH routes into it. Measured at
+      the tags -- 0.69.0 has the no-identifier refusal that feeds #347's retry branch AND lacks the
+      create-marker guard that 0.70.0's #693 added, so a lost status write also re-creates through the
+      guard that reads conditions a failed status write never persists. A 303 reproduction on real GitHub
+      measured 3 POSTs in 5 minutes here as well. Retracting 0.70.0 while leaving this pinnable would
+      block the version with one measured route and permit the version with two.
   - version: 0.66.0
     charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
-    use: 0.67.0
+    # use: WAS 0.67.0, and was correct when written. Repointed to 0.71.0 on 2026-11-15: 0.67.0 is now
+    # known to carry the lost-status-write route into the duplicate create (see the scope note above --
+    # it is not retracted, because that route is a code reading there and unmeasured). An entry must not
+    # route a pinning session onto a version its own publisher knows to be affected, so `use` points at
+    # the first version with neither defect. Found by re-reading this file rather than reported.
+    use: 0.71.0
     reason: >-
       A kind declaring no `create` verb writes krateo.io/external-create-pending about five times a
       second, for as long as the process lives, and the CR's conditions stay correct throughout so
