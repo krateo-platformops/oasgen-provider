@@ -14,6 +14,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/krateo-platformops/oasgen-provider/internal/tools/pathparsing"
 	appsv1 "k8s.io/api/apps/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1347,6 +1348,32 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	// sweep, which is what someone otherwise has to write a bespoke renderer to get.
 	//
 	// It does NOT touch Ready or Synced. See the field's own comment for why.
+	// #666: AN EXCLUSION THAT PRUNES A FIELD THE CRD IS STILL SERVING.
+	//
+	// excludedSpecFields became mutable in 0.72.0. Removing an entry widens the spec and is always
+	// safe; ADDING one prunes a property the live CRD may already be serving, and any CR that still
+	// sets it will be rejected on its next apply. The author is the only one who can say whether that
+	// field is still wanted, so this warns and names it rather than refusing the edit.
+	//
+	// NOT a refusal, deliberately: the apiserver prunes an undeclared field from stored CRs without
+	// consulting this provider, so refusing the regeneration would not protect anything that is not
+	// already at risk -- it would only leave the RestDefinition and its CRD disagreeing.
+	//
+	// READ BEFORE THE APPLY, which is the whole reason this sits here and not next to
+	// ApplyOrUpdateCRD below: after the apply the live CRD no longer serves the field, so the same
+	// comparison would be true of nothing and the warning could never fire. A fetch failure is NOT a
+	// warning -- it says nothing about the declaration -- so it is logged and skipped.
+	if live, found, lerr := liveCRD(ctx, e.kube, rendered.CRD.GetName()); lerr != nil {
+		e.log.Debug("Could not read the live CRD to check for newly pruned fields; skipping", "error", lerr)
+	} else if found {
+		for _, f := range excludedFieldsStillServed(cr.Spec.Resource.ExcludedSpecFields, servedSpecProperties(live)) {
+			rendered.GenerationWarnings = append(rendered.GenerationWarnings, fmt.Errorf(
+				"excludedSpecFields entry %q prunes a field the CRD still serves: any instance that "+
+					"still sets it will be rejected on its next apply. Remove the entry if the field is "+
+					"wanted, or clear it from existing instances", f))
+		}
+	}
+
 	all := append(append([]error{}, rendered.GenerationWarnings...), rendered.ValidationWarnings...)
 	cr.Status.SchemaWarnings = renderWarnings(all)
 	if len(all) > 0 {
@@ -2142,14 +2169,105 @@ func (e *external) guardAgainstBuiltInCollision(ctx context.Context, cr *definit
 
 // crdExists reports whether a CustomResourceDefinition of this name is already on the cluster.
 func crdExists(ctx context.Context, kube client.Client, name string) (bool, error) {
+	_, found, err := liveCRD(ctx, kube, name)
+	return found, err
+}
+
+// liveCRD reads the CRD as the apiserver currently serves it, returning found=false for a CRD that
+// does not exist yet rather than an error -- first generation is the ordinary case, not a failure.
+//
+// One reader rather than two. crdExists used to do its own Get and discard the object; #666 needs the
+// object itself (to see which spec properties are still being served before a regeneration prunes
+// them), and two Gets against the same name is how the two answers drift apart.
+func liveCRD(ctx context.Context, kube client.Client, name string) (*apiextensionsv1.CustomResourceDefinition, bool, error) {
 	obj := &apiextensionsv1.CustomResourceDefinition{}
 	if err := kube.Get(ctx, client.ObjectKey{Name: name}, obj); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return nil, false, nil
 		}
-		return false, err
+		return nil, false, err
 	}
-	return true, nil
+	return obj, true, nil
+}
+
+// servedSpecProperties returns the spec property tree of every SERVED version of a live CRD.
+//
+// The UNION across served versions, not just storage: a field served by any version is still
+// reachable by a CR of that version, so pruning it breaks those instances even if a newer version
+// never carried the field.
+func servedSpecProperties(crd *apiextensionsv1.CustomResourceDefinition) []map[string]apiextensionsv1.JSONSchemaProps {
+	if crd == nil {
+		return nil
+	}
+	var out []map[string]apiextensionsv1.JSONSchemaProps
+	for _, v := range crd.Spec.Versions {
+		if !v.Served || v.Schema == nil || v.Schema.OpenAPIV3Schema == nil {
+			continue
+		}
+		spec, ok := v.Schema.OpenAPIV3Schema.Properties["spec"]
+		if !ok {
+			continue
+		}
+		out = append(out, spec.Properties)
+	}
+	return out
+}
+
+// maxServedPathDepth bounds the walk below. A CRD schema is already depth-limited by the apiserver,
+// so this is a guard against a pathological declaration rather than an expected limit.
+const maxServedPathDepth = 32
+
+// servesPath walks a property tree one SEGMENT at a time.
+//
+// Deliberately not a string compare against dot-joined paths. excludedSpecFields escapes a dot inside
+// a single field name bracket-style ('["searchCriteria.title"]'), so joining segments back with "."
+// makes a one-segment path containing a dot indistinguishable from a two-segment nested path -- and a
+// false match there would name the wrong field in a warning about pruning. Walking by segment cannot
+// confuse the two.
+func servesPath(props map[string]apiextensionsv1.JSONSchemaProps, segments []string) bool {
+	if len(segments) == 0 || len(segments) > maxServedPathDepth {
+		return false
+	}
+	cur := props
+	for i, seg := range segments {
+		p, ok := cur[seg]
+		if !ok {
+			return false
+		}
+		if i == len(segments)-1 {
+			return true
+		}
+		cur = p.Properties
+	}
+	return false
+}
+
+// excludedFieldsStillServed names the excludedSpecFields entries whose field the live CRD is STILL
+// serving, i.e. the entries whose effect is to prune something a CR can currently set.
+//
+// Pure, and takes the served trees rather than a client, so the whole decision is testable without a
+// cluster. Uses pathparsing.ParsePath -- the same parser removeExcludedSpecFields uses to decide what
+// to prune -- so the warning and the pruning cannot disagree about what a path means.
+func excludedFieldsStillServed(excluded []string, served []map[string]apiextensionsv1.JSONSchemaProps) []string {
+	if len(excluded) == 0 || len(served) == 0 {
+		return nil
+	}
+	var out []string
+	for _, f := range excluded {
+		segments, err := pathparsing.ParsePath(f)
+		if err != nil {
+			// An unparseable entry already produces its own warning from the generator. Saying it twice
+			// about one typo trains people to skim the list.
+			continue
+		}
+		for _, props := range served {
+			if servesPath(props, segments) {
+				out = append(out, f)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // persistCreatePhaseStatus records the outcome of Create's FIRST phase -- the CRDs have been applied, the

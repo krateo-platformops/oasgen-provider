@@ -37,11 +37,11 @@ func TestImmutabilityContractShape(t *testing.T) {
 	appendOnly := strings.Count(text, appendOnlyRule)
 
 	// The numbers documented in docs/api.md. Changing the contract means changing both.
-	const wantStrict, wantAppendOnly = 5, 2
+	const wantStrict, wantAppendOnly = 4, 2
 
 	if strict != wantStrict {
 		t.Errorf("strictly-immutable fields = %d, want %d.\n\n"+
-			"docs/api.md names them explicitly (resourceGroup, kind, identifiers, excludedSpecFields, "+
+			"docs/api.md names them explicitly (resourceGroup, kind, identifiers, "+
 			"configurationFields). If you changed the contract deliberately, update that page in the same "+
 			"commit -- it was wrong about this once already, and a consumer plans upgrades around it",
 			strict, wantStrict)
@@ -54,8 +54,12 @@ func TestImmutabilityContractShape(t *testing.T) {
 			appendOnly, wantAppendOnly)
 	}
 
-	if total := strict + appendOnly; total != 7 {
-		t.Errorf("total immutability rules = %d, want 7: the page states seven and a count is the one "+
+	// Implied by the two assertions above rather than independent of them: it exists because docs/api.md
+	// states the total in prose ("four strict and two append-only, six rules in total") and a total is the
+	// one thing a reader can check at a glance. Keep the literal in step with that sentence, not with the
+	// sum -- deriving it from wantStrict+wantAppendOnly would make it a check that cannot fail.
+	if total := strict + appendOnly; total != 6 {
+		t.Errorf("total immutability rules = %d, want 6: the page states six and a count is the one "+
 			"thing a reader can check at a glance", total)
 	}
 }
