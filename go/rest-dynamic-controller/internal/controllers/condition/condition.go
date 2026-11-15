@@ -58,6 +58,7 @@ const (
 	// -- the create may well have landed, which is exactly why this is dangerous: the resource can exist
 	// with nothing referencing it (issue 682).
 	ReasonNoIdentifierRecorded string = "NoIdentifierRecorded"
+	ReasonAssumedUpToDate      string = "AssumedUpToDate"
 	ReasonResponseObtained     string = "ResponseObtained"
 	ReasonNoResponseBody       string = "NoResponseBody"
 )
@@ -421,5 +422,34 @@ func NoIdentifierRecorded(detail string) metav1.Condition {
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonNoIdentifierRecorded,
 		Message:            detail,
+	}
+}
+
+// AssumedUpToDate reports a resource whose state was ASSERTED rather than observed.
+//
+// Status stays TRUE, deliberately. The honest status would arguably be Unknown -- nothing looked at the
+// resource -- but Unknown is not a free choice downstream: core-provider's krateoReady keys Unknown on
+// the REASON, so an Unknown it does not recognise falls to its default and holds every parent
+// composition at Ready=False/Creating for as long as the assumed path lasts, which is forever. Swapping
+// a false-healthy for a permanent false-converging is worse: the first is wrong and quiet, the second is
+// wrong and looks like a stuck deploy. So the fix is to make the REASON distinguishable and leave the
+// status alone (#709).
+//
+// core-provider's PR #538 maps Ready=True + AssumedUpToDate to childUnevaluated -- honest ignorance,
+// the same answer ZeroEvidence gets -- and leaves every other True as childHealthy. Their arm matches
+// status True ONLY, which they corrected explicitly: Ready=Unknown/AssumedUpToDate would miss it and
+// fall through to converging. So this constructor must keep Status True, and a future change to Unknown
+// is a cross-repo change rather than a local one.
+//
+// WHAT IT DOES NOT MEAN. This is not "the resource is fine". It is "nothing here looked, so take the
+// True with that in mind". The only reader that could previously tell the difference was a human
+// reading the message, and a rollup cannot key on prose.
+func AssumedUpToDate(message string) metav1.Condition {
+	return metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonAssumedUpToDate,
+		Message:            message,
 	}
 }

@@ -475,9 +475,25 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			log.Debug("API call not found", "action", apiaction.FindBy)
 			log.Debug("No get or findby action found for the resource.")
 			log.Debug("Resource is assumed to be up-to-date.")
-			cond := condition.Available()
-			cond.Message = "Resource is assumed to be up-to-date. API call not found for FindBy."
-			err = unstructuredtools.SetConditions(mg, cond)
+			// ASSERTED, NOT OBSERVED, AND THE REASON NOW SAYS SO (#709).
+			//
+			// This used to set condition.Available() -- Ready=True/Available, indistinguishable from a
+			// resource whose existence a GET had actually confirmed. The runtime then stamps
+			// ReconcileSuccess for Synced, because this handler returns no Synced of its own, so the CR
+			// read Ready=True/Available + Synced=ReconcileSuccess whether or not its create ever landed.
+			//
+			// core-provider measured the consequence: their rollup reads a child's Ready=True as
+			// childHealthy, so a parent composition read healthy over an assertion -- and, as they put it,
+			// "the rollup can't tell an asserted True from an observed one".
+			//
+			// The STATUS stays True on purpose; see AssumedUpToDate for why Unknown would be worse.
+			//
+			// THE RETURN VALUE BELOW IS UNCHANGED, also on purpose. Reporting exists:false here would make
+			// the runtime dispatch a create on every reconcile for a kind that can never be observed,
+			// which is the duplicate-create shape. The defect was the asserted CONDITION, not the assumed
+			// existence.
+			err = unstructuredtools.SetConditions(mg, customcondition.AssumedUpToDate(
+				"Resource is assumed to be up-to-date. API call not found for FindBy."))
 			if err != nil {
 				log.Error(err, "Setting condition")
 				return controller.ExternalObservation{}, err
