@@ -45,8 +45,13 @@ const (
 	// shows up as a number moving, in the pull request that moved it.
 	//
 	// UPDATE THESE DELIBERATELY. A diff here is the test working.
-	wantRuleTotal = 70
-	wantRuleNodes = 33
+	//
+	// FIRST CAUGHT, on this test's own first run: 70/33 -> 78/37. This branch was cut from main before
+	// #710 merged, and #710 spent EIGHT rules by embedding Pagination and JQProgram under
+	// correlation.observe -- adding no validation of its own. So the very +8-from-embedding this test
+	// was written about is what it caught, before anyone had to remember to look.
+	wantRuleTotal = 78
+	wantRuleNodes = 37
 )
 
 // The package already has generatedCRDPath, and a comment explaining why these tests read the SHIPPED
