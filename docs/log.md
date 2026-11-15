@@ -26,7 +26,155 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-15 — 0.70.0
+
+**Two fixes for one defect that 0.69.0 made worse: a create could be issued again, every resync,
+silently, and duplicate the external resource.** 0.69.0's #687 was meant to prevent this and instead
+added a second route into it — that release's section above now carries the correction.
+
+`git log 0.69.0..0.70.0` holds five commits. Two change behaviour — **#693** and **#694** — and
+**#679**, **#691** and **#695** (this section) are documentation. Listed so the range reconciles.
+
+### The guard reads the create MARKERS, not the conditions (#692, #693)
+
+Observe's "nothing has been created yet" test answered from the `Ready` condition:
+
+```go
+if !IsConditionSet(mg, Creating()) && !IsConditionSet(mg, Available()) {
+    log.Debug(...); log.Debug(...)
+    return controller.ExternalObservation{}, nil     // exists=false, err=nil
+}
+```
+
+`ResourceExists=false` with a **nil error** is the one input `unstructured-runtime`'s `handleObserve`
+turns into a fresh `Create` event. **Two measured routes reached it:**
+
+| consumer | route | result |
+|---|---|---|
+| `azuredevops-provider-kog` | the status write **lost a race**, so `Creating` was never *persisted* | **5 of 5** forced-race trials duplicated at the vendor; extras **orphaned** on CR delete |
+| `github-provider-kog` | #687's refusal wrote `NoIdentifierRecorded`, **displacing** `Creating` | 3 POSTs in 5 minutes |
+
+**The fix reads `krateo.io/external-create-{pending,succeeded,failed,not-requested}`.** Those are
+**annotations**, written with `tools.Update` against the main resource; conditions go to the **status
+subresource** in a different request. github's `managedFields` show the split — `controller` Update owns
+the annotations, `controller` Update/status owns the conditions. **So the marker survives exactly the
+status-write failure that destroys the conditions**, which is the trigger. The conditions stay as a
+second answer, because an adopted resource reaches `Available` with no marker ever set.
+
+It is a named function rather than a fourth negation, because the enumeration is the load-bearing part:
+forgetting a reason does not degrade a message, **it recreates an external resource**.
+
+**And the silent line is now `Info`.** Those two `Debug` lines are why this took two consumers and a
+source read — at default level the pass that dispatches the create logged nothing at all.
+
+### A redirect that rewrites the method is refused, and such a create is reported as LANDED (#682, #694)
+
+`net/http` rewrites **301, 302 and 303 on a non-GET to a GET** and drops the body, so the response
+answers a **different request** than the one made. Measured on real GitHub: a duplicate
+`POST .../deployment-branch-policies` answered 303, the followed GET returned
+`{"total_count":2,"branch_policies":[...]}`, and that list body was read as the created object —
+`clearStatusFields` having already wiped the previous status, with `populateStatusFields` skipping every
+path it could not find via a bare `continue`.
+
+**The rule keys on the method, not the status code.** 307 and 308 preserve the method and body and are
+deliberately still followed: `CheckRedirect`'s own comment records #132, a renamed vendor repository
+served as a 307, where refusing leaves the CR permanently in `ReconcileError`.
+
+**And it is not reported as a create failure.** A 303 "See Other" after a POST means the work is done
+and the result is elsewhere — GitHub returns it *because* the policy already exists. So the create
+reports `Requested: true` with a Warning event naming the redirect and the remedy. Reporting failure for
+a create that landed is #676's mistake in a new place, and with #693 in place the runtime would then
+retry it.
+
+### How the three compose
+
+| | |
+|---|---|
+| #694 | the hop is refused, so no wrong body is read and status is left **untouched** |
+| #693 | the marker is seen, so Observe does not report not-exists — **no re-create** |
+| #687 | Observe reports `Ready=False/NoIdentifierRecorded`, which is exactly true: the resource exists and this endpoint shape cannot say which one |
+
+**#687's condition becomes durable for the first time.** On 0.69.0 it was written and overwritten about
+1.86 seconds later by the create handler — github's watch caught it at `rv=961` — which is why every
+sampled count of it read **0**. With no create dispatched it is now the steady state, so a non-zero
+count of `Ready=False/NoIdentifierRecorded` is **the fix working**, not a regression: those are CRs that
+were previously reporting healthy while unmanaged.
+
+### Also in this release, documentation only
+
+- **#679** adds a reference section for the list-semantics extensions, which had been documented only
+  in the changelog.
+- **#691** records **who enforces** `retracted-versions.yaml`, because the reach was invisible: a
+  version could be retracted, declared correctly, and still shipped with every gate green, since the
+  shipping repo's CI never consulted the file. `azuredevops-provider-kog`'s 0.7.0 pinned the retracted
+  0.66.0 that way.
+
+### Verification
+
+`go test -race -tags=unit ./...`: 21 packages ok, 0 failures. #693's tests are mutation-verified on
+three arms and #694's on three, each expected to fail for a named reason, all six did — including one
+that inverts #694's condition so it would refuse #132's 307, and one that leaves the sentinel unwrapped
+so `errors.Is` could not reach it through `*url.Error`.
+
+**Two instrument failures of mine were caught during that verification and are worth recording.** A
+mutation arm that **removed** a block failed to *build*, which measures nothing — redone so it compiles
+and answers wrongly instead. And a test case asserted `Ready=False/Available` when `Available` is
+`Ready=`**`True`**, so the test caught my error rather than the code's.
+
+> **Known issue (2026-11-15): neither fix has run on a cluster at the time of tagging.** #693 rests on a
+> source reading — the runtime persists `external-create-pending` and **withholds the POST if that write
+> conflicts**, its own comment saying *"we _want_ the update to fail if we get a 409 due to a stale
+> version"* — corroborated by github's watch showing the marker present across all 18 events, but **not
+> measured under contention**. #694 has had no cluster run at all.
+>
+> This matters more than usual because **0.69.0 is the release whose headline fix a forced-race run then
+> falsified.** The verification cannot precede the tag: `azuredevops-provider-kog`'s forced-race probe
+> and `github-provider-kog`'s 303 reproduction both need a published version. Their verdicts include
+> rows that say *do not pin this*, and github's run will also report whether the marker is persisted
+> **before** the first POST — the ordering #693 rests on, which nobody has measured.
+>
+> Treat 0.70.0 as **published, not exercised**, until those two report.
+
 ## 2026-11-14 — 0.69.0
+
+> **Correction (2026-11-15): this section's headline claim is FALSE. #687 does not prevent the duplicate
+> it was written for — it CAUSED one.** Measured on 0.69.0 by two consumers independently, neither of
+> whom was looking for this:
+>
+> - `azuredevops-provider-kog` forced a status-write race on a no-`findby` kind: **5 of 5 trials
+>   duplicated at the vendor**, extra objects equal to race events exactly, and the extras **orphaned**
+>   on CR delete. `NoIdentifierRecorded` appeared **0** times.
+> - `github-provider-kog` re-ran their 303 reproduction: **three POSTs in five minutes**, one per
+>   resync, ending `Ready=False/Creating`.
+>
+> **The mechanism.** `NoIdentifierRecorded` is a `Ready` condition, and Ready holds **one** condition —
+> so the refusal **displaced** `Creating`. Observe's "nothing has been created yet" guard answered from
+> exactly those conditions, read the CR as never-created, and returned `ResourceExists: false` with a
+> **nil error**, which is the one input the runtime turns into a fresh `Create`. Both log lines on that
+> path were `Debug`, so the pass was silent at default level.
+>
+> **And the guard predates #687** — the same line is in 0.66.0, 0.68.0 and 0.69.0 — so #687 added a
+> second route into an older hole rather than creating it. azuredevops established that; I had
+> attributed the whole defect to #687, and a fix for my mechanism alone would not have stopped their
+> duplicates. Their path never wrote a Ready condition at all, because the status write that would have
+> carried it is the thing that failed.
+>
+> Fixed in **0.70.0** below, as **#693** (the guard reads the create markers, which survive a failed
+> status write) and **#694** (the redirect that caused github's route). Tracked in #692.
+
+> **Correction (2026-11-15): the redirect claim in this section's known-issue block is also false.** It
+> said "ten bare `&http.Client{}` instances across four files follow redirects, while `snowplow.go:48`
+> refuses them with a documented argument". `restclient.do()` **copies** the caller's client and replaces
+> **both** its `Transport` and its `CheckRedirect` with the host policy's, so a per-hop redirect policy
+> already existed — those literals are vessels whose `Transport` is never set at any of the 14 sites.
+> `hostpolicy`'s own header already listed a redirect as **channel 3** of three measured
+> credential-relocation channels, checked at the dial.
+>
+> I counted `&http.Client{}` occurrences and never read what the call path does with them. The real gap
+> was narrower: a redirect to a **permitted** host that **changes the method**, which is what #694 fixes.
+>
+> **This claim is also in 0.69.0's annotated tag message, where it cannot be corrected.**
+
 
 **One fix: "I cannot look" is no longer reported as "up to date".** Observe assumed a resource was up to
 date, set `Available` and returned `{exists: true, upToDate: true}` **without making any HTTP request**,
