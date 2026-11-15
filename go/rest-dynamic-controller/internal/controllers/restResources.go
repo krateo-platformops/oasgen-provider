@@ -390,13 +390,27 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		apiCall, callInfo, err := builder.APICallBuilder(fcli, clientInfo, apiaction.FindBy)
 		if apiCall == nil {
 			if !createHasBeenAttempted(mg) {
+				// THE MESSAGE USED TO SAY "No get or findby verb", AND THAT WAS WRONG.
+				//
+				// This branch is reached when IsResourceKnown is false and no FINDBY verb is declared. A
+				// get verb may well be declared -- it is simply not addressable yet, because
+				// IsResourceKnown builds the get request from the CR AS IT STANDS and ValidateRequest
+				// fails while its mapped source (typically a status field) is empty.
+				//
+				// So on a kind declaring `get` with `inCustomResource: status.id`, this line fired before
+				// any create had happened and announced "No get or findby verb" about a resource whose
+				// RestDefinition declares one. A consumer reading it reasonably concluded the branch was
+				// about the GET verb; so did I, twice, in opposite directions, while answering their
+				// question about which kinds are exposed. Measured by azuredevops-provider-kog on 0.71.0:
+				// 5 of these, one per trial, 0.6s after apply, with 0 "Building API call" lines proving
+				// the builder returned its nil fall-through rather than an error.
 				// NOT Debug. This returns {ResourceExists: false} with a NIL error, which is the one
 				// input unstructured-runtime's handleObserve turns into a fresh Create event -- so this
 				// line is the only record that a create was dispatched for a resource nobody can
 				// observe. It was Debug, and that silence is why issue 692 took two consumers and a
 				// source read to find.
-				log.Info("No get or findby verb, and no create has been attempted yet; reporting "+
-					"not-exists so a create is dispatched",
+				log.Info("No findby verb, and the get cannot be addressed from this resource yet; no create "+
+					"has been attempted, so reporting not-exists and a create is dispatched",
 					"kind", mg.GetKind(), "name", mg.GetName())
 				return controller.ExternalObservation{}, nil
 			}

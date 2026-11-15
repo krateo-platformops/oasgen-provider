@@ -52,6 +52,16 @@ func NewPaginator(config *getter.Pagination) (Paginator, error) {
 		if config.PageNumber != nil {
 			return nil, fmt.Errorf("pagination type is 'continuationToken' but a 'pageNumber' config block is also set")
 		}
+		// maxPages is OPTIONAL here, unlike pageNumber's, because this strategy's default end signal is
+		// token absence and that terminates a walk on its own. Zero means "no author bound", which is
+		// valid and is what every pre-0.73.0 continuationToken RestDefinition carries.
+		//
+		// The ceiling still applies when one IS set, for the same reason pageNumber's does: a bound above
+		// the hard findby backstop is a number that can never be reached, and a knob that silently does
+		// nothing is worse than no knob.
+		if config.ContinuationToken.MaxPages > MaxFindByPages {
+			return nil, fmt.Errorf("continuationToken maxPages=%d exceeds the hard findby ceiling of %d", config.ContinuationToken.MaxPages, MaxFindByPages)
+		}
 		return NewContinuationTokenPaginator(config.ContinuationToken), nil
 	case "pageNumber":
 		if config.PageNumber == nil {

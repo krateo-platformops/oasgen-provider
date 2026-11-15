@@ -18,6 +18,7 @@ import (
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	fgetter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/filegetter"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pagination"
 	"github.com/pb33f/libopenapi"
 	"github.com/pb33f/libopenapi/datamodel/high/base"
 	v3 "github.com/pb33f/libopenapi/datamodel/high/v3"
@@ -104,6 +105,12 @@ type UnstructuredClientInterface interface {
 	ListMapKeyPaths(httpMethod string, path string) (map[string][]string, error)
 	FindBy(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration, findByAction *getter.VerbsDescription) (Response, error)
 	Call(ctx context.Context, cli *http.Client, path string, conf *RequestConfiguration) (Response, error)
+	// WalkPaginated is here because a caller holding the interface needs it: the dispatch correlation
+	// observe reads a collection page by page looking for one item, which is the same walk FindBy runs
+	// with a different predicate. Reachable only through the concrete type, it would have forced a second
+	// copy of the loop -- and this loop's three-valued verdict must never collapse, because only
+	// Exhausted may become a 404 and the reconciler creates on 404.
+	WalkPaginated(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration, paginator pagination.Paginator, itemsPath string, verb *getter.VerbsDescription, label string, match PageMatchFunc) (Response, error)
 	// ServerURL is the EXTERNAL endpoint this client calls -- the document's servers[0].url. Here for the
 	// same reason UpdatableBodyPaths is: it was reachable only through the concrete type, and the C8
 	// audit emitter needs it from a caller holding the interface (#253).

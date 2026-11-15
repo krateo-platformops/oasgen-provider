@@ -520,12 +520,56 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 	// `pagination/page_number.go:83`. A reader following the old wording would conclude the only bound
 	// is this constant and could reasonably add a knob that already exists, required, two packages over.
 	//
-	// WHAT IS STILL TRUE, and is the narrower fact worth keeping: `continuationToken` has no author-set
-	// bound at all. `ContinuationTokenConfig` carries no `maxPages`, so for that strategy this constant
-	// is the ONLY cap, and a vendor whose cursor never reports done is bounded here and nowhere else.
-	// That asymmetry is deliberate -- a cursor-based walk is expected to terminate on the vendor's
-	// signal -- but it means "the author sets the bound" is true of pageNumber and false of
-	// continuationToken, and the two must not be described as one.
+	// THE ASYMMETRY NARROWED IN 0.73.0, and this note used to state the older shape. It said
+	// `continuationToken` "has no author-set bound at all" and that this constant "is the ONLY cap" for
+	// it. `ContinuationTokenConfig` now carries a `maxPages` -- OPTIONAL, unlike pageNumber's required
+	// one, because this strategy's default end signal is token ABSENCE and that terminates a walk on its
+	// own. Four live header-token findby kinds rely on exactly that, which is why requiring it was tried
+	// and reverted before release.
+	//
+	// So the accurate statement is: for continuationToken an author bound is AVAILABLE and usually
+	// unnecessary; where the vendor's cursor does not disappear on the last page (Zendesk signals the end
+	// only through meta.has_more) the author declares `hasMorePath` and may declare `maxPages` too.
+	//
+	// WHAT IS STILL TRUE and is the point of this constant: it is the only cap that applies when NEITHER
+	// a strategy bound nor a working vendor signal does. A continuationToken walk with no maxPages
+	// against a cursor that never reports done is bounded here and nowhere else.
+	return u.WalkPaginated(ctx, cli, path, opts, paginator, itemsPath, findByAction, "findby", u.findItemInList)
+}
+
+// PageMatchFunc is the per-page step of a paginated collection walk: it receives the page's items,
+// already normalized into the CR's shape, and reports whether one of them is the item being sought.
+type PageMatchFunc func(items []interface{}) (map[string]interface{}, bool, *OrMatchReport, error)
+
+// WalkPaginated runs ONE paginated collection walk, shared by every caller that reads a collection
+// page by page looking for a single item.
+//
+// EXTRACTED RATHER THAN COPIED, deliberately. This loop has needed, in order: a per-strategy author
+// bound, a 1000-page hard backstop, and a three-valued verdict whose arms must never collapse into one
+// another -- only Exhausted may become a 404, because the reconciler CREATES on 404. Every one of those
+// was a defect before it was a feature, and the duplicate-create family that cost three consumers a
+// week of measurement came from exactly such a collapse. A second copy of this loop would be a second
+// place for each of them to drift.
+//
+// What varies between callers is small and is parameterised:
+//
+//   - verb:  whose responseTransform normalizes each item before the predicate sees it (#145). This is
+//     also how a caller gets per-item transforms for free rather than reimplementing them.
+//   - match: the predicate. findby matches declared identifiers; a dispatch correlation matches the
+//     echoed token.
+//   - label: what the caller is called, so the backstop error names it instead of always saying
+//     "findby".
+func (u *UnstructuredClient) WalkPaginated(
+	ctx context.Context,
+	cli *http.Client,
+	path string,
+	opts *RequestConfiguration,
+	paginator pagination.Paginator,
+	itemsPath string,
+	verb *getter.VerbsDescription,
+	label string,
+	match PageMatchFunc,
+) (Response, error) {
 	pagesScanned := 0
 
 	for {
@@ -536,8 +580,8 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 			// finished searching for. "I scanned N pages and did not conclude" is a different answer
 			// from "it is not there", and must stay one.
 			return Response{}, fmt.Errorf(
-				"findby stopped after scanning %d pages without finding a match or reaching the end of the collection; "+
-					"this is a safety limit, not a conclusion that the resource is absent", pagination.MaxFindByPages)
+				"%s stopped after scanning %d pages without finding a match or reaching the end of the collection; "+
+					"this is a safety limit, not a conclusion that the resource is absent", label, pagination.MaxFindByPages)
 		}
 		pagesScanned++
 
@@ -555,13 +599,13 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 		}
 
 		// Put every item into the CR's shape BEFORE comparing against the CR (#145).
-		normalized, nerr := normalizeItems(ctx, findByAction, itemList)
+		normalized, nerr := normalizeItems(ctx, verb, itemList)
 		if nerr != nil {
 			return Response{}, nerr
 		}
 
 		// Search for a matching item in the current page's results.
-		matchedItem, found, matchReport, merr := u.findItemInList(normalized)
+		matchedItem, found, matchReport, merr := match(normalized)
 		if merr != nil {
 			return Response{}, merr
 		}
@@ -570,7 +614,7 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 			// We do not continue pagination once a match is found.
 			return Response{
 				ResponseBody: matchedItem,
-				Normalized:   findByAction != nil,
+				Normalized:   verb != nil,
 				MatchReport:  matchReport,
 				statusCode:   response.statusCode,
 			}, nil

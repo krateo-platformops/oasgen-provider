@@ -1031,6 +1031,545 @@ exactly one array property, required as soon as there is more than one, because 
 the wrong list and reports not-found — which here means firing the dispatch a second time.<br/>
         </td>
         <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepagination">pagination</a></b></td>
+        <td>object</td>
+        <td>
+          Pagination walks the collection page by page while looking for the echoed token.
+
+Absent means a SINGLE page, which is what this verb did before 0.73.0. That was a correctness
+problem and not only a scale one: a dispatch whose echo had fallen past page one was reported
+ABSENT, and on a dispatch kind not-found is what makes the controller fire the invocation again.
+So a collection longer than one page could re-run something that had already happened.
+
+The walk is the same one a paginated findby uses, so the same strategies, the same bounds and the
+same three-valued outcome apply — in particular, exhausting a bound is reported as its own outcome
+and NEVER as absence.<br/>
+          <br/>
+            <i>Validations</i>:<li>self.type == 'continuationToken' ? has(self.continuationToken) : true: continuationToken configuration must be provided when type is 'continuationToken'</li><li>self.type == 'pageNumber' ? has(self.pageNumber) : true: pageNumber configuration must be provided when type is 'pageNumber'</li><li>self.type == 'continuationToken' ? !has(self.pageNumber) : true: pageNumber must not be set when type is 'continuationToken'</li><li>self.type == 'pageNumber' ? !has(self.continuationToken) : true: continuationToken must not be set when type is 'pageNumber'</li>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobserveresponsetransform">responseTransform</a></b></td>
+        <td>object</td>
+        <td>
+          ResponseTransform reshapes EACH ITEM of the collection before echoedAt is evaluated against it,
+exactly as a findby verb's responseTransform does.
+
+Without it, echoedAt has to address the vendor's raw item shape — and it is a dot-path, which
+cannot select one element of an array by a field value. A token carried in a custom-fields list
+(Zendesk: `custom_fields: [{id: 31750115749148, value: "<token>"}]`) is unreachable without first
+reshaping the item, which is why this exists rather than making echoedAt an expression: one
+mechanism, applied where findby already applies it, instead of a second path dialect.<br/>
+          <br/>
+            <i>Validations</i>:<li>has(self.inline) != has(self.ref): exactly one of inline or ref must be set</li><li>!has(self.entrypoint) || has(self.ref): entrypoint is only valid together with ref</li>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.pagination
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobserve)</sup></sup>
+
+
+
+Pagination walks the collection page by page while looking for the echoed token.
+
+Absent means a SINGLE page, which is what this verb did before 0.73.0. That was a correctness
+problem and not only a scale one: a dispatch whose echo had fallen past page one was reported
+ABSENT, and on a dispatch kind not-found is what makes the controller fire the invocation again.
+So a collection longer than one page could re-run something that had already happened.
+
+The walk is the same one a paginated findby uses, so the same strategies, the same bounds and the
+same three-valued outcome apply — in particular, exhausting a bound is reported as its own outcome
+and NEVER as absence.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>type</b></td>
+        <td>enum</td>
+        <td>
+          Type specifies the pagination strategy.<br/>
+          <br/>
+            <i>Enum</i>: continuationToken, pageNumber<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationcontinuationtoken">continuationToken</a></b></td>
+        <td>object</td>
+        <td>
+          Configuration for 'continuationToken' pagination. Required if type is 'continuationToken'.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationpagenumber">pageNumber</a></b></td>
+        <td>object</td>
+        <td>
+          Configuration for 'pageNumber' pagination. Required if type is 'pageNumber'.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.pagination.continuationToken
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepagination)</sup></sup>
+
+
+
+Configuration for 'continuationToken' pagination. Required if type is 'continuationToken'.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationcontinuationtokenrequest">request</a></b></td>
+        <td>object</td>
+        <td>
+          Request: defines how to include the pagination token in the API request.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationcontinuationtokenresponse">response</a></b></td>
+        <td>object</td>
+        <td>
+          Response: defines how to extract the pagination token from the API response.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>maxPages</b></td>
+        <td>integer</td>
+        <td>
+          MaxPages bounds the walk. OPTIONAL, and absent means UNBOUNDED -- deliberately unlike
+pageNumber's, which is required.
+
+The asymmetry is not an oversight, and it is not consistency for its own sake being sacrificed.
+The two strategies have different end signals. This one's default rule is token ABSENCE: the
+server stops sending a cursor and the walk ends, which terminates correctly with no bound at all.
+A header-token API is the common case and four live findby kinds rely on exactly that today.
+
+A bound is needed only where absence is NOT the terminator -- Zendesk returns a cursor on the last
+page and signals the end solely through meta.has_more, so without hasMorePath the absence rule
+never fires. Those kinds declare both.
+
+Making it required was tried and reverted before release: it rejects an unchanged chart's apply,
+and a default instead would cap walks that work unbounded today -- turning an admission failure
+into a silent runtime one that appears only on large tenants.
+
+When set, exhausting it is reported as its own outcome, NEVER as not-found, exactly as in
+pageNumber: "I scanned N pages and did not conclude" is not "it does not exist". For a dispatch
+kind the difference is a re-run, because the remedy for not-found is to invoke again.<br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+            <i>Maximum</i>: 1000<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.pagination.continuationToken.request
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationcontinuationtoken)</sup></sup>
+
+
+
+Request: defines how to include the pagination token in the API request.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>tokenIn</b></td>
+        <td>enum</td>
+        <td>
+          Where the token is located: "query", "header" or "body". Currently, only "query" is supported.<br/>
+          <br/>
+            <i>Enum</i>: query<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>tokenPath</b></td>
+        <td>string</td>
+        <td>
+          The path or name of the query parameter, header, or body field.
+For query parameters and headers, this is simply the name.
+For body fields, this should be a JSON path.<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.pagination.continuationToken.response
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationcontinuationtoken)</sup></sup>
+
+
+
+Response: defines how to extract the pagination token from the API response.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>tokenIn</b></td>
+        <td>enum</td>
+        <td>
+          Where the token is located: "header" or "body".
+
+"body" was listed here in prose while the enum admitted only "header", because the body branch of
+the extractor was a `// Not implemented yet` comment that fell through to "no token" -- i.e. a
+body token would have silently ended the walk after page one. It is implemented now, through the
+same ResponseValue primitive the pageNumber strategy uses, so the enum admits it (#119).<br/>
+          <br/>
+            <i>Enum</i>: header, body<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>tokenPath</b></td>
+        <td>string</td>
+        <td>
+          The path or name of the header or body field.
+For headers, this is simply the name.
+For body fields, this should be a JSON path.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>hasMorePath</b></td>
+        <td>string</td>
+        <td>
+          HasMorePath names a BODY field whose boolean value says whether another page exists. Optional:
+when it is absent the end of the collection is token ABSENCE, which is this strategy's original
+and still-common rule.
+
+It exists because token absence is not every API's terminator, and relying on it where it is not
+documented is relying on undocumented behaviour. Zendesk's pagination reference documents exactly
+one end signal -- repeat "until the meta[has_more] property is false" -- and says nothing about
+whether after_cursor is present, null or absent on the last page. Against such an API the
+absence rule never fires and the walk runs to maxPages on every call.
+
+When declared it is AUTHORITATIVE: has_more false ends the walk even if a token is still present,
+which is the Zendesk case and the reason this field exists.
+
+has_more true with NO token is Indeterminate, not a continuation. Sending the next request without
+a token re-fetches the FIRST page, which would loop to maxPages and then blame the operator's cap
+for a server contradiction; reporting it names the real problem -- the two signals disagree.
+
+A declared signal that cannot be read, or that does not hold a boolean, also yields Indeterminate,
+never Exhausted -- the author said this is how you will know when to stop, so its absence means we
+do not know.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.pagination.pageNumber
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepagination)</sup></sup>
+
+
+
+Configuration for 'pageNumber' pagination. Required if type is 'pageNumber'.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>maxPages</b></td>
+        <td>integer</td>
+        <td>
+          MaxPages bounds the walk. REQUIRED, with no default, deliberately: the author must state how far
+this search may go rather than inheriting a number they never considered.
+
+Exhausting it is reported as its own outcome, NEVER as not-found. "I scanned N pages and did not
+conclude" is not "it does not exist", and collapsing the two would recreate the very bug this
+strategy exists to fix -- with the added insult that the bound was deliberate.<br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+            <i>Maximum</i>: 1000<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationpagenumberrequest">request</a></b></td>
+        <td>object</td>
+        <td>
+          Request: how the page number (and optionally the page size) are sent.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationpagenumberresponse">response</a></b></td>
+        <td>object</td>
+        <td>
+          Response: how "is there another page" is recognised. Optional: omitting it selects the
+short-page rule, which is the common case.<br/>
+          <br/>
+            <i>Validations</i>:<li>!(has(self.header) && has(self.body)): declare at most one of header or body: two ways to recognise the last page cannot both be authoritative</li>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.pagination.pageNumber.request
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationpagenumber)</sup></sup>
+
+
+
+Request: how the page number (and optionally the page size) are sent.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>pageIn</b></td>
+        <td>enum</td>
+        <td>
+          Where the page number goes. Only "query" is supported: no API in practice paginates by header
+page number, and allowing it would be untested surface.<br/>
+          <br/>
+            <i>Enum</i>: query<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>pagePath</b></td>
+        <td>string</td>
+        <td>
+          PagePath is the parameter name carrying the page number, e.g. "page".<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>startPage</b></td>
+        <td>integer</td>
+        <td>
+          StartPage is the number of the FIRST page. 1 for GitHub and most APIs; 0-based ones say 0.
+Required rather than defaulted: a wrong guess here silently skips or repeats a page.<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>pageSize</b></td>
+        <td>integer</td>
+        <td>
+          <br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>sizeIn</b></td>
+        <td>enum</td>
+        <td>
+          SizeIn / SizePath / PageSize optionally request a page size. Omit them to accept the API's
+default -- but note the short-page rule cannot work without PageSize, since it compares the
+number of items returned against the number requested.<br/>
+          <br/>
+            <i>Enum</i>: query<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>sizePath</b></td>
+        <td>string</td>
+        <td>
+          <br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.pagination.pageNumber.response
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationpagenumber)</sup></sup>
+
+
+
+Response: how "is there another page" is recognised. Optional: omitting it selects the
+short-page rule, which is the common case.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationpagenumberresponsebody">body</a></b></td>
+        <td>object</td>
+        <td>
+          Body recognises the end by comparing against a total the API reports.<br/>
+          <br/>
+            <i>Validations</i>:<li>has(self.totalPagesPath) != has(self.totalItemsPath): declare exactly one of totalPagesPath or totalItemsPath</li>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationpagenumberresponseheader">header</a></b></td>
+        <td>object</td>
+        <td>
+          Header recognises "more pages exist" by matching a response header, e.g. Link containing
+rel="next". Covers GitHub, GitLab and Jira without the engine knowing any of their names.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.pagination.pageNumber.response.body
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationpagenumberresponse)</sup></sup>
+
+
+
+Body recognises the end by comparing against a total the API reports.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>totalItemsPath</b></td>
+        <td>string</td>
+        <td>
+          TotalItemsPath is a path to the total NUMBER OF ITEMS, e.g. ".total_count". Requires
+request.pageSize, since pages are derived from items per page.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>totalPagesPath</b></td>
+        <td>string</td>
+        <td>
+          TotalPagesPath is a path to the total NUMBER OF PAGES, e.g. ".total_pages".<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.pagination.pageNumber.response.header
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobservepaginationpagenumberresponse)</sup></sup>
+
+
+
+Header recognises "more pages exist" by matching a response header, e.g. Link containing
+rel="next". Covers GitHub, GitLab and Jira without the engine knowing any of their names.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>matches</b></td>
+        <td>string</td>
+        <td>
+          Matches is a substring whose PRESENCE means another page exists, e.g. `rel="next"`.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>name</b></td>
+        <td>string</td>
+        <td>
+          Name of the header, e.g. "Link".<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.responseTransform
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobserve)</sup></sup>
+
+
+
+ResponseTransform reshapes EACH ITEM of the collection before echoedAt is evaluated against it,
+exactly as a findby verb's responseTransform does.
+
+Without it, echoedAt has to address the vendor's raw item shape — and it is a dot-path, which
+cannot select one element of an array by a field value. A token carried in a custom-fields list
+(Zendesk: `custom_fields: [{id: 31750115749148, value: "<token>"}]`) is unreachable without first
+reshaping the item, which is why this exists rather than making echoedAt an expression: one
+mechanism, applied where findby already applies it, instead of a second path dialect.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>entrypoint</b></td>
+        <td>string</td>
+        <td>
+          Entrypoint is the jq function defined in the referenced module to invoke, e.g. "normalize".
+If empty, the whole module body is executed as the program. Only meaningful together with ref.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>inline</b></td>
+        <td>string</td>
+        <td>
+          Inline is a gojq source literal. Best for short, single-use expressions.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>ref</b></td>
+        <td>string</td>
+        <td>
+          Ref references a self-contained .jq module asset, using the SAME URI scheme as spec.oasPath:
+  configmap://<namespace>/<name>/<key>   |   http(s)://<url><br/>
+        </td>
+        <td>false</td>
       </tr></tbody>
 </table>
 
@@ -1650,6 +2189,34 @@ Configuration for 'continuationToken' pagination. Required if type is 'continuat
           Response: defines how to extract the pagination token from the API response.<br/>
         </td>
         <td>true</td>
+      </tr><tr>
+        <td><b>maxPages</b></td>
+        <td>integer</td>
+        <td>
+          MaxPages bounds the walk. OPTIONAL, and absent means UNBOUNDED -- deliberately unlike
+pageNumber's, which is required.
+
+The asymmetry is not an oversight, and it is not consistency for its own sake being sacrificed.
+The two strategies have different end signals. This one's default rule is token ABSENCE: the
+server stops sending a cursor and the walk ends, which terminates correctly with no bound at all.
+A header-token API is the common case and four live findby kinds rely on exactly that today.
+
+A bound is needed only where absence is NOT the terminator -- Zendesk returns a cursor on the last
+page and signals the end solely through meta.has_more, so without hasMorePath the absence rule
+never fires. Those kinds declare both.
+
+Making it required was tried and reverted before release: it rejects an unchanged chart's apply,
+and a default instead would cap walks that work unbounded today -- turning an admission failure
+into a silent runtime one that appears only on large tenants.
+
+When set, exhausting it is reported as its own outcome, NEVER as not-found, exactly as in
+pageNumber: "I scanned N pages and did not conclude" is not "it does not exist". For a dispatch
+kind the difference is a re-run, because the remedy for not-found is to invoke again.<br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+            <i>Maximum</i>: 1000<br/>
+        </td>
+        <td>false</td>
       </tr></tbody>
 </table>
 
@@ -1731,6 +2298,32 @@ For headers, this is simply the name.
 For body fields, this should be a JSON path.<br/>
         </td>
         <td>true</td>
+      </tr><tr>
+        <td><b>hasMorePath</b></td>
+        <td>string</td>
+        <td>
+          HasMorePath names a BODY field whose boolean value says whether another page exists. Optional:
+when it is absent the end of the collection is token ABSENCE, which is this strategy's original
+and still-common rule.
+
+It exists because token absence is not every API's terminator, and relying on it where it is not
+documented is relying on undocumented behaviour. Zendesk's pagination reference documents exactly
+one end signal -- repeat "until the meta[has_more] property is false" -- and says nothing about
+whether after_cursor is present, null or absent on the last page. Against such an API the
+absence rule never fires and the walk runs to maxPages on every call.
+
+When declared it is AUTHORITATIVE: has_more false ends the walk even if a token is still present,
+which is the Zendesk case and the reason this field exists.
+
+has_more true with NO token is Indeterminate, not a continuation. Sending the next request without
+a token re-fetches the FIRST page, which would loop to maxPages and then blame the operator's cap
+for a server contradiction; reporting it names the real problem -- the two signals disagree.
+
+A declared signal that cannot be read, or that does not hold a boolean, also yields Indeterminate,
+never Exhausted -- the author said this is how you will know when to stop, so its absence means we
+do not know.<br/>
+        </td>
+        <td>false</td>
       </tr></tbody>
 </table>
 

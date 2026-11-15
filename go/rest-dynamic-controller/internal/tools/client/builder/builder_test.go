@@ -3,6 +3,8 @@ package builder
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pagination"
 	"net/http"
 	"testing"
 
@@ -1884,4 +1886,12 @@ func TestConfigurationKeysMatchTheOpenAPILocations(t *testing.T) {
 				"it must reach exactly ONE destination; %v", got)
 		})
 	}
+}
+
+// WalkPaginated satisfies the interface; this fake has no pagination to walk. Returning an explicit
+// error rather than a zero Response means a test that unexpectedly reaches the paginated path fails
+// loudly instead of reading an empty result as "nothing matched" -- which on a dispatch kind would be
+// not-found, and not-found dispatches again.
+func (m *mockUnstructuredClient) WalkPaginated(ctx context.Context, cli *http.Client, path string, opts *restclient.RequestConfiguration, paginator pagination.Paginator, itemsPath string, verb *getter.VerbsDescription, label string, match restclient.PageMatchFunc) (restclient.Response, error) {
+	return restclient.Response{}, fmt.Errorf("mockUnstructuredClient: WalkPaginated is not implemented in this fake")
 }

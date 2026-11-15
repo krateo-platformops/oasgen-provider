@@ -24,6 +24,7 @@ import (
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/apiaction"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client/builder"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pagination"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools"
@@ -197,25 +198,73 @@ func (h *handler) observeDispatch(ctx context.Context, mg *unstructured.Unstruct
 		return controller.ExternalObservation{}, true, fmt.Errorf("correlation.observe: could not build the call configuration")
 	}
 
-	response, err := cli.Call(ctx, httpCli, c.Observe.Path, conf)
-	if err != nil {
-		if restclient.IsNotFoundError(err) {
-			// The collection itself is absent, which is not the same as the token being absent. Treating it
-			// as not-found would dispatch against an endpoint that just told us it is not there.
-			return controller.ExternalObservation{}, true, fmt.Errorf(
-				"correlation.observe: collection %s %s not found: %w", c.Observe.Method, c.Observe.Path, err)
+	// ONE PREDICATE, TWO ROUTES TO IT. Both produce (item, found) and fall into the same tail below, so
+	// the fire-once logic that acts on `found` exists in exactly one place.
+	var (
+		item  map[string]interface{}
+		found bool
+	)
+
+	if paginator, perr := correlationPaginator(c); perr != nil {
+		return controller.ExternalObservation{}, true, fmt.Errorf("correlation.observe: %w", perr)
+	} else if paginator != nil {
+		// PAGINATED. Before 0.73.0 this read exactly ONE page, so an invocation whose echo had fallen past
+		// the first page was reported absent -- and on a dispatch kind not-found means dispatch again, so a
+		// collection longer than a page could re-run an invocation that had already happened.
+		//
+		// The walk is the SAME one findby uses, with the token predicate in place of the identifier one.
+		// Sharing it is deliberate: its verdict is three-valued and only Exhausted may become a 404, so a
+		// second copy would be a second place for that to collapse -- the shape that produced the
+		// duplicate-create family. It also brings the per-item responseTransform with it, because
+		// normalizing each item before the predicate runs is a step of that walk, not of each caller.
+		//
+		// A one-off verb carries the only two things normalizeItems reads. The correlation observe is
+		// verb-like but is not a VerbsDescription, and synthesising here is smaller than widening the
+		// walk's signature for one caller.
+		verb := &getter.VerbsDescription{Action: string(apiaction.FindBy), ResponseTransform: c.Observe.ResponseTransform}
+		match := func(items []interface{}) (map[string]interface{}, bool, *restclient.OrMatchReport, error) {
+			m, f, merr := findCorrelatedItem(items, c.EchoedAt, token)
+			return m, f, nil, merr
 		}
-		return controller.ExternalObservation{}, true, err
-	}
+		walked, werr := cli.WalkPaginated(ctx, httpCli, c.Observe.Path, conf, paginator, c.Observe.ItemsPath, verb, "correlation.observe", match)
+		switch {
+		case werr == nil:
+			m, ok := walked.ResponseBody.(map[string]interface{})
+			if !ok {
+				return controller.ExternalObservation{}, true, fmt.Errorf(
+					"correlation.observe: the walk returned a %T rather than an item", walked.ResponseBody)
+			}
+			item, found = m, true
+		case restclient.IsSynthesisedNotFound(werr):
+			// Every page was read and nothing matched. THAT is this verb's not-found, and only this.
+			// Anything else -- including Indeterminate, the walk stopping early -- must not become
+			// not-found, because not-found here dispatches again.
+			item, found = nil, false
+		default:
+			return controller.ExternalObservation{}, true, fmt.Errorf("correlation.observe: %w", werr)
+		}
+	} else {
+		response, err := cli.Call(ctx, httpCli, c.Observe.Path, conf)
+		if err != nil {
+			if restclient.IsNotFoundError(err) {
+				// The collection itself is absent, which is not the same as the token being absent. Treating
+				// it as not-found would dispatch against an endpoint that just told us it is not there.
+				return controller.ExternalObservation{}, true, fmt.Errorf(
+					"correlation.observe: collection %s %s not found: %w", c.Observe.Method, c.Observe.Path, err)
+			}
+			return controller.ExternalObservation{}, true, err
+		}
 
-	items, err := restclient.ExtractItemsFromResponse(response.ResponseBody, c.Observe.ItemsPath)
-	if err != nil {
-		return controller.ExternalObservation{}, true, fmt.Errorf("correlation.observe: %w", err)
-	}
+		items, ierr := restclient.ExtractItemsFromResponse(response.ResponseBody, c.Observe.ItemsPath)
+		if ierr != nil {
+			return controller.ExternalObservation{}, true, fmt.Errorf("correlation.observe: %w", ierr)
+		}
 
-	item, found, err := findCorrelatedItem(items, c.EchoedAt, token)
-	if err != nil {
-		return controller.ExternalObservation{}, true, err
+		m, f, merr := findCorrelatedItem(items, c.EchoedAt, token)
+		if merr != nil {
+			return controller.ExternalObservation{}, true, merr
+		}
+		item, found = m, f
 	}
 	if !found {
 		// Already fired for THIS token? Then it must not be fired again, and that is the whole guarantee.
@@ -394,4 +443,23 @@ func alreadyDispatched(mg *unstructured.Unstructured, token string) bool {
 		return false
 	}
 	return mg.GetAnnotations()[annotationDispatchedToken] == token
+}
+
+// correlationPaginator builds the paginator for a correlation observe, or nil when the verb declares
+// none. Separate so "no pagination declared" is one decision in one place: NewPaginator returning a nil
+// paginator with a nil error is a legitimate "nothing to do", and conflating it with an error is how a
+// declared-but-unbuildable walk would silently become a single call.
+func correlationPaginator(c *getter.Correlation) (pagination.Paginator, error) {
+	if c.Observe.Pagination == nil {
+		return nil, nil
+	}
+	p, err := pagination.NewPaginator(c.Observe.Pagination)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, nil
+	}
+	p.Init()
+	return p, nil
 }
