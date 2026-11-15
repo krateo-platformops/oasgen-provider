@@ -1,0 +1,5 @@
+{"requests":[
+ {"id":104,"url":"https://krateo.zendesk.com/api/v2/requests/104.json","subject":"other","description":"fourth","status":"solved","priority":"low","type":"question","created_at":"2026-11-15T08:00:00Z","updated_at":"2026-11-15T09:00:00Z","custom_fields":[]},
+ {"id":105,"url":"https://krateo.zendesk.com/api/v2/requests/105.json","subject":"[e2e] the one","description":"fifth","status":"open","priority":"urgent","type":null,"created_at":"2026-11-15T16:00:00Z","updated_at":"2026-11-15T16:01:00Z","fields":[{"id":31750395634972,"value":"bug"},{"id":31750115749148,"value":"krateo-ref-7f3a"}]}
+],
+"meta":{"has_more":false,"after_cursor":"eyJvIjoibmljZV9pZCIsInYiOiJhV2dBQUFBQUFBQUEifQ==","before_cursor":"eyJvIjoibmljZV9pZCIsInYiOiJhV2dBQUFBQUFBQUEifQ=="}}

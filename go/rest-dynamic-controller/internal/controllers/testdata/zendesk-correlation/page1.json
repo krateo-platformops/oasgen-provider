@@ -1,0 +1,7 @@
+{"requests":[
+ {"id":101,"url":"https://krateo.zendesk.com/api/v2/requests/101.json","subject":"[e2e] disk alert","description":"first","status":"open","priority":"normal","type":null,"created_at":"2026-11-14T10:00:00Z","updated_at":"2026-11-14T10:05:00Z","custom_fields":[{"id":31750395634972,"value":"bug"},{"id":31750115749148,"value":"krateo-ref-0001"}]},
+ {"id":102,"url":"https://krateo.zendesk.com/api/v2/requests/102.json","subject":"no reference","description":"filed in the Help Center","status":"new","priority":null,"type":null,"created_at":"2026-11-14T11:00:00Z","updated_at":"2026-11-14T11:00:00Z","custom_fields":[{"id":31750115749148,"value":null},{"id":31750395634972,"value":null}]},
+ {"id":103,"url":"https://krateo.zendesk.com/api/v2/requests/103.json","subject":"[e2e] quota","description":"third","status":"pending","priority":"high","type":null,"created_at":"2026-11-14T12:00:00Z","updated_at":"2026-11-14T12:30:00Z","custom_fields":[{"id":31750115749148,"value":"krateo-ref-0003"},{"id":31750395634972,"value":"feature_request"}]}
+],
+"meta":{"has_more":true,"after_cursor":"eyJvIjoibmljZV9pZCIsInYiOiJhUU1BQUFBQUFBQUEifQ==","before_cursor":"eyJvIjoibmljZV9pZCIsInYiOiJhV1VBQUFBQUFBQUEifQ=="},
+"links":{"next":"https://krateo.zendesk.com/api/v2/requests.json?page%5Bafter%5D=eyJvIjoibmljZV9pZCIsInYiOiJhUU1BQUFBQUFBQUEifQ%3D%3D&page%5Bsize%5D=100","prev":"https://krateo.zendesk.com/api/v2/requests.json?page%5Bbefore%5D=eyJvIjoibmljZV9pZCIsInYiOiJhV1VBQUFBQUFBQUEifQ%3D%3D&page%5Bsize%5D=100"}}
