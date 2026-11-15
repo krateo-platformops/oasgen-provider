@@ -389,9 +389,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		}
 		apiCall, callInfo, err := builder.APICallBuilder(fcli, clientInfo, apiaction.FindBy)
 		if apiCall == nil {
-			if !unstructuredtools.IsConditionSet(mg, condition.Creating()) && !unstructuredtools.IsConditionSet(mg, condition.Available()) {
-				log.Debug("No get or findby action found for the resource.")
-				log.Debug("External resource is being created", "kind", mg.GetKind())
+			if !createHasBeenAttempted(mg) {
+				// NOT Debug. This returns {ResourceExists: false} with a NIL error, which is the one
+				// input unstructured-runtime's handleObserve turns into a fresh Create event -- so this
+				// line is the only record that a create was dispatched for a resource nobody can
+				// observe. It was Debug, and that silence is why issue 692 took two consumers and a
+				// source read to find.
+				log.Info("No get or findby verb, and no create has been attempted yet; reporting "+
+					"not-exists so a create is dispatched",
+					"kind", mg.GetKind(), "name", mg.GetName())
 				return controller.ExternalObservation{}, nil
 			}
 			// A FAILED create leaves Creating set, so reaching here with Creating is NOT evidence that
