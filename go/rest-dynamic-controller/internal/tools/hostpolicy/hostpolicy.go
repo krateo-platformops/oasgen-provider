@@ -530,6 +530,16 @@ func (p *Policy) DialContext(ctx context.Context, network, addr string) (net.Con
 	return nil, lastErr
 }
 
+// ErrMethodChangingRedirect reports a redirect that net/http would follow with a DIFFERENT method than
+// the one sent -- 301, 302 or 303 on anything but a GET.
+//
+// Exported and matched with errors.Is rather than by message, because the create path has to tell this
+// apart from every other reason a call can fail: a method-changing redirect after a POST means the
+// resource WAS created (a 303 "See Other" is the server saying so), and reporting that as a create
+// FAILURE is issue 676's mistake in a new place. net/http wraps a CheckRedirect error in *url.Error,
+// which unwraps, so errors.Is reaches this through the client.
+var ErrMethodChangingRedirect = errors.New("refusing a redirect that rewrites the request method")
+
 // CheckRedirect re-applies the host list to each hop.
 //
 // The dial-time guard already covers redirects, because every hop dials -- so this is for the ERROR
@@ -544,6 +554,27 @@ func (p *Policy) CheckRedirect(req *http.Request, via []*http.Request) error {
 	}
 	if err := p.PermitsURL(req.URL); err != nil {
 		return fmt.Errorf("refusing to follow a redirect: %w", err)
+	}
+	// A HOP THAT REWRITES THE METHOD IS REFUSED, and this is about SEMANTICS rather than destination --
+	// the host checks above and the dialer underneath already own where the request may go.
+	//
+	// net/http rewrites 301, 302 and 303 on a non-GET to a GET and drops the body. The response then
+	// answers a DIFFERENT REQUEST than the one made, and a caller that reads it as its own reply gets
+	// whatever the new GET returned. Measured on real GitHub (issue 682): a duplicate
+	// `POST .../deployment-branch-policies` answered 303, net/http followed it with a GET of the
+	// collection, and the 200 list body `{"total_count":2,"branch_policies":[...]}` was read as the
+	// created object -- so every declared identifier was silently absent and the CR was reported
+	// healthy with nothing in status.
+	//
+	// 307 and 308 PRESERVE the method and body and are deliberately still followed: #132 is a renamed
+	// vendor repository served as a 307, and refusing it leaves the CR permanently in ReconcileError.
+	// That is why this keys on the method changing rather than on the status code -- the codes that are
+	// safe are the ones that do not rewrite, and net/http has already applied its rule by the time this
+	// runs, so `req.Method` is the REWRITTEN method and `via`'s last entry is what was actually sent.
+	if last := via[len(via)-1]; last.Method != req.Method {
+		return fmt.Errorf("%w: %s %s was redirected to %s, which net/http would send as %s -- the "+
+			"response would answer a different request than the one made",
+			ErrMethodChangingRedirect, last.Method, last.URL.Redacted(), req.URL.Redacted(), req.Method)
 	}
 	return nil
 }

@@ -1406,6 +1406,41 @@ func (h *handler) Create(ctx context.Context, mg *unstructured.Unstructured) err
 // the only place they can be derived anyway. What a retried CREATE risks is a duplicate external
 // resource, and on a vendor without a uniqueness constraint it would produce one -- Keycloak refuses a
 // second client with the same clientId, which is the only reason the measured case cost nothing.
+// createLandedAtARedirect returns the result for a create whose request was answered with a redirect
+// that would have REWRITTEN THE METHOD, which hostpolicy refuses (issue 682).
+//
+// WHY THIS IS NOT A FAILURE. A 303 "See Other" after a POST is the server saying the work is done and
+// the result is elsewhere -- GitHub returns it for a duplicate deployment-branch-policy precisely
+// BECAUSE the policy already exists. So the resource is there. Reporting a create failure for a create
+// that landed is issue 676's mistake in a new place, and with issue 692's marker fix in place the
+// runtime would then retry it: a loud, repeating failure about a resource that exists.
+//
+// WHY NO STATUS IS POPULATED, and why that is the honest outcome rather than a gap. The refusal means
+// the call returned an error, so there is no response body at all -- which is the point. Before this,
+// net/http followed the hop and the GET's body (a LIST) was read as the created object, clearStatusFields
+// having already wiped the old status, so every declared identifier was silently absent via a bare
+// `continue`. Refusing leaves status untouched instead of replacing it with the wrong document.
+//
+// WHAT HAPPENS NEXT, by design and not by accident: the runtime stamps external-create-succeeded, so
+// issue 692's createHasBeenAttempted sees a marker and Observe does NOT report not-exists -- no
+// re-create. Observe then reaches the no-identifier refusal and reports
+// Ready=False/NoIdentifierRecorded, which is exactly true of this resource: it exists, and this endpoint
+// shape cannot tell us which one it is. Three fixes composing rather than one doing everything.
+//
+// THE REMEDY IS A DECLARATION CHANGE, so the message says so: the vendor is serving this path from
+// somewhere else, and the RestDefinition should name that path directly.
+func (h *handler) createLandedAtARedirect(mg *unstructured.Unstructured, cerr error, log logging.Logger) (controller.CreateResult, error) {
+	log.Error(cerr, "The create was answered with a method-rewriting redirect, so the resource exists "+
+		"but its identifier cannot be read from this response; reporting the create as requested",
+		"kind", mg.GetKind(), "name", mg.GetName())
+	h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", fmt.Errorf(
+		"the vendor answered the create with a redirect that would change the request method (%w); the "+
+			"external resource EXISTS but its identifier cannot be read from a redirected response, so "+
+			"status is left empty and the create will not be retried. Point the RestDefinition's create "+
+			"path at the endpoint the vendor redirects to", cerr)))
+	return controller.CreateResult{Requested: true}, nil
+}
+
 func (h *handler) createReachedTheVendor(mg *unstructured.Unstructured, werr error, log logging.Logger) (controller.CreateResult, error) {
 	log.Error(werr, "The create reached the vendor but its status write failed; reporting the create as "+
 		"requested so it is not retried. Status will be repopulated by the next observe",
@@ -1669,6 +1704,9 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		// writes Synced onto is a fresh re-fetch, so a condition only set in memory is simply absent) --
 		// and persisting here would be the same write twice, since the runtime writes a CreateResult's
 		// conditions itself.
+		if errors.Is(err, hostpolicy.ErrMethodChangingRedirect) {
+			return h.createLandedAtARedirect(mg, err, log)
+		}
 		if restclient.IsAuthorizationDenied(err) {
 			return h.createAuthorizationDeniedResult(mg, "create", err, log), nil
 		}
