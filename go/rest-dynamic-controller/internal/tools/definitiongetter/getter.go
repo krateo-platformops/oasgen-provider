@@ -61,6 +61,16 @@ type CorrelationObserve struct {
 	// ItemsPath names the property holding the collection for an envelope response; empty means infer,
 	// which succeeds only when exactly one array property is present.
 	ItemsPath string `json:"itemsPath,omitempty"`
+	// Pagination walks the collection page by page. Absent means a single call, which is what this verb
+	// did before 0.73.0 -- a correlation observe read exactly one page, so an invocation whose echo had
+	// fallen past page one was reported ABSENT. On a dispatch kind not-found means dispatch again, so a
+	// collection longer than a page could re-run an invocation that had already happened.
+	Pagination *Pagination `json:"pagination,omitempty"`
+	// ResponseTransform reshapes EACH ITEM of the collection before the echoed token is looked for,
+	// exactly as a findby verb's does (#145). Without it echoedAt has to address the vendor's raw item
+	// shape, which cannot select one element of an array by a field value -- so a token carried in, say,
+	// a custom-fields list was unreachable.
+	ResponseTransform *JQProgram `json:"responseTransform,omitempty"`
 }
 
 type Pagination struct {
@@ -128,6 +138,8 @@ type ContinuationTokenConfig struct {
 	Request ContinuationTokenRequest `json:"request"`
 	// Response: defines how to extract the pagination token from the API response.
 	Response ContinuationTokenResponse `json:"response"`
+	// MaxPages bounds the walk. Exhausting it is its own outcome, never absence.
+	MaxPages int `json:"maxPages"`
 }
 
 // ContinuationTokenRequest defines how to include the pagination token in the API request.
@@ -142,12 +154,18 @@ type ContinuationTokenRequest struct {
 
 // ContinuationTokenResponse defines how to extract the pagination token from the API response.
 type ContinuationTokenResponse struct {
-	// Where the token is located: "header" or "body". Currently, only "header" is supported.
+	// Where the token is located: "header" or "body". BOTH are supported -- the body branch was a
+	// `// Not implemented yet` stub that fell through to "no token", silently ending the walk after
+	// page one, and #119 implemented it through the shared ResponseValue primitive. This comment said
+	// "only header is supported" for longer than that was true.
 	TokenIn string `json:"tokenIn"`
 	// The path or name of the header or body field.
 	// For headers, this is simply the name.
 	// For body fields, this should be a JSON path.
 	TokenPath string `json:"tokenPath"`
+	// HasMorePath names a BODY field whose boolean says whether another page exists. Optional;
+	// absent means the end signal is token ABSENCE. When declared it is authoritative.
+	HasMorePath string `json:"hasMorePath,omitempty"`
 }
 
 // OffsetConfig is a placeholder for future offset pagination settings.

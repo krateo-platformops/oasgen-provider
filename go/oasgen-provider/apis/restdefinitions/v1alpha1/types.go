@@ -136,6 +136,29 @@ type ContinuationTokenConfig struct {
 	// Response: defines how to extract the pagination token from the API response.
 	// +required
 	Response ContinuationTokenResponse `json:"response"`
+	// MaxPages bounds the walk. OPTIONAL, and absent means UNBOUNDED -- deliberately unlike
+	// pageNumber's, which is required.
+	//
+	// The asymmetry is not an oversight, and it is not consistency for its own sake being sacrificed.
+	// The two strategies have different end signals. This one's default rule is token ABSENCE: the
+	// server stops sending a cursor and the walk ends, which terminates correctly with no bound at all.
+	// A header-token API is the common case and four live findby kinds rely on exactly that today.
+	//
+	// A bound is needed only where absence is NOT the terminator -- Zendesk returns a cursor on the last
+	// page and signals the end solely through meta.has_more, so without hasMorePath the absence rule
+	// never fires. Those kinds declare both.
+	//
+	// Making it required was tried and reverted before release: it rejects an unchanged chart's apply,
+	// and a default instead would cap walks that work unbounded today -- turning an admission failure
+	// into a silent runtime one that appears only on large tenants.
+	//
+	// When set, exhausting it is reported as its own outcome, NEVER as not-found, exactly as in
+	// pageNumber: "I scanned N pages and did not conclude" is not "it does not exist". For a dispatch
+	// kind the difference is a re-run, because the remedy for not-found is to invoke again.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	// +optional
+	MaxPages int `json:"maxPages,omitempty"`
 }
 
 // ContinuationTokenRequest defines how to include the pagination token in the API request.
@@ -167,6 +190,28 @@ type ContinuationTokenResponse struct {
 	// For body fields, this should be a JSON path.
 	// +required
 	TokenPath string `json:"tokenPath"`
+	// HasMorePath names a BODY field whose boolean value says whether another page exists. Optional:
+	// when it is absent the end of the collection is token ABSENCE, which is this strategy's original
+	// and still-common rule.
+	//
+	// It exists because token absence is not every API's terminator, and relying on it where it is not
+	// documented is relying on undocumented behaviour. Zendesk's pagination reference documents exactly
+	// one end signal -- repeat "until the meta[has_more] property is false" -- and says nothing about
+	// whether after_cursor is present, null or absent on the last page. Against such an API the
+	// absence rule never fires and the walk runs to maxPages on every call.
+	//
+	// When declared it is AUTHORITATIVE: has_more false ends the walk even if a token is still present,
+	// which is the Zendesk case and the reason this field exists.
+	//
+	// has_more true with NO token is Indeterminate, not a continuation. Sending the next request without
+	// a token re-fetches the FIRST page, which would loop to maxPages and then blame the operator's cap
+	// for a server contradiction; reporting it names the real problem -- the two signals disagree.
+	//
+	// A declared signal that cannot be read, or that does not hold a boolean, also yields Indeterminate,
+	// never Exhausted -- the author said this is how you will know when to stop, so its absence means we
+	// do not know.
+	// +optional
+	HasMorePath string `json:"hasMorePath,omitempty"`
 }
 
 // OffsetConfig is a placeholder for future offset pagination settings.
@@ -760,6 +805,28 @@ type CorrelationObserve struct {
 	// the wrong list and reports not-found — which here means firing the dispatch a second time.
 	// +optional
 	ItemsPath string `json:"itemsPath,omitempty"`
+	// Pagination walks the collection page by page while looking for the echoed token.
+	//
+	// Absent means a SINGLE page, which is what this verb did before 0.73.0. That was a correctness
+	// problem and not only a scale one: a dispatch whose echo had fallen past page one was reported
+	// ABSENT, and on a dispatch kind not-found is what makes the controller fire the invocation again.
+	// So a collection longer than one page could re-run something that had already happened.
+	//
+	// The walk is the same one a paginated findby uses, so the same strategies, the same bounds and the
+	// same three-valued outcome apply — in particular, exhausting a bound is reported as its own outcome
+	// and NEVER as absence.
+	// +optional
+	Pagination *Pagination `json:"pagination,omitempty"`
+	// ResponseTransform reshapes EACH ITEM of the collection before echoedAt is evaluated against it,
+	// exactly as a findby verb's responseTransform does.
+	//
+	// Without it, echoedAt has to address the vendor's raw item shape — and it is a dot-path, which
+	// cannot select one element of an array by a field value. A token carried in a custom-fields list
+	// (Zendesk: `custom_fields: [{id: 31750115749148, value: "<token>"}]`) is unreachable without first
+	// reshaping the item, which is why this exists rather than making echoedAt an expression: one
+	// mechanism, applied where findby already applies it, instead of a second path dialect.
+	// +optional
+	ResponseTransform *JQProgram `json:"responseTransform,omitempty"`
 }
 
 // AsyncConfig declares how a mutating verb's long-running operation is driven to completion.

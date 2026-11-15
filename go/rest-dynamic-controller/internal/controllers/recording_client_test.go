@@ -3,6 +3,7 @@ package restResources
 import (
 	"context"
 	"fmt"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pagination"
 	"net/http"
 	"sync"
 
@@ -223,4 +224,12 @@ func TestCreateProceedsWhenNotDeleting(t *testing.T) {
 	assert.Contains(t, err.Error(), "swagger info getter",
 		"it must fail on the NEXT step, which proves the guard did not stop it")
 	assert.Empty(t, evs.all(), "no refusal event: this call was not refused, it got further")
+}
+
+// WalkPaginated satisfies the interface; this fake has no pagination to walk. Returning an explicit
+// error rather than a zero Response means a test that unexpectedly reaches the paginated path fails
+// loudly instead of reading an empty result as "nothing matched" -- which on a dispatch kind would be
+// not-found, and not-found dispatches again.
+func (r *recordingClient) WalkPaginated(ctx context.Context, cli *http.Client, path string, opts *restclient.RequestConfiguration, paginator pagination.Paginator, itemsPath string, verb *getter.VerbsDescription, label string, match restclient.PageMatchFunc) (restclient.Response, error) {
+	return restclient.Response{}, fmt.Errorf("recordingClient: WalkPaginated is not implemented in this fake")
 }

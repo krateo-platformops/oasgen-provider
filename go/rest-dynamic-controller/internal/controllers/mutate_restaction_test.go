@@ -3,6 +3,7 @@ package restResources
 import (
 	"context"
 	"fmt"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/pagination"
 	"net/http"
 	"testing"
 
@@ -345,3 +346,11 @@ func TestResolveDeleteOutcomeStillHoldsOnTransientVerificationFailure(t *testing
 // ServerURL satisfies UnstructuredClientInterface. A real host so an audit event built from it
 // carries a parseable server.address rather than being silently omitted (#253).
 func (m *mockGetClient) ServerURL() string { return "https://api.example.com" }
+
+// WalkPaginated satisfies the interface; this fake has no pagination to walk. Returning an explicit
+// error rather than a zero Response means a test that unexpectedly reaches the paginated path fails
+// loudly instead of reading an empty result as "nothing matched" -- which on a dispatch kind would be
+// not-found, and not-found dispatches again.
+func (m *mockGetClient) WalkPaginated(ctx context.Context, cli *http.Client, path string, opts *restclient.RequestConfiguration, paginator pagination.Paginator, itemsPath string, verb *getter.VerbsDescription, label string, match restclient.PageMatchFunc) (restclient.Response, error) {
+	return restclient.Response{}, fmt.Errorf("mockGetClient: WalkPaginated is not implemented in this fake")
+}
