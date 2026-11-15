@@ -26,7 +26,161 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-15 — 0.71.0
+
+**One fix, and it closes the second route into the create loop 0.70.0 left open.** #347's retry branch
+read `Synced == ReconcileError` to mean "the create failed, retry it" — a condition **every** error path
+sets, including 0.69.0's own no-identifier refusal. So the refusal produced the error the retry branch
+read as a failed create, and the pair looped.
+
+`git log 0.70.0..0.71.0` holds two commits: **#697**, the fix, and **#PENDING**, this section.
+
+### The retry branch keys on the create's own outcome (#696, #697)
+
+Measured on 0.70.0 by `github-provider-kog` against real GitHub, using the Info line #693 had just
+added — which is the only reason this was visible at all:
+
+```
+11:29:00.688  Observe  "Refusing to assume up-to-date: no identifier was ever recorded"
+11:29:00.694  ERROR    Cannot observe external resource    -> Synced=False/ReconcileError
+11:29:01.725  Observe  "The last reconcile errored, so this resource is not assumed to be up to date"
+11:29:01.817  POST     -> 303 -> refused -> Requested:true
+```
+
+Three POSTs in five minutes, the same rate as 0.69.0. Verified at tag `0.70.0` by offset inside the
+`apiCall == nil` block: `createHasBeenAttempted` (23) answers **true**, correctly — which is *why*
+`lastReconcileErrored` (2224) is reached — and the refusal (4066) never runs on the retry pass. **The
+two guards do not overlap**, and #693 was not bypassed.
+
+The fix reads `krateo.io/external-create-failed` compared against `external-create-succeeded`:
+
+```go
+failed := meta.GetExternalCreateFailed(mg)
+if failed.IsZero() { return false }
+return failed.After(meta.GetExternalCreateSucceeded(mg))
+```
+
+The marker records the **create's** outcome; `Synced` records that *something* errored. #347's measured
+case — a create rejected 422 by Zendesk — is still covered, because the runtime stamps
+`external-create-failed` on exactly that path, at its single stamp site. The two cases that must **not**
+stamp it do not: a status conflict returns before it, and a status write that fails after a landed
+create reports `Requested: true`. That pair is precisely why the condition was the wrong channel —
+`Synced=ReconcileError` is what they share.
+
+Compared rather than present-checked, because a resource can fail, be fixed and succeed later, and the
+failed marker is never removed.
+
+**`lastReconcileErrored` is removed, and its test file is MOVED rather than deleted.** All four
+behavioural tests now exercise the new helper, and the AST tripwire pinning the guard's position inside
+that branch is re-pointed. **That tripwire fired on this change, which is its job** — its own comment
+says a helper that is correct and dead lets every other test in the file pass while asserting nothing.
+
+### Verified on a branch build before tagging
+
+`github-provider-kog` built rest-dynamic-controller locally from the fix's SHA and ran the same harness
+against real GitHub, judged against a table written in advance:
+
+| expected | measured |
+|---|---|
+| 1 POST for the duplicate CR | **1** — and no list GET |
+| the refusal still present each resync | yes |
+| `"The last reconcile errored…"` gone | **0 occurrences** |
+| `Ready=False/NoIdentifierRecorded` persisting | yes |
+| the control CR unchanged | `Ready=True/Available` with its id |
+| the redirect Warning once | **1**, matching the single create |
+
+This is the first time a fix in this family was exercised **before** its tag rather than after, and it
+is why: 0.69.0 and 0.70.0 each shipped a fix that a consumer run then falsified.
+
+### The other route was measured too, and #693 holds under contention
+
+`azuredevops-provider-kog`'s forced-race probe on 0.70.0 answers the question github's run could not:
+whether #693's marker fix holds when the status write actually loses a race. Five trials, an 8-second
+racer, with trials 1 and 3 as no-race controls:
+
+| trial | vendor objects | race fired | pending-marker | verdict |
+|---|---|---|---|---|
+| 1 | 1 | no | yes | OK (control) |
+| 2 | **2** | yes | yes | DUPLICATED |
+| 3 | 1 | no | yes | OK (control) |
+| 4 | **2** | yes | yes | DUPLICATED |
+| 5 | **2** | yes | yes | DUPLICATED |
+
+Trigger evidence agreed across both channels (log 3, events 3), so the dedup question below did not
+arise for them.
+
+**Every duplicate went through the #347 route that #697 fixes**, and #693's route held. Trial 2,
+verbatim:
+
+```
+12:04:12.078  Create   "The create reached the vendor but its status write failed"  (the race lands)
+12:04:57.731  Observe  "Refusing to assume up-to-date: no identifier was ever recorded"   <- #693 HELD: 45s, no re-create
+12:04:58.956  Observe  "The last reconcile errored, so this resource is not assumed to be up to date"
+12:04:59.371           "Successfully requested creation of external resource"             <- the duplicate
+```
+
+`"The last reconcile errored"` appears **3** times, matching the three races — and github measured it at
+**0** with #697. So on that corpus #697 is exactly the missing piece. **No third route was observed.**
+
+**One caveat they stated rather than let pass**: `pending-write-conflicts` was **0**, so their racer never
+won the marker write and the **withhold ordering was not exercised** in that run. #693's marker read is
+measured; the withhold it depends on remains a source reading plus one HOLDS from github's 0.70.0 run.
+
+> **Known issue (2026-11-15): once a duplicate lands, nothing in the CR says so.** On the raced trials the
+> CR ends `Ready=True/Available` carrying the **second** object's id, and the first is orphaned at the
+> vendor with nothing referencing it. Only a vendor-side count reveals it. Reported by
+> `azuredevops-provider-kog` from the same run.
+>
+> #697 stops the duplicate being created; it does not detect one that already exists, and no release in
+> this family does. A fleet that ran 0.66.0 through 0.70.0 on a kind with no `findby` may hold orphans
+> that no CR mentions, and the only way to find them is to count at the vendor.
+
+### Known cost: error backoff on a refused resource
+
+A CR in the refused state gets roughly **six Observe passes per three-minute cycle** — the runtime's
+error backoff at +0, +1, +3, +7, +15, +31 s — because the refusal returns an error each pass.
+
+**Measured cheap, by the same run**: no HTTP request, and **no resourceVersion change** after the first.
+So it is queue work with no vendor traffic and no status churn.
+
+**And it is inherent rather than incidental.** The refusal *must* return an error: returning nil with an
+empty observation means "does not exist", which dispatches a create — the defect this family is about —
+and returning exists-and-up-to-date is the latch #682 removed. The error return is load-bearing and the
+backoff is its price.
+
+`Synced` on such a CR is stable at **`False/ReconcileError`**, not `ReconcileSuccess`. That is honest:
+the reconcile genuinely cannot complete. It is **not** a failure signal to key on, and a verdict table
+that reads `ReconcileError` as "broken" would report the fixed shape as worse than the duplicating one.
+
+> **Note (2026-11-15): an event count cannot see repeats, so do not use one to measure a cadence.**
+> `github-provider-kog` measured `CannotObserveExternalResource` at **count 1, with 1 event object**,
+> against **~11 refusals in the same log**. Whatever the batching rule is — unverified — the consequence
+> is that the per-resync cadence is **not** observable through events, and the log line is the authority.
+>
+> Their qualifier is the part worth keeping: *"the redirect Warning's 1 means something only because the
+> POST count agrees."* A count of 1 is equally consistent with "fired once" and with "fired eleven times
+> and was deduped"; only an independent signal separates them.
+>
+> This corrects advice I gave four sessions twice over — first that one Warning total was expected, then
+> that one reason should climb per resync. Both were wrong, and a detector built on either would have
+> reported a correct run as a failure.
+
 ## 2026-11-15 — 0.70.0
+
+> **Correction (2026-11-15): this section's fixes were incomplete. #693 closed one route into the create
+> loop and a SECOND route stayed open, so the create was still re-issued every resync.** Measured on
+> 0.70.0 by two consumers: `github-provider-kog` saw three POSTs in five minutes on their 303
+> reproduction, and `azuredevops-provider-kog`'s forced-race probe duplicated at the vendor on every
+> trial where the race fired — three of five, with the other two as controls.
+>
+> **#693 itself holds**, including under contention: after a lost status write the next Observe did not
+> re-create, for 45 seconds, with the marker present. What stayed open was #347's retry branch, which
+> read `Synced == ReconcileError` — a condition the no-identifier refusal sets by design. Fixed in
+> 0.71.0 below as **#697**. Tracked in #696.
+>
+> **#694 is confirmed working** by the same run: no list GET, the redirect refused, the Warning event
+> fired once, and `NoIdentifierRecorded` persisting.
+
 
 **Two fixes for one defect that 0.69.0 made worse: a create could be issued again, every resync,
 silently, and duplicate the external resource.** 0.69.0's #687 was meant to prevent this and instead
