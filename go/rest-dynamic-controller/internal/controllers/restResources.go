@@ -421,7 +421,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			// Creating/ReconcileError. That is the honest steady state for a vendor that is refusing the
 			// create: visibly stuck and retrying, rather than falsely Available. It is also why this does
 			// not error -- an error here would replace the vendor's own explanation with ours.
-			if lastReconcileErrored(mg) {
+			if createFailedMostRecently(mg) {
 				log.Debug("No get or findby action found for the resource.")
 				log.Info("The last reconcile errored, so this resource is not assumed to be up to date",
 					"kind", mg.GetKind(), "name", mg.GetName())
@@ -1112,25 +1112,6 @@ func (h *handler) reportInferredAbsence(ctx context.Context, mg *unstructured.Un
 		"previous create did not make the resource findable",
 		"kind", mg.GetKind(), "name", mg.GetName(), "inferences", n)
 	return true
-}
-
-// lastReconcileErrored reports whether the PREVIOUS reconcile of this object ended in an error, by reading
-// the runtime's Synced condition.
-//
-// Used by the one observe path that has no way to look at the external resource, to avoid treating its own
-// Ready/Creating condition as evidence that a create succeeded. The runtime sets Creating on BOTH outcomes
-// and distinguishes them only on Synced (#347).
-//
-// Compares Type and Reason only. condition.ReconcileError takes the error as an argument and puts it in the
-// Message, so constructing one to hand to IsConditionSet would require inventing an error whose text must
-// match -- and would silently stop matching the moment the runtime reworded it.
-func lastReconcileErrored(mg *unstructured.Unstructured) bool {
-	for _, c := range unstructuredtools.GetConditions(mg) {
-		if c.Type == condition.TypeSynced {
-			return c.Reason == condition.ReasonReconcileError
-		}
-	}
-	return false
 }
 
 // logVendorBody puts the vendor's own response text in the log, at INFO, and nowhere else (#433).
