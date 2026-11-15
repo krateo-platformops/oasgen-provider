@@ -83,15 +83,23 @@ jobs:
       - name: The generated CRD must admit, and an over-costed copy must not
         working-directory: go/oasgen-provider
         run: |
-          set -euo pipefail
-          # -run is deliberate: this job exists for one test, and the rest of the suite already runs
-          # above. A -run that matches nothing exits 0 with no FAIL lines, so assert it actually ran.
-          out=$(go test ./apis/restdefinitions/v1alpha1/ -run TestCRDCostBudgetHasHeadroom -count=1 -v)
-          echo "$out"
-          grep -q 'PASS: TestCRDCostBudgetHasHeadroom' <<<"$out" || {
-            echo "::error::the cost-budget test did not run (skipped or unmatched), which is not a pass"
+          set -uo pipefail
+          # STREAM THE OUTPUT, DO NOT CAPTURE IT INTO A VARIABLE FIRST.
+          #
+          # This step's first version ran `out=$(go test ...)` and echoed "$out" afterwards. Under
+          # `set -e` the script exits AT THE ASSIGNMENT when the test fails, so the echo never runs and
+          # the log showed 70 seconds of silence followed by `exit code 1` -- the diagnostic was on the
+          # one path that could not produce it. tee streams it live and keeps a copy for the assertion.
+          go test ./apis/restdefinitions/v1alpha1/ -run TestCRDCostBudgetHasHeadroom -count=1 -v 2>&1 | tee /tmp/cost.log
+          status=${PIPESTATUS[0]}
+          # -run is deliberate: this job exists for one test and the rest of the suite runs above. A
+          # `-run` that matches nothing exits 0 with no FAIL lines, so a green exit is not enough --
+          # assert the PASS line, which a skip also does not produce.
+          if ! grep -q 'PASS: TestCRDCostBudgetHasHeadroom' /tmp/cost.log; then
+            echo "::error::the cost-budget test did not PASS (it may have been skipped, or matched nothing). A skip is not a pass."
             exit 1
-          }
+          fi
+          exit "$status"
 
   rest-dynamic-controller:
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
