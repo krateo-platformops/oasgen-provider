@@ -38,6 +38,6 @@
 package apis
 
 import (
+	_ "fybrik.io/crdoc"                                 //nolint:typecheck
 	_ "sigs.k8s.io/controller-tools/cmd/controller-gen" //nolint:typecheck
-	_ "fybrik.io/crdoc" //nolint:typecheck
 )
