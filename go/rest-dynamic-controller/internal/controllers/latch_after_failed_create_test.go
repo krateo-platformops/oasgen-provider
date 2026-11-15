@@ -34,71 +34,109 @@ func withConditions(conds ...metav1.Condition) *unstructured.Unstructured {
 	}}
 }
 
+// withMarkers builds a CR carrying the create-outcome annotations, optionally alongside conditions.
+//
+// The markers are ANNOTATIONS on the main resource; conditions live on the status subresource. That
+// split is why this guard now reads the markers -- see createFailedMostRecently.
+func withMarkers(failed, succeeded string, conds ...metav1.Condition) *unstructured.Unstructured {
+	mg := withConditions(conds...)
+	ann := map[string]any{}
+	if failed != "" {
+		ann["krateo.io/external-create-failed"] = failed
+	}
+	if succeeded != "" {
+		ann["krateo.io/external-create-succeeded"] = succeeded
+	}
+	if len(ann) > 0 {
+		mg.Object["metadata"].(map[string]any)["annotations"] = ann
+	}
+	return mg
+}
+
 // The defect this guards, measured against a real Zendesk (#347).
 //
-// The runtime sets Creating on BOTH create outcomes and separates them only on Synced:
+// An observe path with no get and no findby cannot tell a resource that was created from one the vendor
+// REFUSED to create. The measured consequence was a CR permanently Ready=True with no identifier for a
+// group that never existed.
 //
-//	create succeeded   worker.go:823   Synced = ReconcileSuccess
-//	create failed      worker.go:760   Synced = ReconcileError
+// #347 separated the two by reading Synced == ReconcileError. THAT CHANNEL WAS WRONG, and it took a
+// second defect to show why: Synced=ReconcileError is set by every error path, including this file's own
+// no-identifier refusal -- so the refusal produced the error that this branch read as "the create
+// failed, retry it", and the pair looped. Measured on 0.70.0 against real GitHub: three POSTs in five
+// minutes (issue 696).
 //
-// So an observe path with no get and no findby, reading Ready/Creating alone, cannot tell a resource that
-// was created from one the vendor REFUSED to create -- and the measured consequence was a CR permanently
-// Ready=True with no identifier for a group that never existed.
+// The marker records the CREATE's own outcome, which is the question actually being asked.
 func TestAFailedCreateIsNotMistakenForASuccessfulOne(t *testing.T) {
-	failed := withConditions(
+	// #347's case: the vendor refused the create, so the runtime stamped failed.
+	failed := withMarkers("2026-11-15T12:00:00Z", "")
+	require.True(t, createFailedMostRecently(failed),
+		"a create the vendor refused must report not-exists so it is retried; treating it as created is "+
+			"the #347 latch -- Ready=True for a resource that never existed")
+
+	// A create that succeeded, with no failure ever recorded.
+	succeeded := withMarkers("", "2026-11-15T12:00:00Z")
+	require.False(t, createFailedMostRecently(succeeded),
+		"a successful create must not be retried")
+
+	// Failed, then fixed and succeeded. The old marker stays on the object forever, which is why this
+	// compares the two rather than checking presence.
+	recovered := withMarkers("2026-11-15T12:00:00Z", "2026-11-15T12:05:00Z")
+	require.False(t, createFailedMostRecently(recovered),
+		"a create that failed and LATER succeeded must not be retried: the failed marker is never "+
+			"removed, so a presence check would retry this resource for the rest of its life")
+}
+
+// THE REGRESSION THIS FIX EXISTS FOR (issue 696). The no-identifier refusal returns an error, so the
+// runtime writes Synced=ReconcileError -- and the create SUCCEEDED, with no failure marker. Reading the
+// condition made this look like a failed create and dispatched another one, every resync.
+func TestTheRefusalsOwnErrorIsNotAFailedCreate(t *testing.T) {
+	mg := withMarkers("", "2026-11-15T12:00:00Z",
+		condition.ReconcileError(assertedError{}),
 		condition.Creating(),
-		metav1.Condition{Type: condition.TypeSynced, Status: metav1.ConditionFalse,
-			Reason: condition.ReasonReconcileError, Message: "create failed: 422"},
 	)
-	if !lastReconcileErrored(failed) {
-		t.Error("a CR whose last reconcile errored was not recognised: the no-findby observe path would " +
-			"read its own Creating condition as evidence of a create that in fact was refused")
-	}
+	require.False(t, createFailedMostRecently(mg),
+		"Synced=ReconcileError with a SUCCEEDED create marker is this Observe's own refusal, not a "+
+			"failed create. Reading it as one dispatches a create for a resource that already exists -- "+
+			"measured as three POSTs in five minutes on 0.70.0, and as a duplicate per resync on a "+
+			"vendor that mints the identifier")
 
-	succeeded := withConditions(condition.Creating(), condition.ReconcileSuccess())
-	if lastReconcileErrored(succeeded) {
-		t.Error("a successful create was reported as errored: write-only kinds -- no get, no findby -- " +
-			"would never reach Available and would be re-created on every reconcile")
-	}
-}
-
-// A brand-new CR has no conditions at all. It must not look like a failure, because the branch upstream of
-// this helper already handles "no conditions" correctly by reporting not-exists, and that path is the
-// control acmp measured as working (first observe -> create).
-func TestAConditionlessCRIsNotTreatedAsAFailure(t *testing.T) {
-	if lastReconcileErrored(&unstructured.Unstructured{Object: map[string]any{}}) {
-		t.Error("an object with no status reported as errored")
-	}
-	if lastReconcileErrored(withConditions()) {
-		t.Error("an object with an empty condition list reported as errored")
-	}
-}
-
-// Synced is read by Type, so an unrelated Ready reason must not be mistaken for it. This is the assertion
-// that would fail if someone keyed the helper on Reason alone -- ReasonReconcileError is a Synced reason,
-// but a future Ready reason could collide.
-func TestOnlyTheSyncedConditionDecides(t *testing.T) {
-	// Ready=False for an unrelated reason, with Synced explicitly successful.
-	mg := withConditions(
-		metav1.Condition{Type: condition.TypeReady, Status: metav1.ConditionFalse, Reason: "Updating"},
-		condition.ReconcileSuccess(),
+	// CONTROL: the same condition WITH a newer failure marker must still be a failed create, or the
+	// assertion above would pass for any input carrying ReconcileError.
+	alsoFailed := withMarkers("2026-11-15T12:05:00Z", "2026-11-15T12:00:00Z",
+		condition.ReconcileError(assertedError{}),
 	)
-	if lastReconcileErrored(mg) {
-		t.Error("a non-Synced condition decided the outcome; only Synced distinguishes the two create results")
-	}
-
-	// And with no Synced condition present at all, there is no evidence of an error.
-	onlyReady := withConditions(metav1.Condition{
-		Type: condition.TypeReady, Status: metav1.ConditionFalse, Reason: condition.ReasonReconcileError,
-	})
-	if lastReconcileErrored(onlyReady) {
-		t.Error("a Ready condition carrying the ReconcileError reason was read as the Synced one")
-	}
+	require.True(t, createFailedMostRecently(alsoFailed),
+		"control: a newer failure marker must still report a failed create, whatever the conditions say")
 }
 
-// TestTheLatchGuardIsReachedBeforeAvailableIsSet asserts the PREMISE the tests above depend on.
-//
-// Every assertion above exercises lastReconcileErrored directly, so all of them keep passing if the guard
+// assertedError is a stand-in for the error ReconcileError wraps; only its presence matters here.
+type assertedError struct{}
+
+func (assertedError) Error() string { return "asserted" }
+
+func TestAMarkerlessCRIsNotTreatedAsAFailure(t *testing.T) {
+	require.False(t, createFailedMostRecently(&unstructured.Unstructured{Object: map[string]any{}}),
+		"a CR with no annotations at all has had no create outcome recorded; reporting a failure here "+
+			"would retry a create for a resource nobody has acted on")
+	require.False(t, createFailedMostRecently(withConditions()),
+		"nor does an empty condition list imply a failed create")
+}
+
+func TestOnlyTheCreateMarkersDecide(t *testing.T) {
+	// A Ready condition saying Creating, and nothing else: no create outcome is recorded.
+	require.False(t, createFailedMostRecently(withConditions(condition.Creating())),
+		"Creating is set on BOTH create outcomes, which is exactly why it cannot decide this")
+
+	// And an unrelated annotation must not be mistaken for a marker.
+	other := withMarkers("", "")
+	other.Object["metadata"].(map[string]any)["annotations"] = map[string]any{
+		"krateo.io/connector-verbose": "true",
+	}
+	require.False(t, createFailedMostRecently(other),
+		"control: an unrelated annotation is not a create marker")
+}
+
+// Every assertion above exercises createFailedMostRecently directly, so all of them keep passing if the guard
 // is never called from the branch that sets Available -- the helper would be correct and dead. That failure
 // mode has already happened in this repo: a fix added an early return that bypassed the branch a later test
 // meant to exercise, and the test passed while asserting nothing.
@@ -155,7 +193,7 @@ func TestTheLatchGuardIsReachedBeforeAvailableIsSet(t *testing.T) {
 		}
 		switch fun := call.Fun.(type) {
 		case *ast.Ident:
-			if fun.Name == "lastReconcileErrored" && guardPos == token.NoPos {
+			if fun.Name == "createFailedMostRecently" && guardPos == token.NoPos {
 				guardPos = call.Pos()
 			}
 		case *ast.SelectorExpr:
@@ -168,7 +206,7 @@ func TestTheLatchGuardIsReachedBeforeAvailableIsSet(t *testing.T) {
 	})
 
 	require.NotEqual(t, token.NoPos, guardPos,
-		"lastReconcileErrored is never called inside the `apiCall == nil` branch, so the #347 guard is "+
+		"createFailedMostRecently is never called inside the `apiCall == nil` branch, so the #347 guard is "+
 			"dead code and every other test in this file passes while asserting nothing about the latch")
 	require.NotEqual(t, token.NoPos, setPos,
 		"no SetConditions call inside that branch: it no longer writes a condition, so this order "+

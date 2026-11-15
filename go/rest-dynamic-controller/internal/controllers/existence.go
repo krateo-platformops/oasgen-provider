@@ -15,6 +15,45 @@ import (
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/jqengine"
 )
 
+// createFailedMostRecently reports whether the last recorded CREATE OUTCOME was a failure, read from the
+// markers rather than from the Synced condition.
+//
+// WHY NOT lastReconcileErrored, WHICH THIS REPLACES. That read `Synced == ReconcileError` -- a condition
+// set by EVERY error path, including this file's own no-identifier refusal. So the refusal produced the
+// error that the retry branch then read as "the create failed, try again", and the next pass reported
+// not-exists and dispatched a create. Each branch was correct alone; together they formed a loop.
+//
+// MEASURED on 0.70.0 by github-provider-kog against real GitHub, from the Info line this change's
+// predecessor added:
+//
+//	11:29:00.688  Observe  "Refusing to assume up-to-date: no identifier was ever recorded"
+//	11:29:00.694  ERROR    Cannot observe external resource      -> Synced=False/ReconcileError
+//	11:29:01.725  Observe  "The last reconcile errored, so this resource is not assumed to be up to date"
+//	11:29:01.817  POST     -> 303 -> refused -> Requested:true
+//
+// Three POSTs in five minutes, one per resync, at the same rate as before the fix. On a vendor that
+// mints the identifier that is one duplicate per resync; GitHub happens to answer 303, so the visible
+// damage was a Warning every three minutes and Synced flapping.
+//
+// Note that createHasBeenAttempted is never consulted on this path: it returns TRUE (a create really has
+// been attempted) and the retry branch sits AFTER it. The two guards do not overlap.
+//
+// WHY THE MARKERS ARE THE RIGHT CHANNEL. krateo.io/external-create-failed records the outcome of a
+// CREATE; `Synced=ReconcileError` records that SOMETHING in the last pass errored. #347's measured case
+// -- a create rejected 422 by Zendesk, leaving Creating set and no way to tell a failed create from one
+// in flight -- is still covered, because the runtime stamps external-create-failed on exactly that path.
+// What is no longer covered is "an unrelated error happened", which was never the question.
+//
+// The comparison is against succeeded rather than a bare presence check: a resource can fail a create,
+// be fixed, and succeed later, and the marker from the earlier attempt stays on the object forever.
+func createFailedMostRecently(mg *unstructured.Unstructured) bool {
+	failed := meta.GetExternalCreateFailed(mg)
+	if failed.IsZero() {
+		return false
+	}
+	return failed.After(meta.GetExternalCreateSucceeded(mg))
+}
+
 // createHasBeenAttempted reports whether anything has already tried to create this resource, read off
 // the Ready condition the CONTROLLER itself wrote on a previous pass.
 //
