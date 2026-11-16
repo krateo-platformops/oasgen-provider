@@ -7,6 +7,16 @@ roleRef:
   kind: ClusterRole
   name:  {{ include "oasgen-provider.fullname" . }}-{{ .Release.Namespace }}
 subjects:
+# THE SUBJECT MUST BE THE ServiceAccount THE POD ACTUALLY RUNS AS, which is the serviceAccountName
+# helper and not fullname. They are equal with the shipped values -- serviceAccount.create is true and
+# serviceAccount.name is unset, so the helper falls back to fullname -- so this was a latent defect
+# rather than a live one. It becomes live the moment an operator sets serviceAccount.name (the standard
+# Helm scaffold key, which this chart's values.yaml does not list but the helper honours) or sets
+# serviceAccount.create: false, where the helper resolves to "default": the Deployment then runs as one
+# ServiceAccount while every grant in this release is bound to another, and EVERY operation 403s.
+#
+# Found while adding the aggregated backfill binding next door (#717), which had to pick a subject and
+# could not reconcile the two spellings.
 - kind: ServiceAccount
-  name: {{ include "oasgen-provider.fullname" . }}
+  name: {{ include "oasgen-provider.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}

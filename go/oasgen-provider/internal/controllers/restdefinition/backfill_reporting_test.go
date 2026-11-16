@@ -9,6 +9,7 @@ import (
 	definitionv1alpha1 "github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -52,6 +53,12 @@ func TestAFailedBackfillIsReportedAsAnEvent(t *testing.T) {
 
 	s := runtime.NewScheme()
 	require.NoError(t, apis.AddToScheme(s))
+	// PRODUCTION PARITY, not a convenience. backfillVersionLabelsReporting provisions the ClusterRole that
+	// authorises its own patch (#717), and the manager's scheme in production carries the built-in types --
+	// which is why installRBACResources has been applying ClusterRoles and Roles here for releases. A fake
+	// client without rbacv1 fails that Apply with "no kind is registered for the type v1.ClusterRole",
+	// i.e. it tests a system this provider is not.
+	require.NoError(t, rbacv1.AddToScheme(s))
 
 	forbidden := apierrors.NewForbidden(
 		schema.GroupResource{Group: "github.krateo.io", Resource: "pullrequests"}, "",
@@ -81,18 +88,35 @@ func TestAFailedBackfillIsReportedAsAnEvent(t *testing.T) {
 		"premise: the backfill must actually have failed and logged something; with no failure there is "+
 			"nothing for the event assertion below to be about")
 
-	select {
-	case ev := <-rec.Events:
-		assert.Contains(t, ev, "VersionLabelNotBackfilled", "the event reason is what an operator greps for")
-		assert.Contains(t, ev, "PullRequest", "the event must name the kind whose instances are affected")
-		assert.True(t, strings.Contains(ev, "never reconciled"),
-			"the message must say what the consequence IS -- an operator who reads only 'could not backfill' "+
-				"has no reason to treat it as urgent, and the affected instances cannot say so themselves")
-	default:
-		t.Fatal("no event was recorded: a failed backfill is reported nowhere an operator would look, " +
-			"which is #425 -- and the instances it affects cannot carry a condition, because the watch " +
-			"filters them out server-side before anything can annotate them")
+	// FOUND BY REASON, NOT BY ARRIVAL ORDER. This used to read whichever event came first, which made it a
+	// test of ordering as much as of reporting: #717 added a second, earlier event on the same code path
+	// (BackfillGrantNotProvisioned, when the grant cannot be applied) and the first read stopped being this
+	// one. Scanning loses nothing -- every assertion below is unchanged and still has to hold on a real
+	// event -- and it stops the next event added anywhere upstream from failing this test for no reason.
+	var found string
+	var seen []string
+	for {
+		select {
+		case ev := <-rec.Events:
+			seen = append(seen, ev)
+			if strings.Contains(ev, "VersionLabelNotBackfilled") {
+				found = ev
+			}
+			continue
+		default:
+		}
+		break
 	}
+
+	require.NotEmpty(t, found,
+		"no VersionLabelNotBackfilled event was recorded: a failed backfill is reported nowhere an operator "+
+			"would look, which is #425 -- and the instances it affects cannot carry a condition, because the "+
+			"watch filters them out server-side before anything can annotate them.\nEvents seen: %v", seen)
+
+	assert.Contains(t, found, "PullRequest", "the event must name the kind whose instances are affected")
+	assert.True(t, strings.Contains(found, "never reconciled"),
+		"the message must say what the consequence IS -- an operator who reads only 'could not backfill' "+
+			"has no reason to treat it as urgent, and the affected instances cannot say so themselves")
 }
 
 // assertErr is a tiny helper so the Forbidden carries a realistic message without importing errors just
