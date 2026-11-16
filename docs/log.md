@@ -80,6 +80,25 @@ a human can also clear `krateo.io/external-create-pending`.
 **The reason string is exactly `CreateOutcomeUnknown`**, and it is unstructured-runtime's own constant —
 core-provider imports it rather than re-typing it, so the two cannot drift apart.
 
+### What this release does NOT change, asked for by name
+
+**Nothing about the oas-version backfill.** Asked explicitly by the installer session, because 057 now has
+a verified 0.74.0 baseline for it — 28 unlabelled Configuration objects to 0, with three independent
+non-github controls holding their labels — and a release that moved it would invalidate that baseline.
+
+Measured rather than asserted, with a positive control so a zero reads as absence and not as a bad path:
+
+```
+git diff --name-only 0.74.0..origin/main          6 files, ALL in rest-dynamic-controller
+                                                  plus docs/log.md
+backfillrbac.go, clusterrole-backfill.yaml        present at BOTH refs (git cat-file -e)
+git diff 0.74.0..origin/main -- those paths       empty
+```
+
+**In fact no code in the oasgen-provider module changed at all.** Every change in this release is in
+rest-dynamic-controller; the provider image differs from 0.74.0's only by its version stamp. The generated
+CRDs, the aggregated-ClusterRole grant, the MutatingAdmissionPolicy and the render service are byte-identical.
+
 **A correction to 0.74.0's entry travels in this release**, not a code change: the unmodelled-key warning
 is reported from resyncs rather than on the write it warns about, and compares one level deep. Both are
 written into that section.
