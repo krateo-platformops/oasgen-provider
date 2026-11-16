@@ -50,6 +50,13 @@ const (
 	// resource is reported converged -- see latched_absence.go for why that needs its own signal.
 	reasonAbsenceLatched event.Reason = "AbsenceLatchedWhileCreatePending"
 
+	// reasonUnmodelledKeys says an update WOULD delete keys the vendor holds and the CR cannot express.
+	//
+	// Named for the CAUSE, not the symptom: the keys are unmodelled in the RestDefinition, and the remedy
+	// is a declaration change rather than anything the controller can do. "DataLoss" would read as an
+	// event about something that has already happened, and this fires BEFORE the update that would do it.
+	reasonUnmodelledKeys event.Reason = "UnmodelledKeysWouldBeRemoved"
+
 	// reasonCreateUnreachable is the opposite inference to reasonAbsenceLatched. There, findby did NOT
 	// match and a create was pending, so absence was inferred and nothing was issued. Here findby DID
 	// match on a resource whose create is its only write verb, so the runtime -- which queues a Create
@@ -841,6 +848,29 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 		if err != nil {
 			log.Error(err, "Checking if CR is updated")
 			return controller.ExternalObservation{}, err
+		}
+
+		// WARN BEFORE AN UPDATE DELETES KEYS THE CR CANNOT EXPRESS (issue 400).
+		//
+		// Here, and not in Update, because HERE is where the vendor's current body is already in hand --
+		// `b` is the response the comparison above just read. Detecting it in Update would need either an
+		// extra request on every kind or a value carried across two handler calls; this costs nothing.
+		//
+		// Reported whether or not the comparison found drift. The deletion happens on ANY update, and an
+		// update is also reachable from the informer's spec-change path which never passes through this
+		// comparison -- so gating the warning on drift would make it silent for exactly the author who
+		// edits a partial map and triggers the write themselves.
+		//
+		// Best-effort throughout: a failure to resolve the update verb's body must not fail an observation
+		// that has already succeeded. The warning is a diagnostic about a declaration, and losing it is
+		// strictly better than wedging the resource it describes.
+		if bodyFields, berr := h.updateBodyFields(ctx, cs, clientInfo); berr != nil {
+			log.Debug("Could not resolve the update verb's body fields; skipping the unmodelled-key check",
+				"error", berr)
+		} else if len(bodyFields) > 0 {
+			if found := remoteOnlyBodyKeys(specFields(mg), b, bodyFields); len(found) > 0 {
+				h.reportUnmodelledKeys(ctx, mg, found, log)
+			}
 		}
 		if !res.IsEqual {
 			field := res.Reason.FieldPath()
