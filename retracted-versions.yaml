@@ -185,6 +185,43 @@
 #                                             passes through can tell that it was not. Either the gate
 #                                             computes the figure or nothing states it.
 #
+#     WHEN A CONSUMER GATE ACTUALLY READS THIS FILE, in the azuredevops-provider-kog session's own
+#     words, because the distinction is theirs and they measured it:
+#
+#       "A consumer gate reads this file when it RUNS, not when the consumer RELEASES.
+#        azuredevops-provider-kog's gate runs in its lint workflow, on PRs and on main; its release
+#        workflow only checks that the released commit's lint passed, and does not read this file
+#        again. So a version retracted after a commit's lint can still be released from that commit
+#        (observed 2026-11-16: chart 0.11.0's lint read this file at 08:42:11Z, #726 changed it at
+#        08:47:30Z). The gate also does not read `use:` for a version it lets through; only a refused
+#        version's message shows it."
+#
+#     SO A `use:` MOVING HERE REACHES A GATE ON ITS NEXT RUN, NOT A RELEASE ALREADY PAST LINT. That is
+#     a limit of every consumer gate in this section unless it says otherwise, and it is the reason a
+#     retraction landing here is not the same event as a consumer being unable to ship the version.
+#
+#     AND THAT SESSION HAS SINCE CLOSED THEIR HALF OF IT, in their words:
+#
+#       "Since 2026-11-16 (azuredevops-provider-kog#33) the release workflow re-reads this file against
+#        the tagged pin before publishing; it has not yet run on a real release."
+#
+#     The paragraph above is kept as history rather than rewritten: its timestamps are the OBSERVATION
+#     that motivated the fix, and deleting them would leave the fix looking like a precaution. Their
+#     preflight refuses a release on a retracted pin (rc 1) or an unreadable list (rc 2), carries lint's
+#     two controls, and was tested locally -- the 0.73.0 pin passes, a copy pinned to 0.69.0 is refused
+#     with "RETRACTED; use 0.73.0". It runs only on a release tag, so the first real exercise is their
+#     next release.
+#
+#     THE LIMIT STILL APPLIES TO EVERY OTHER CONSUMER IN THIS SECTION. One consumer closing it is not
+#     the mechanism changing; it is one row of it.
+#
+#     AND IT CORRECTS SOMETHING THIS PUBLISHER CLAIMED. I told that session their chart 0.11.0 was
+#     "the first pin anywhere to go through a consumer-side gate at a `use:` target that had just
+#     moved". It was not: their gate ran five minutes BEFORE #726 merged, and a passing pin never
+#     reads `use:` at all, so the claim was impossible rather than merely early. Recorded because the
+#     claim was flattering to this file and arrived in writing from its publisher -- which is exactly
+#     the kind nobody checks.
+#
 #     krateo-blueprints/azuredevops-provider-kog
 #                                             hack/check-retracted.py, modelled on installer's. Reads
 #                                             the pin from $OASGEN_IMAGE, distinguishes rc 1 (refused)
