@@ -1,0 +1,50 @@
+# THE GRANT THE PROVIDER CANNOT WRITE INTO THIS FILE (#717).
+#
+# oasgen-provider must PATCH the kinds it generates, to stamp krateo.io/oas-version on instances that
+# predate their group's MutatingAdmissionPolicy. It cannot be declared here: a generated kind's API group
+# comes from each RestDefinition's spec.resourceGroup, which this chart cannot enumerate. And the chart's
+# main ClusterRole deliberately grants the wildcard READ-ONLY (`verbs: [get, list, watch]`), so the
+# backfill -- which selects on label ABSENCE and then patches -- was refused on every generated kind, on
+# every pass, for as long as an unlabelled instance existed.
+#
+# So the rules arrive at runtime, by AGGREGATION, and this file is the half an operator can audit.
+#
+# WHY AGGREGATION AND NOT A ClusterRoleBinding WRITTEN BY THE PROVIDER. With aggregation the provider
+# publishes ClusterRoles carrying RULES and a label, and never names a SUBJECT. The binding below is the
+# only thing that says who those rules apply to, and it is in the release rather than in a controller's
+# code path -- so no defect in the provider can grant permissions to a ServiceAccount other than this
+# one. It also means the provider needs no way to discover its own identity, which would otherwise
+# require either a chart-set environment variable (one more value that can be absent, wrong, or
+# materialised by installer's schema over this chart's) or a SelfSubjectReview round trip.
+#
+# THIS ClusterRole HAS NO `rules:` ON PURPOSE, AND ANY ADDED HERE WOULD BE DELETED. Kubernetes, in
+# k8s.io/api/rbac/v1's own words: "If AggregationRule is set, then the Rules are controller managed and
+# direct changes to Rules will be stomped by the controller." A rule that belongs to every install goes
+# in clusterrole.yaml next door; only the per-RestDefinition rules belong here, and only the provider
+# writes those.
+#
+# WHO CAN GROW THIS. Anything able to create a ClusterRole carrying the label below adds its rules to
+# this role, and therefore to this ServiceAccount. That is how Kubernetes' own view/edit/admin roles
+# work, and it requires cluster-level ClusterRole create -- but it is worth stating rather than leaving
+# for someone to discover from the selector.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "oasgen-provider.fullname" . }}-{{ .Release.Namespace }}-backfill
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      ogen.krateo.io/aggregate-to-backfill: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "oasgen-provider.fullname" . }}-{{ .Release.Namespace }}-backfill
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "oasgen-provider.fullname" . }}-{{ .Release.Namespace }}-backfill
+subjects:
+- kind: ServiceAccount
+  name: {{ include "oasgen-provider.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}

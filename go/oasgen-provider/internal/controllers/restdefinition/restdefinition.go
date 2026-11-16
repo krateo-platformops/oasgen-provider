@@ -1146,13 +1146,48 @@ func (e *external) versionSelectorFor(version string) string {
 // affected, and they are precisely what cannot be annotated.
 func (e *external) backfillVersionLabelsReporting(ctx context.Context, cr *definitionv1alpha1.RestDefinition,
 	gvk schema.GroupVersionKind, hasSecuritySchemes bool) {
+	// PROVISION THE GRANT THE PATCH NEEDS, HERE, NEXT TO ITS ONLY CONSUMER (#717).
+	//
+	// The chart cannot declare it: a generated kind's API group comes from spec.resourceGroup and cannot be
+	// enumerated in a release. The chart's wildcard rule is `verbs: [get, list, watch]` -- read-only on
+	// purpose -- so backfillVersionLabels, which selects on label ABSENCE and then PATCHES, was refused on
+	// every generated kind on every pass. Measured on krateo-057: 28 Configuration objects, none labelled,
+	// 28 Events whose count climbed ~6/min until the apiserver's TTH deleted and recreated them, for six
+	// days, with ZERO bare resource kinds affected -- because a resource instance is written often and the
+	// admission policy had already stamped it, so the backfill never selected one.
+	//
+	// SCOPE AND GRANT ARE NOW PROVISIONED FROM ONE PLACE, which is the actual lesson of #717. #180 widened
+	// this backfill from one kind to two so it would agree with the MutatingAdmissionPolicy's
+	// `resources: ["*"]`, and the grant was not widened with it. Two files, one invariant, no test that
+	// could see the disagreement. Provisioning the grant on the pass that uses it is what makes that
+	// specific divergence unrepresentable.
+	//
+	// The plural comes from plurals.ToGroupVersionResource, which is what every other production site uses
+	// -- including the RDC's own ClusterRole. If that helper is ever wrong for a kind, this grant and the
+	// RDC's are wrong together, which is one shared failure rather than a new one.
+	//
+	// Reported, never fatal, and with its OWN event reason: "could not provision the grant" and "could not
+	// patch with the grant" are different operator actions, and a single reason would send someone to
+	// re-check RBAC they had already fixed.
+	cfgResource := getConfigurationGVR(cr, hasSecuritySchemes).Resource
+	if rerr := deploy.SyncBackfillRBAC(ctx, e.kube, gvk.Group, plurals.ToGroupVersionResource(gvk).Resource, cfgResource); rerr != nil {
+		e.log.Warn("Could not provision the backfill grant; the oas-version backfill will be refused until it exists",
+			"kind", gvk.Kind, "group", gvk.Group, "error", rerr)
+		e.rec.Eventf(cr, corev1.EventTypeWarning, "BackfillGrantNotProvisioned",
+			"could not provision the ClusterRole granting patch on instances of %s: %v; the %s backfill "+
+				"below will be refused until it exists", gvk.Kind, rerr, generation.VersionLabel)
+	}
+
 	if bferr := e.backfillVersionLabels(ctx, cr, gvk, hasSecuritySchemes); bferr != nil {
 		e.log.Warn("Could not backfill the oas-version label; instances of this kind that carry no label "+
 			"are matched by no controller's watch and cannot report that themselves",
 			"kind", gvk.Kind, "group", gvk.Group, "error", bferr)
 		e.rec.Eventf(cr, corev1.EventTypeWarning, "VersionLabelNotBackfilled",
 			"could not backfill the %s label on instances of %s: %v; such instances are never reconciled "+
-				"and carry no condition saying so", generation.VersionLabel, gvk.Kind, bferr)
+				"and carry no condition saying so. A \"forbidden\" here on the FIRST pass after an upgrade is "+
+				"expected and clears by itself: the grant is applied earlier in this same pass and the "+
+				"apiserver caches RBAC, so the authorizer can still be running on the old rules",
+			generation.VersionLabel, gvk.Kind, bferr)
 	}
 }
 
