@@ -89,14 +89,20 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 	//     Both booleans are sometimes wrong, so neither is available: refusing is not caution here, it is
 	//     the only answer that is never false.
 	if clientInfo.Resource.ObserveApiRef != nil {
-		return false, fmt.Errorf("existence check: observation is delegated to RESTAction %s/%s, which cannot be read without risking a partial status",
-			clientInfo.Resource.ObserveApiRef.Namespace, clientInfo.Resource.ObserveApiRef.Name)
+		// TRANSIENT: the delegated observe runs on every ordinary reconcile, so existence is knowable --
+		// just not from inside a create-pending window without projecting a partial status. Refusing
+		// FOREVER was stronger than that reason supports, and it is the refusal keycloak's
+		// KeycloakServiceAccountRoleMapping hits (issue 740).
+		return false, ucontroller.ExistenceUndetermined(fmt.Errorf("existence check: observation is delegated to RESTAction %s/%s, which cannot be read without risking a partial status",
+			clientInfo.Resource.ObserveApiRef.Namespace, clientInfo.Resource.ObserveApiRef.Name))
 	}
 	if opID, action := asyncOperationInFlight(mg); opID != "" {
-		return false, fmt.Errorf("existence check: async %s operation %s is still in flight, so whether the resource exists is not yet determined", action, opID)
+		// TRANSIENT by its own words: "not YET determined". The operation terminates.
+		return false, ucontroller.ExistenceUndetermined(fmt.Errorf("existence check: async %s operation %s is still in flight, so whether the resource exists is not yet determined", action, opID))
 	}
 	if unstructuredtools.IsConditionSet(mg, customcondition.Pending()) {
-		return false, fmt.Errorf("existence check: the resource is Pending, so whether the create landed is not yet determined")
+		// TRANSIENT: Pending is a state the resource leaves, in either direction.
+		return false, ucontroller.ExistenceUndetermined(fmt.Errorf("existence check: the resource is Pending, so whether the create landed is not yet determined"))
 	}
 
 	cs := newClientSet(h.dynamicClient, clientInfo, mg, h.prettyJSONDebug, h.hostPolicyCfg, h.logger)
@@ -174,12 +180,17 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 		// deciding whether to clear krateo.io/external-create-pending, and "not proof of absence" does not
 		// tell them what goes wrong if they get it wrong. The outer create-recovery message already names
 		// the annotation, so this half says why clearing it may be unsafe rather than naming it twice.
-		return false, fmt.Errorf("existence check: %s listed successfully but no item matched the "+
+		// TRANSIENT, and this one is a deliberate choice rather than an obvious reading. An
+		// eventually-consistent vendor can accept a create and not yet show it in a list -- Ironic
+		// demonstrated exactly that, a node `active` on disk while a list did not show it. So "no match"
+		// is a state the vendor leaves. It stays an ERROR rather than becoming (false, nil) for the
+		// reason the message gives: absence would license a re-create.
+		return false, ucontroller.ExistenceUndetermined(fmt.Errorf("existence check: %s listed successfully but no item matched the "+
 			"resource's identifiers, which is not proof of absence -- the matching can fail for reasons "+
 			"unrelated to existence (identifiers absent from the list response, an envelope resolving to "+
 			"the wrong collection, a findby query that cannot be evaluated against the items returned), so "+
 			"proceeding as though the resource is absent may CREATE A DUPLICATE of one that already "+
-			"exists: %w", action, callErr)
+			"exists: %w", action, callErr))
 	case restclient.IsNotFoundError(callErr):
 		// A definite negative: the API answered, and answered that it is not there. This is the ONLY path
 		// that may return false.
@@ -188,7 +199,11 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 	default:
 		// Transport failure, 5xx, timeout, 401/403, an unevaluable findby query -- every one of these is
 		// "I could not look". Returning false here is what would recreate a live resource.
-		return false, fmt.Errorf("existence check: reading external state via %s: %w", action, callErr)
+		//
+		// TRANSIENT, and measured: observability found 321 of these on krateo-057 from a vendor 503 that
+		// recovered, all 17 affected resources clearing within the same second. A vendor outage is the
+		// textbook case for "ask again later", and it is the commonest member of this set.
+		return false, ucontroller.ExistenceUndetermined(fmt.Errorf("existence check: reading external state via %s: %w", action, callErr))
 	}
 }
 
