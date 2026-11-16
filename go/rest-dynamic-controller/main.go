@@ -43,6 +43,49 @@ const (
 	defaultOtelExportInterval = 30 * time.Second
 )
 
+// otelExportState names what the endpoint and the three channel switches add up to.
+//
+// EXTRACTED SO A TEST CAN ASSERT THE DECISION ITSELF. The first version of this lived inline in a switch
+// in main(), and its test re-implemented the same switch -- which asserts a copy and proves nothing about
+// the code that runs. Taking the decision out is the difference between a test of this logic and a test
+// of the test's own arithmetic.
+func otelExportState(hasEndpoint, metrics, traces, logs bool) string {
+	anyChannel := metrics || traces || logs
+	switch {
+	case hasEndpoint && !anyChannel:
+		return otelEndpointWithoutChannel
+	case anyChannel && !hasEndpoint:
+		return otelChannelWithoutEndpoint
+	default:
+		return otelExportConsistent
+	}
+}
+
+const (
+	// The endpoint says WHERE and nothing about WHETHER: a cluster that looks instrumented, exporting
+	// nothing. 34 generated controllers on krateo-057 were in this state (issue 729).
+	otelEndpointWithoutChannel = "endpoint-without-channel"
+	// Telemetry is produced and discarded. WORSE than the above, because a consumer sees no rows and
+	// cannot distinguish "export broken" from "nothing happened" -- an audit trail that stops arriving
+	// reads as an absence of activity.
+	otelChannelWithoutEndpoint = "channel-without-endpoint"
+	// Either both sides are configured, or neither is. Neither is a misconfiguration.
+	otelExportConsistent = "consistent"
+)
+
+// otelEndpointForLog reports whether an OTLP endpoint is configured, WITHOUT printing it.
+//
+// The value itself is withheld deliberately: on a node-local collector it is derived from the pod's
+// status.hostIP, so logging it would put a node address into every generated controller's startup line
+// on every restart -- 34 of them here. "set" and "unset" is the whole of what a reader needs to decide
+// whether the switches above can do anything, and it is the only part that cannot be guessed.
+func otelEndpointForLog() string {
+	if env.String("OTEL_EXPORTER_OTLP_ENDPOINT", "") == "" {
+		return "unset"
+	}
+	return "set"
+}
+
 var (
 	Build string
 )
@@ -244,7 +287,49 @@ func main() {
 		WithValues("otelExportInterval", *otelExportInterval).
 		WithValues("otelLogsEnabled", *otelLogsEnabled).
 		WithValues("deploymentName", *deploymentName).
+		WithValues("otelExporterEndpoint", otelEndpointForLog()).
 		Info("Starting.", "serviceName", serviceName)
+
+	// THE ENDPOINT IS NOT THE SWITCH, AND THE "Starting." LINE ABOVE COULD NOT SAY SO (issue 729).
+	//
+	// All three channel switches were already on that line. What was missing is the ENDPOINT, and the
+	// relationship between them: OTEL_EXPORTER_OTLP_ENDPOINT says WHERE and says nothing about WHETHER.
+	// 34 generated controllers on krateo-057 had the endpoint set, every channel defaulting false, and
+	// exported nothing -- while "Metrics server disabled" (a different thing: the Prometheus scrape
+	// listener) read to an operator as the OTLP export being off for a reason they understood.
+	//
+	// WHY A SEPARATE LINE RATHER THAN MORE FIELDS. The "Starting." line carries ~18 values. A reader
+	// cannot see a RELATIONSHIP between five of them, which is the whole defect: each field was already
+	// correct and the conclusion took reading all five and knowing that the endpoint is not a switch.
+	// These lines state the conclusion.
+	//
+	// BOTH DIRECTIONS ARE REAL AND THEY FAIL DIFFERENTLY:
+	//
+	//	endpoint set, every channel off   -> a cluster that looks instrumented and exports nothing.
+	//	                                     Silent. This is what 057 was doing.
+	//	a channel on, no endpoint         -> rows are GENERATED and go nowhere. Worse, because the
+	//	                                     consumer cannot distinguish "export broken" from
+	//	                                     "nothing happened" -- an audit trail that stops arriving
+	//	                                     reads as an absence of activity.
+	//
+	// Warn, not Info: each is a configuration that does not do what its author intended.
+	hasEndpoint := env.String("OTEL_EXPORTER_OTLP_ENDPOINT", "") != ""
+	switch otelExportState(hasEndpoint, *otelEnabled, *otelTracingEnabled, *otelLogsEnabled) {
+	case otelEndpointWithoutChannel:
+		log.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is set but every export channel is off, so nothing is "+
+			"exported. The endpoint says WHERE, not WHETHER: set OTEL_ENABLED (metrics), "+
+			"OTEL_TRACING_ENABLED (traces) or OTEL_LOGS_ENABLED (the audit trail) to export anything",
+			"endpoint", otelEndpointForLog())
+	case otelChannelWithoutEndpoint:
+		log.Warn("An export channel is enabled but OTEL_EXPORTER_OTLP_ENDPOINT is unset, so telemetry "+
+			"is produced and discarded. A consumer sees no rows, which is indistinguishable from no "+
+			"activity rather than from a misconfiguration",
+			"metrics", *otelEnabled, "traces", *otelTracingEnabled, "logs", *otelLogsEnabled)
+	default:
+		log.Debug("OTLP export configuration is self-consistent",
+			"endpoint", otelEndpointForLog(), "metrics", *otelEnabled,
+			"traces", *otelTracingEnabled, "logs", *otelLogsEnabled)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), []os.Signal{
 		os.Interrupt,
