@@ -162,6 +162,23 @@ mutated cleanly with no test noticing.
 > exactly where the code says: a `continuationToken` walk with no author bound — which is also the live
 > shape, four azuredevops kinds being precisely that.
 
+> `Note (2026-11-16)` — **the 0.73.0 tag's own message is missing three lines, and this section is where
+> the content survives.** `git tag -a -F <file>` applies git's default message cleanup, which strips every
+> line beginning with `#`. The message was written with `#710`, `#712` and `#714` as paragraph leads, so
+> those three lines were silently removed: two paragraphs now begin mid-sentence and #714's entry is gone
+> entirely. The PR numbers still appear in the message's first line, so the references are not lost, but
+> the structure is.
+>
+> It was not re-cut. The release workflows had already started from the tag, and deleting a pushed tag to
+> repair prose would risk the release to improve a message — the content is here, where it is editable.
+>
+> What the stripped lines said: **#710** — a dispatch kind's correlation observe read exactly one page,
+> which was a correctness problem rather than a scale one. **#712** — a kind declaring neither get nor
+> findby asserted `Ready=True/Available` with the assumption only in the message. **#714** — the
+> retraction targets move to `use: 0.72.0`, now that 0.72.0 is exercised.
+>
+> Use `--cleanup=verbatim` for any tag or commit message carrying `#NNN` at the start of a line.
+
 ## 2026-11-15 — 0.72.0
 
 **`excludedSpecFields` is no longer immutable, and the three releases that duplicate external resources
