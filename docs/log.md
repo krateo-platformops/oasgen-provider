@@ -67,6 +67,34 @@ PR order: `git show <tag>:…/childhealth.go` carries the arm at 2.13.103 and no
 **It clears by itself.** A later existence check that succeeds ends it, which the ordinary resync provides;
 a human can also clear `krateo.io/external-create-pending`.
 
+> `Known issue (2026-11-16, issue 740)` — **"it clears by itself" does NOT hold for one shape of kind, and
+> that shape is common.** A kind whose `get` is keyed on a SERVER-ASSIGNED identifier and which declares
+> **no findby** can never answer the existence check after a lost create response: the identifier was never
+> recorded, so the resource is not addressable, and there is no findby to re-find it with. The check fails
+> identically on every pass, forever.
+>
+> ```
+> exists.go:109   IsResourceKnown  -> false      (status.<id> is empty)
+> exists.go:115   action = FindBy                 <- the only way left to answer
+> exists.go:137   no findby declared -> error     "existence cannot be read"
+> worker.go:654   Ready=False/CreateOutcomeUnknown + Synced=ReconcileError, every pass
+> ```
+>
+> **Only a human clears it**, by recording the identifier in status — and **deleting the CR orphans the
+> external resource**, which is the action an operator reaches for first. Once the create marker is cleared,
+> Observe finally runs and replaces the condition with `NoIdentifierRecorded`, whose message carries the
+> do-not-delete warning. Both conditions appear, in that order.
+>
+> **This is the fix working, and the trade is not free.** Before v1.22.0 these kinds were RE-CREATED, so
+> 0.75.0 trades a silent duplicate for a loud stuck resource. `exists.go:137` chooses that deliberately:
+> *"NOT false: a kind with no get and no findby is unobservable, and reporting 'definitely absent' for it
+> would let recovery recreate on every grace-period expiry."*
+>
+> Found by **github-provider-kog**, who asked what their Issue, RepoDeployment and Release kinds would do
+> before documenting the reason — all three are exactly this shape. **The remedy that makes such a kind
+> self-healing is a findby**: any list endpoint plus `identifiers` the vendor echoes lets the check answer,
+> and the condition then clears on its own.
+
 > `Note (2026-11-16)` — **what a failed child does beyond the status, as far as its owner can see.**
 > core-provider reports the verdict feeding only the parent's own `Ready` write — `Ready=False`/
 > `Unavailable`, with the message naming the child — and its coverage counts: no requeue, retry policy,
