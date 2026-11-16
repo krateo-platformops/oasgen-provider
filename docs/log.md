@@ -26,6 +26,82 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-16 — 0.78.0
+
+**A marking from 0.77.0 was wrong and is reverted**, and a dispatch kind can finally send the query
+parameter its vendor needs to paginate at all.
+
+### "A list matched nothing" is no longer transient (issue 758)
+
+0.77.0 marked five existence refusals transient. **One of them covers a permanent cause as well**, and it
+is the one its own comment argued hardest for:
+
+```
+transient reading   the create LANDED and the vendor has not listed it yet   (Ironic)
+permanent reading   the create NEVER HAPPENED, so there is nothing to list   (a GitHub PullRequest)
+```
+
+**Both produce the identical observation and a single pass cannot tell them apart.** 0.77.0's comment said
+*"so 'no match' is a state the vendor leaves"* — **true only if the create landed.**
+
+Found by `github-provider-kog` on a findby-addressed kind: marked transient, a never-created resource
+reports `Ready=False/Creating` and requeues forever, **and core-provider's rollup reads `Creating` as
+converging** — so a parent composition looks healthy indefinitely over a resource that will never exist.
+That is the defect `CreateOutcomeUnknown` was added to fix, reintroduced in the release that adopted the
+fix for it.
+
+**It is the same shape as the seven setup failures 0.77.0 deliberately held back**, and the hold's own
+reasoning was applied to those and then not to this one.
+
+**Un-marking costs one resync.** An unmarked refusal still clears itself, because the digest dedupe is
+released at the top of `processItem` and the periodic resync runs the check again — so Ironic's
+late-listing resource shows `CreateOutcomeUnknown` for about one interval and then resolves when the list
+catches up. **A wrong condition for three minutes beats a silent permanent one.**
+
+> `Note (2026-11-16)` — **time-bounding the mark was rejected, and it is the option that is right for both
+> causes.** Keeping it transient only while the create-pending marker is young would spare the Ironic case
+> even one resync of a wrong condition. It buys three minutes of accuracy for a duration constant nobody
+> can justify — the runtime's two-minute grace does not apply, since this path returns an error and never
+> reaches it — plus a branch in a function whose value is that each refusal returns one honest sentence.
+> **Recorded rather than dismissed: if a consumer finds those three minutes painful, that is the fix.**
+
+**Anyone on 0.77.0 is exposed for any findby-addressed kind.** Consumers counted **15** such kinds in one
+chart and **11** in another, which is why both skipped that release for this path.
+
+### A correlation walk can send the query parameter its vendor needs (issue 719)
+
+`correlation.observe` now accepts static `queries`, **sent on every page, including after the pagination
+token is appended.**
+
+**A vendor can make its pagination MODE depend on a query parameter.** Zendesk switches to cursor
+pagination only when `page[size]` is sent: without it the response carries no `meta.has_more` or
+`meta.after_cursor`, so a declared `continuationToken` pagination has nothing to follow and the walk sees
+one page. **A dispatch kind whose correlation token is not on that page never reaches Ready, and files
+nothing either, with no error on the CR.**
+
+There was no way around it from the author's side: `queries` existed on a verb, but the correlation observe
+builds its own call info and never set the field — so a `queries` entry there was pruned at admission with
+only a helm warning.
+
+> `Note (2026-11-16)` — **"on every page" is the load-bearing half.** The obvious implementation threads
+> the queries into the first request and lets pagination build the rest, which drops them from page two
+> onward — and on such a vendor the walk then silently reverts to offset mode mid-walk, the token path
+> disappears, and it ends after one page with no error. **A one-page test cannot see that.**
+>
+> It works because the walk reuses one call configuration for every page and the paginator only ADDS its
+> token to the existing query rather than replacing it. **Those two facts are asserted separately rather
+> than their composition**, because the second is the fragile one: a paginator that built a fresh query
+> would break this silently.
+>
+> **A misspelled key is refused rather than pruned**, and that comes free from reusing the existing
+> `QueryParam` rather than an open map: `name` and `value` are both required, so a typo prunes to `{}` and
+> then fails the required check. An open map would have accepted it and dropped it silently — the shape
+> that made the field necessary.
+
+Requirements and the motivating case are the `acmp` session's. **A query parameter whose absence changes
+the vendor's pagination mode is a better example than anything invented here: it makes the feature
+necessary rather than convenient.**
+
 ## 2026-11-16 — 0.77.0
 
 **A transient refusal stops reporting a state a human must act on.** Four commits, and the first is the
@@ -58,6 +134,20 @@ UNMARKED  :137  no verb to read with            :149  a status-sourced path para
 stuck permanently after a lost create response, and `keycloak-provider-kog`'s
 `KeycloakServiceAccountRoleMapping` is rendered whenever `identityLifecycle` is enabled. Their KOG release
 floors on this version for that reason.
+
+> `Correction (2026-11-16)` — **this names the wrong one of that chart's two delegated kinds.** The
+> reporting session measured it afterwards: `KeycloakServiceAccountRoleMapping` **as deployed never takes
+> the create path** — the target service-account user already exists when the mapping starts, so the
+> delegated observe reports it found and the controller updates. No `external-create-*` annotations
+> appeared at all.
+>
+> **`KeycloakAuthenticationExecution` is the kind that creates through a delegated observe**, and it is
+> the one this marking protects. So the fix has a real beneficiary in that chart — just not the kind
+> named above, which was the kind the discussion started from.
+>
+> Their release log carries the same distinction and says explicitly that the role mapping was not
+> exposed. **A release note naming a kind that does not take the path is worse than naming none**, because
+> it invites an operator to look for a symptom that cannot occur there.
 
 **`:177` is a deliberate choice rather than an obvious reading.** An eventually-consistent vendor can accept
 a create and not yet list it — Ironic demonstrated exactly that, a node `active` on disk that a list did not
