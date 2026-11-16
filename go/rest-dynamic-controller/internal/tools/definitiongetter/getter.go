@@ -414,6 +414,16 @@ type VerbsDescription struct {
 	NotFoundBody *JQProgram `json:"notFoundBody,omitempty"`
 	// Async declares long-running-operation handling for this mutating verb.
 	Async *AsyncConfig `json:"async,omitempty"`
+	// PartialFields names top-level spec fields this verb's body carries as a PARTIAL VIEW of what the
+	// vendor holds there (issue 400). Before the request the controller reads the resource and overlays
+	// the CR's keys onto the current value, so keys the CR does not model survive instead of being
+	// deleted by the replay.
+	//
+	// MIRRORS oasgen-provider's types.go, and the ItemsPath note above applies with teeth: a field
+	// present in only one of the two is silently dropped, and here that would mean the CRD ACCEPTS a
+	// partialFields declaration that the controller never acts on -- an author told their data is
+	// protected while every update still deletes it. That failure is quieter than having no field at all.
+	PartialFields []string `json:"partialFields,omitempty"`
 }
 
 // HeaderItem is a single static HTTP header injected on every request for a verb.

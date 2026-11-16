@@ -716,6 +716,39 @@ type VerbsDescription struct {
 	// (e.g. an update routed to a different sub-API with its own api-version). Values are sent verbatim.
 	// +optional
 	Queries []QueryParam `json:"queries,omitempty"`
+	// PartialFields names top-level spec fields this verb's body carries as a PARTIAL VIEW of what the
+	// vendor holds there, rather than as the complete desired state.
+	//
+	// WITHOUT IT, A PARTIAL VIEW IS ENFORCED AS THE WHOLE OBJECT. The request body is assembled by
+	// top-level spec key, so the whole value goes out under its key and whatever the CR does not express
+	// is deleted. Measured on two vendors, with controls:
+	//
+	//   - Ironic: a CR modelling 2 of the 4 keys in node.extra deleted the other two. 82 seconds without
+	//     a control-plane VIP, across 6 PATCHes. Blades whose spec.extra was ABSENT were sent none and
+	//     kept theirs, which is what made it attributable.
+	//   - GitHub: a webhook PATCH whose config omitted `secret` CLEARED the HMAC secret; a PATCH of
+	//     `active` only kept it. Availability in the first case; INTEGRITY, silently, in the second --
+	//     there is no observable difference between a hook that verifies signatures and one that does not.
+	//
+	// WHAT IT DOES. Before the request, the controller reads the resource and overlays the CR's keys onto
+	// the vendor's current value for each named field. The CR wins on every key it expresses; every other
+	// key the vendor holds survives.
+	//
+	// IF THAT READ FAILS, THE FIELD IS OMITTED FROM THE REQUEST rather than sent whole. Nothing is sent
+	// for it, so the vendor replaces nothing -- which is exactly the state the Ironic control measured as
+	// safe. The CR's own changes to that field wait for a successful read, and the resource says so.
+	//
+	// ONE LEVEL DEEP. The overlay replaces whole values under the field's top-level keys and does not
+	// recurse, matching the detection side's depth so the two cannot disagree about which losses they
+	// cover. An ARRAY is out of scope: merging one needs a notion of element identity, and declaring a
+	// field here that holds an array is a no-op rather than a silent positional merge.
+	//
+	// THERE IS NO WAY TO SAY "DELETE THIS KEY". A key the CR used to carry and no longer does is left at
+	// the vendor's value, deliberately: inferring deletion from absence is the inference that produced
+	// this defect.
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	PartialFields []string `json:"partialFields,omitempty"`
 	// TolerateCodes lists HTTP status codes that, for this verb, are treated as a successful EMPTY response
 	// instead of an error. Use it when a code that would otherwise fail the call actually means "the
 	// (sub-)resource is simply empty / not present yet" rather than a real failure — e.g. an API returning
