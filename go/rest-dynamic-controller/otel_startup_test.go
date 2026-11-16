@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +74,38 @@ func TestOtelStartupDiagnosis_TheFourStates(t *testing.T) {
 		if got := diagnose(tc.endpoint, tc.metrics, tc.traces, tc.logs); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestAuditScopeNameIsTheModulePath pins the one half of issue 744 that was a real defect.
+//
+// Every other audit writer in the platform passes `github.com/krateo-platformops/<component>/audit`;
+// this controller passed a bare `rest-dynamic-controller/audit`, so its rows looked like they came from
+// somewhere else. The observability session found it in a dz-audit sweep and put it plainly: "a writer's
+// scope is how a reader tells writers apart."
+//
+// Routing does not depend on it -- that keys on event.name=audit -- which is exactly why the mismatch
+// survived several releases unnoticed. So this asserts legibility, and it asserts it by SHAPE rather than
+// by string equality, because the thing that matters is the convention and not this one spelling.
+func TestAuditScopeNameIsTheModulePath(t *testing.T) {
+	const want = "github.com/krateo-platformops/rest-dynamic-controller/audit"
+	if auditScopeName != want {
+		t.Errorf("auditScopeName = %q, want %q", auditScopeName, want)
+	}
+	// The convention, asserted separately: a reader joining the platform matches on the prefix and the
+	// suffix, not on the component in between.
+	if !strings.HasPrefix(auditScopeName, "github.com/krateo-platformops/") {
+		t.Error("the scope must start with the org's module prefix, or a consumer grouping writers by " +
+			"module cannot see this one at all")
+	}
+	if !strings.HasSuffix(auditScopeName, "/audit") {
+		t.Error("the scope must end in /audit: that is what distinguishes the audit emitter's scope " +
+			"from the controller's other instrumentation scopes within the same module")
+	}
+	// NEGATIVE CONTROL: the bare service name must NOT satisfy the convention, or the two assertions
+	// above would pass for the value this change replaced.
+	if strings.HasPrefix(serviceName+"/audit", "github.com/krateo-platformops/") {
+		t.Fatal("the old value satisfies the prefix check, so these assertions cannot tell the new " +
+			"value from the old one")
 	}
 }
