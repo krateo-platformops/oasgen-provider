@@ -26,6 +26,114 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-16 — 0.77.0
+
+**A transient refusal stops reporting a state a human must act on.** Four commits, and the first is the
+one a consumer release is floored on.
+
+### Five of sixteen existence refusals are now marked transient (issue 740)
+
+`Exists` refuses for **sixteen** distinct reasons and the runtime could not tell them apart: every one
+arrived at the incomplete-create branch as a plain error and got `Ready=False/CreateOutcomeUnknown`, which
+names a state a human must act on. **Five resolve themselves.**
+
+unstructured-runtime **v1.24.0** adds the contract (`ExistenceUndetermined`, a refinement of its #93) and
+this release adopts it. A marked refusal gets `Ready=False/Creating` — the existing non-sticky reason, which
+core-provider's rollup reads as converging, which is true because a create really is pending — plus
+`Synced=ReconcileError` naming the cause, and the error is returned so the queue backs off.
+
+```
+MARKED    :92   observation delegated to a RESTAction
+          :96   an async operation still in flight
+          :99   the resource is Pending
+          :177  a list succeeded and matched nothing
+          :191  the read itself failed (5xx, timeout)
+
+UNMARKED  :137  no verb to read with            :149  a status-sourced path parameter
+          :142  the call config would not build :145  a jq program that did not compile
+          plus seven setup/construction failures
+```
+
+**`:92` is the one a consumer was waiting for:** a kind whose observation is delegated to a RESTAction was
+stuck permanently after a lost create response, and `keycloak-provider-kog`'s
+`KeycloakServiceAccountRoleMapping` is rendered whenever `identityLifecycle` is enabled. Their KOG release
+floors on this version for that reason.
+
+**`:177` is a deliberate choice rather than an obvious reading.** An eventually-consistent vendor can accept
+a create and not yet list it — Ironic demonstrated exactly that, a node `active` on disk that a list did not
+show. It stays an **error** rather than becoming "definitely absent", because absence would license a
+re-create.
+
+**`:191` is the measured one.** The observability session found **321** of these on krateo-057 from a vendor
+503, across 17 resources of one kind, all clearing within the same second when the vendor recovered.
+
+> `Note (2026-11-16)` — **the seven setup failures are a deliberate hold, not an oversight.** Each covers
+> both causes in one return: *"building the REST client for get"* fails for a missing Secret (transient)
+> **and** for a Configuration naming a scheme that does not exist (permanent), and the error does not
+> distinguish them — so one marking must be wrong for one of the two.
+>
+> The asymmetry decides it. **Marked-but-permanent requeues forever reporting `Creating`, which the cdc
+> rolls up as converging**, so a parent sits in `childConverging` with nothing saying why — the defect
+> `CreateOutcomeUnknown` was added to fix, reintroduced through its own fix. **Unmarked-but-transient shows
+> `CreateOutcomeUnknown` for one resync and clears.** A wrong condition for three minutes beats an invisible
+> wedge. To be revisited per-site when a consumer reports one, with their error in hand.
+
+### The audit instrumentation scope is the module path (issue 744)
+
+Every other writer in the platform passes `github.com/krateo-platformops/<component>/audit`; this controller
+passed a bare `rest-dynamic-controller/audit`, so its rows looked like they came from somewhere else.
+**Routing never depended on it** — that keys on `event.name=audit` — which is why the rows arrived correctly
+and the mismatch survived several releases unnoticed.
+
+> `Correction (2026-11-16)` — **the other half of that issue was not a defect**, and its own reporter
+> established that. `krateo.audit.schema_version` has been stamped by the audit library since **v0.4.0**
+> and this controller pins v0.6.0, so it was already carried. The 24 rows that prompted the issue came from
+> `service.version` **0.48.0 and 0.56.0** builds, and no build had written an audit row on that cluster
+> since — so the **current** builds were *unobserved*, not defective. Now pinned in CI rather than needing a
+> cluster.
+
+### A caveat on partialFields that is a precondition of the feature (issue 739)
+
+**`partialFields` assumes the GET returns, faithfully, every key the PUT can set.** That is the precondition,
+and an earlier draft of this entry stated it wrongly — see the Correction below.
+
+`github-provider-kog` measured GitHub's webhook `config` and it does not: an omitted `secret` is a
+**removal**. They also found that a PATCH carrying the mask `"********"` makes GitHub sign with the
+**literal mask** — verified by checking `X-Hub-Signature-256` against HMAC-SHA256 of the recorded payload.
+So the merge there would replace a real HMAC secret with a guessable one, which is worse than clearing it.
+
+**Neither skipping mask-shaped values nor excluding the field would help**: both end with the key absent,
+and absent means removed. **The only safe shape is the CR owning the value**, through a `secretRef`
+resolver that injects before the overlay.
+
+> `Correction (2026-11-16)` — **an earlier draft of this entry, and the caveat it added to 0.76.0, stated
+> the precondition as "the vendor treats an omitted key as UNCHANGED". That is wrong**, and
+> keycloak-provider-kog caught it by applying the test to their own vendor.
+>
+> **Keycloak already treats an omitted key as removed — that is why `partialFields` exists for them.** A
+> whole-map PUT deletes the keys the CR does not carry precisely *because* Keycloak drops what is omitted.
+> So a test of "PUT without one key, then GET" reproduces the original defect on every field and says
+> nothing about this feature.
+>
+> **The merge does not omit anything. It replays what the GET returned.** So the precondition is a property
+> of the READ, not of the write:
+>
+> ```
+> partialFields needs:   the GET returns, faithfully, every key the PUT can set
+>
+> FIDELITY failure       the key comes back WRONG -- GitHub's secret as "********" (#739)
+>                        -> replaying it writes a guessable value
+> COMPLETENESS failure   the key does not come back AT ALL -- a write-only key
+>                        -> the overlay cannot replay it, and the vendor drops it
+> ```
+>
+> **GitHub webhooks fail both**, which is why nothing rescues them: the read is unfaithful *and* omission is
+> destructive, so neither replaying nor dropping the key is safe. **A vendor that fails only the read
+> condition while honouring omission would be fixable** — drop the key from the overlay and it survives.
+>
+> So the per-field test is: **seed a key through the vendor's own API, then confirm the GET echoes it with
+> the same value.** A key that is stored but not returned, or returned altered, disqualifies that field.
+
 ## 2026-11-16 — 0.76.0
 
 **0.75.0's headline fix did nothing. This release is what makes it work.** Four defects that were
