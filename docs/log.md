@@ -77,6 +77,31 @@ a human can also clear `krateo.io/external-create-pending`.
 > `Ready=False` *outside* core-provider — the installer's gates, a blueprint's `deps:` ordering, the
 > portal. The installer has classified `CreateOutcomeUnknown` as failed since 2.13.103.
 
+### What the conditions look like, on BOTH objects, because they are opposite
+
+An operator looking at this will see one pair on the resource and the inverse on its composition. Named
+explicitly here because two sessions crossed this exact object boundary while establishing it:
+
+```
+the CHILD        (the generated kind's own CR, written by unstructured-runtime)
+  Ready   False  CreateOutcomeUnknown
+  Synced  False  ReconcileError
+
+the COMPOSITION  (written by core-provider's child-health machinery)
+  Ready   False  Unavailable           <- names the child in its message
+  Synced  True   ReconcileSuccess
+```
+
+**`Synced=True` with `Ready=False` on the composition is the EXPECTED shape here, not a contradiction to
+chase.** A child failing does not fail the pass: the composition still completes its reconcile, so it
+reports success for the pass and unavailability for the child. core-provider establishes that the cdc
+writes `Synced` in exactly two places, both the graceful pause, and that all seven arms of its ready
+derivation go through one writer typed `TypeReady` — so **no child-health verdict can reach a
+composition's `Synced` at all**.
+
+The installer session said they would have treated that pair as suspicious and gone looking for a stale
+write. That is the cost of not writing it down.
+
 **The reason string is exactly `CreateOutcomeUnknown`**, and it is unstructured-runtime's own constant —
 core-provider imports it rather than re-typing it, so the two cannot drift apart.
 
