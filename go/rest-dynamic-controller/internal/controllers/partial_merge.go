@@ -1,6 +1,7 @@
 package restResources
 
 import (
+	"maps"
 	"sort"
 
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/text"
@@ -64,13 +65,18 @@ func mergePartialFields(body, remote map[string]interface{}, partial text.String
 			continue
 		}
 
-		out := make(map[string]interface{}, len(remoteMap)+len(crMap))
-		for k, v := range remoteMap {
-			out[k] = v
-		}
-		for k, v := range crMap {
-			out[k] = v // the CR wins on every key it expresses
-		}
+		// Sized from the vendor's value alone, NOT len(remoteMap)+len(crMap). The sum was flagged by
+		// CodeQL as go/allocation-size-overflow, and while two maps large enough to overflow an int are
+		// not reachable, the arithmetic bought nothing: a capacity hint is an optimisation, and the map
+		// grows by itself for whatever the CR adds on top. Removing the operation is clearer than
+		// explaining why the overflow cannot happen.
+		//
+		// maps.Clone would read better still and is NOT used: a nil map stored in an interface satisfies
+		// the type assertion above, Clone returns nil for it, and the first assignment into a nil map
+		// panics. make + Copy is nil-safe at both ends.
+		out := make(map[string]interface{}, len(remoteMap))
+		maps.Copy(out, remoteMap) // the vendor's current value
+		maps.Copy(out, crMap)     // then the CR, which wins on every key it expresses
 		if len(out) == len(crMap) {
 			// The CR already expressed everything the vendor holds, so the merge is a no-op. Reporting it
 			// as merged would make the log claim a rescue that did not happen.
