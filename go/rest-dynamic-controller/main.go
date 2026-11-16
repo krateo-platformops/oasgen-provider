@@ -41,6 +41,9 @@ import (
 const (
 	serviceName               = "rest-dynamic-controller"
 	defaultOtelExportInterval = 30 * time.Second
+	// auditScopeName is the OTel instrumentation scope this controller's audit rows carry. It is the
+	// MODULE PATH plus "/audit", matching every other writer in the platform; see SetAuditEmitter.
+	auditScopeName = "github.com/krateo-platformops/rest-dynamic-controller/audit"
 )
 
 // otelExportState names what the endpoint and the three channel switches add up to.
@@ -432,7 +435,20 @@ func main() {
 	if h, ok := handler.(interface {
 		SetAuditEmitter(*audit.Emitter)
 	}); ok {
-		h.SetAuditEmitter(audit.New(logglobal.GetLoggerProvider().Logger(serviceName + "/audit")))
+		// THE SCOPE IS THE MODULE PATH, not the bare service name (issue 744).
+		//
+		// Every other writer in the platform -- core-provider, the cdc, authn, the gateway projection --
+		// passes `github.com/krateo-platformops/<component>/audit`, and this passed
+		// `rest-dynamic-controller/audit`. The observability session put it plainly: "a writer's scope is
+		// how a reader tells writers apart", and a scope that does not match the convention makes this
+		// controller's rows look like they came from somewhere else.
+		//
+		// Routing does NOT depend on it -- that keys on event.name=audit, which is why the rows arrived
+		// correctly and the mismatch went unnoticed for several releases. So this is legibility for a
+		// consumer rather than a correctness fix, and it is exactly the half of 744 that survived: the
+		// schema_version half turned out not to be a defect at all (the stamp predates our pin, pinned in
+		// CI by TestEmitAuditCarriesTheSchemaVersion).
+		h.SetAuditEmitter(audit.New(logglobal.GetLoggerProvider().Logger(auditScopeName)))
 	}
 
 	// Wire the snowplow client used to resolve observeApiRef RESTActions under the controller's own authn
