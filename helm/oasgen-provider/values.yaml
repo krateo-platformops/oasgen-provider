@@ -162,6 +162,34 @@ rdc:
   #
   # Setting this alone does not start the audit trail: the controller also needs
   # OTEL_LOGS_ENABLED=true, which travels through rdc.env.
+  #
+  # THE ENDPOINT SAYS WHERE AND NOTHING ABOUT WHETHER, and there are THREE separate switches, all
+  # defaulting to false. This chart documented one of them, which is issue 729: 34 generated
+  # controllers on krateo-057 had the endpoint set, every channel off, and exported nothing.
+  #
+  #   OTEL_ENABLED          OTLP METRICS export
+  #   OTEL_TRACING_ENABLED  OTLP TRACE export
+  #   OTEL_LOGS_ENABLED     the AUDIT TRAIL (krateo_audit rows)
+  #
+  # THEY ARE INDEPENDENT, NOT A MASTER AND SUB-SWITCHES, and that is measured rather than inferred:
+  # on krateo-057 all 34 rest-dynamic-controller ConfigMaps carry OTEL_LOGS_ENABLED=true with no
+  # OTEL_ENABLED key at all, and they export audit rows -- while 76 core-provider ConfigMaps carry
+  # OTEL_LOGS_ENABLED=false with OTEL_ENABLED=true and OTEL_TRACING_ENABLED=true. So setting
+  # OTEL_ENABLED=true expecting "all telemetry" gets metrics and traces and NO audit trail.
+  #
+  # All three travel through rdc.env, which is FLEET-WIDE: one map here becomes one ConfigMap per
+  # generated controller, re-applied every reconcile, so a change restarts every generated controller.
+  # There is no per-kind setting.
+  #
+  #   rdc:
+  #     env:
+  #       OTEL_LOGS_ENABLED: "true"      # the audit trail
+  #       OTEL_ENABLED: "true"           # metrics
+  #       OTEL_TRACING_ENABLED: "true"   # traces
+  #
+  # Since 0.76.0 the controller logs its own verdict at startup and WARNS on either mismatch: an
+  # endpoint with every channel off, or a channel enabled with no endpoint. The second is the worse
+  # one -- telemetry is produced and discarded, which a consumer cannot distinguish from no activity.
   otel:
     nodeLocalEndpoint: false
     nodeLocalPort: 4318
