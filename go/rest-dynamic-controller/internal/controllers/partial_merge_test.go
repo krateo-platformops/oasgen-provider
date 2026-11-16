@@ -118,3 +118,56 @@ func TestMergePartialFields_NonMapsAndEmptyInputs(t *testing.T) {
 		t.Errorf("empty declared set: merged %v, want nil -- a kind that declares nothing must be unchanged", got)
 	}
 }
+
+// TestMergePartialFields_MapValuesMayBeAnything distinguishes two things a reader will conflate: a FIELD
+// that is an array (out of scope, a no-op) from a field that is a MAP whose VALUES are arrays (merged by
+// key, each value taken whole).
+//
+// Asked by the keycloak-provider-kog session before declaring partialFields on kog-group, whose
+// `clientRoles` is {clientId: [roles]}. It was unasserted until they asked.
+func TestMergePartialFields_MapValuesMayBeAnything(t *testing.T) {
+	// kog-group.clientRoles, as Keycloak shapes it.
+	body := map[string]interface{}{
+		"clientRoles": map[string]interface{}{
+			"krateo-portal": []interface{}{"view", "edit"},
+		},
+	}
+	remote := map[string]interface{}{
+		"clientRoles": map[string]interface{}{
+			"krateo-portal":    []interface{}{"view"},          // the CR's value must WIN whole
+			"realm-management": []interface{}{"manage-users"},  // the vendor's key must SURVIVE
+			"account":          map[string]interface{}{"n": 1}, // a non-array value, also survives
+		},
+	}
+	if got := mergePartialFields(body, remote, bodySet("clientRoles")); !reflect.DeepEqual(got, []string{"clientRoles"}) {
+		t.Fatalf("merged %v, want [clientRoles]", got)
+	}
+	out := body["clientRoles"].(map[string]interface{})
+
+	// The CR's array REPLACES the vendor's for the key it owns -- it is not unioned, appended or
+	// element-merged. That is the whole reason "an array field is a no-op" and "a map VALUE that is an
+	// array is taken whole" are different rules: no element identity is ever needed here.
+	if !reflect.DeepEqual(out["krateo-portal"], []interface{}{"view", "edit"}) {
+		t.Errorf("krateo-portal = %v, want [view edit]: the CR's array must be taken whole, not merged "+
+			"element-wise with the vendor's [view]", out["krateo-portal"])
+	}
+	if !reflect.DeepEqual(out["realm-management"], []interface{}{"manage-users"}) {
+		t.Errorf("realm-management = %v, want [manage-users]: a vendor key the CR does not express must "+
+			"survive regardless of what TYPE its value has", out["realm-management"])
+	}
+	if !reflect.DeepEqual(out["account"], map[string]interface{}{"n": 1}) {
+		t.Errorf("account = %v: a nested MAP value is also taken whole -- the merge is one level deep, so "+
+			"it does not recurse into it", out["account"])
+	}
+
+	// And the contrast, in the same test so the two rules cannot drift apart: the FIELD being an array
+	// is still a no-op.
+	arrField := map[string]interface{}{"roles": []interface{}{"a"}}
+	arrRemote := map[string]interface{}{"roles": []interface{}{"a", "b"}}
+	if got := mergePartialFields(arrField, arrRemote, bodySet("roles")); got != nil {
+		t.Errorf("a field that IS an array merged %v, want nil", got)
+	}
+	if !reflect.DeepEqual(arrField["roles"], []interface{}{"a"}) {
+		t.Errorf("roles = %v, want [a] unchanged", arrField["roles"])
+	}
+}

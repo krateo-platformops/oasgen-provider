@@ -29,6 +29,20 @@ import (
 // that walked deeper than the warning would silently fix losses nobody was told about, and a warning that
 // walked deeper than the merge would name losses the merge then caused anyway.
 //
+// A MAP WHOSE VALUES ARE ARRAYS IS MERGED BY KEY, each value taken whole from whichever side owns that
+// key. That is a different rule from "a field that IS an array is a no-op", and the two are easy to
+// conflate: keycloak's kog-group.clientRoles is {clientId: [roles]}, a depth-1 map, so the CR's array
+// REPLACES the vendor's for a key the CR expresses and the vendor's survives for one it does not. No
+// element identity is ever needed, which is exactly why this case is in scope and an array field is not.
+//
+// IT SENDS BACK WHATEVER THE GET RETURNED, INCLUDING A MASKED SECRET. A vendor that redacts a secret on
+// read -- Keycloak returns `config.clientSecret` as `**********` -- has that mask overlaid and sent back
+// for any key the CR does not express. Keycloak treats the mask as "unchanged", so it is harmless there,
+// but that is the VENDOR's convention and not a property of this merge. A vendor that took the mask
+// literally would have its secret overwritten with asterisks. The remedy is the ordinary one -- declare
+// the key, so the CR wins -- and the hazard is filed rather than guarded, because detecting "this value
+// is a mask" can only be a heuristic and a wrong guess here deletes a credential.
+//
 // Returns nil when nothing was merged, so a caller can tell "no declared field needed merging" from
 // "a declared field was merged".
 func mergePartialFields(body, remote map[string]interface{}, partial text.StringSet) []string {
