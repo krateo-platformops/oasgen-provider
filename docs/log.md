@@ -94,8 +94,8 @@ and the mismatch survived several releases unnoticed.
 
 ### A caveat on partialFields that is a precondition of the feature (issue 739)
 
-**`partialFields` assumes the vendor treats an omitted key as UNCHANGED.** That assumption is what makes a
-merge meaningful, and it was never written down because every vendor examined honoured it.
+**`partialFields` assumes the GET returns, faithfully, every key the PUT can set.** That is the precondition,
+and an earlier draft of this entry stated it wrongly — see the Correction below.
 
 `github-provider-kog` measured GitHub's webhook `config` and it does not: an omitted `secret` is a
 **removal**. They also found that a PATCH carrying the mask `"********"` makes GitHub sign with the
@@ -104,8 +104,35 @@ So the merge there would replace a real HMAC secret with a guessable one, which 
 
 **Neither skipping mask-shaped values nor excluding the field would help**: both end with the key absent,
 and absent means removed. **The only safe shape is the CR owning the value**, through a `secretRef`
-resolver that injects before the overlay. The 0.76.0 section now carries the test to apply before declaring
-a partial field that holds a secret.
+resolver that injects before the overlay.
+
+> `Correction (2026-11-16)` — **an earlier draft of this entry, and the caveat it added to 0.76.0, stated
+> the precondition as "the vendor treats an omitted key as UNCHANGED". That is wrong**, and
+> keycloak-provider-kog caught it by applying the test to their own vendor.
+>
+> **Keycloak already treats an omitted key as removed — that is why `partialFields` exists for them.** A
+> whole-map PUT deletes the keys the CR does not carry precisely *because* Keycloak drops what is omitted.
+> So a test of "PUT without one key, then GET" reproduces the original defect on every field and says
+> nothing about this feature.
+>
+> **The merge does not omit anything. It replays what the GET returned.** So the precondition is a property
+> of the READ, not of the write:
+>
+> ```
+> partialFields needs:   the GET returns, faithfully, every key the PUT can set
+>
+> FIDELITY failure       the key comes back WRONG -- GitHub's secret as "********" (#739)
+>                        -> replaying it writes a guessable value
+> COMPLETENESS failure   the key does not come back AT ALL -- a write-only key
+>                        -> the overlay cannot replay it, and the vendor drops it
+> ```
+>
+> **GitHub webhooks fail both**, which is why nothing rescues them: the read is unfaithful *and* omission is
+> destructive, so neither replaying nor dropping the key is safe. **A vendor that fails only the read
+> condition while honouring omission would be fixable** — drop the key from the overlay and it survives.
+>
+> So the per-field test is: **seed a key through the vendor's own API, then confirm the GET echoes it with
+> the same value.** A key that is stored but not returned, or returned altered, disqualifies that field.
 
 ## 2026-11-16 — 0.76.0
 
