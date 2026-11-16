@@ -384,7 +384,24 @@ func (h *handler) createDispatch(ctx context.Context, mg *unstructured.Unstructu
 	if apiCall == nil {
 		return true, fmt.Errorf("no dispatch API call could be built for the declared verb")
 	}
-	conf := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, nil)
+	// THE requestTransform NOW RUNS HERE (issue 718). It did not, and the declaration was accepted all the
+	// way to the call: builder.go populates callInfo.RequestTransform for every action, Create/Update/Delete
+	// applied it, and this path -- hand-built next to those three -- did not. A `requestTransform` on an
+	// `action: dispatch` verb was parsed, validated, admitted, plumbed, and dropped.
+	//
+	// Shared with the other three rather than copied, so the next action cannot repeat it.
+	//
+	// STILL `nil` FOR resolved, AND THAT HALF IS NOT FIXED HERE. Request-direction fieldMapping resolvers
+	// (secretRef among them) do not run on a dispatch. Fixing it is not a line of wiring: the Create path
+	// answers a resolver that cannot yet resolve with a PendingReferent CreateResult, and this function
+	// returns (bool, error) and has no way to express "wait, do not treat this as failed". That is a
+	// signature and a design question, tracked on issue 718, and it must end in EITHER resolvers working
+	// here OR admission refusing a request-direction resolver on action: dispatch -- never in a declaration
+	// that is accepted and ignored, which is what this comment would otherwise be excusing.
+	conf, terr := buildTransformedCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, nil)
+	if terr != nil {
+		return true, fmt.Errorf("applying the dispatch requestTransform: %w", terr)
+	}
 	if conf == nil {
 		return true, fmt.Errorf("could not build the dispatch call configuration")
 	}

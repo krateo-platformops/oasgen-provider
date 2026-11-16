@@ -43,6 +43,14 @@ type CallInfo struct {
 	// RequestTransform is this verb's whole-document jq program for the outgoing body. It is NOT applied by
 	// BuildCallConfig — that has no context to run jq with — but by the caller, via
 	// fieldmapping.ApplyRequestTransform, after the body is assembled and immediately before the call.
+	//
+	// "BY THE CALLER" IS WHAT WENT WRONG, so it is now exactly one caller. Every body-sending path goes
+	// through controllers.buildTransformedCallConfig, which does the build and the transform as one step;
+	// a caller that does the first half alone accepts a declared requestTransform and silently drops it
+	// (issue 718, found on `action: dispatch`). The read paths — apiaction.Get and apiaction.FindBy — call
+	// BuildCallConfig directly on purpose: they assemble no body, so there is nothing to run a
+	// whole-document program over. controllers.TestNoBodySendingCallSiteBypassesTheHelper enumerates both
+	// sets and fails on a new call site that joins neither.
 	RequestTransform *getter.JQProgram
 }
 
