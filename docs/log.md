@@ -83,6 +83,35 @@ control-plane VIP), a github webhook's `config.secret` (the HMAC secret, silentl
 *before* any loss — keycloak's `spec.attributes` on a realm and two clients, 14 keys named by the warning
 0.74.0 shipped.
 
+> `Known issue (2026-11-16, issue 739)` — **`partialFields` cannot protect a field whose omission the
+> vendor treats as a DELETION, and GitHub's webhook `config` is one. Do not declare it there.**
+>
+> Measured by the github-provider-kog session on a throwaway repo, by reading each ping's
+> `X-Hub-Signature-256` from the deliveries API and verifying HMAC-SHA256 over the recorded payload:
+>
+> ```
+> control   hook created with secret S       -> signed with S
+> MASK      PATCH with secret "********"     -> signed with the LITERAL "********"
+> omit      PATCH without secret             -> NO signature header at all
+> ```
+>
+> **So the merge would replace a real HMAC secret with a value anyone can guess** — worse than clearing
+> it, because a cleared secret fails verification loudly while a guessable one successfully verifies
+> attacker-forged payloads.
+>
+> **And the omit arm is the one that generalises.** An omitted `secret` is a *removal*, not "leave it
+> alone" — so neither skipping mask-shaped values nor excluding the field from the overlay would help:
+> both end with the key absent, and absent means removed on that endpoint.
+>
+> **The precondition this exposes, which the section above does not state:** `partialFields` assumes the
+> vendor treats an omitted key as UNCHANGED. Where it does not, no merging logic can preserve a value the
+> CR does not carry, because the controller never has it. **The test to apply before declaring a partial
+> field that contains a secret is: does this vendor treat an omitted key as unchanged, or as removed?**
+>
+> **The safe shape is unchanged from the section above:** a key the CR expresses wins, and a `secretRef`
+> resolver injects before the overlay runs. keycloak-provider-kog held `kog-identityprovider` out of
+> their declaration for this reason before any of it was measured.
+
 ### The OTLP endpoint is not the switch (issue 729)
 
 A startup line now says whether the endpoint and the three export channels agree. `OTEL_EXPORTER_OTLP_ENDPOINT`
