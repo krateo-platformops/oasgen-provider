@@ -26,6 +26,142 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-16 — 0.73.0
+
+**A dispatch kind's correlation observe read exactly one page.** That was a correctness problem rather
+than a scale one: an invocation whose echo had fallen past page one was reported ABSENT, and on a
+dispatch kind not-found is what makes the controller fire the invocation again. A collection longer
+than one page could re-run something that had already happened.
+
+Scoped ahead of #702 and #690 because it unblocks a plugin removal already decided: `zendesk-kog`'s
+`ZendeskRequest` was inexpressible without it.
+
+`git log 0.72.0..0.73.0` holds seven commits: **#704** and **#710** (the work), **#712** (issue 709),
+**#711** and **#713** (tests), **#714** (the retraction targets) and **#716**, this section.
+
+### The correlation observe paginates, through the walk findby already uses (#710)
+
+The paginated loop is now `restclient.WalkPaginated`, shared by both callers rather than copied. The
+loop's own history is the argument: it has needed a per-strategy author bound, a 1000-page hard
+backstop, and a three-valued verdict whose arms must never collapse — **only `Exhausted` may become a
+404, because the reconciler CREATES on 404.** Each was a defect before it was a feature, so a second
+copy would be a second place for every one of them to drift.
+
+What varies is parameterised: the verb whose `responseTransform` normalizes items, the predicate, and a
+label so the backstop error names its caller.
+
+> `Note (2026-11-16)` — that is also how the per-item transform arrived, which was the second thing
+> `acmp` asked for. `normalizeItems` is a STEP of the walk, so correlation gets it by using the walk
+> rather than by a second implementation. It matters because `echoedAt` is a dot-path and cannot select
+> an array element by a field value: a token carried in a custom-fields list was unreachable without
+> reshaping the item first.
+
+`correlation.observe` gains `pagination` and `responseTransform`. **A synthesised 404 is the only error
+that becomes not-found**; everything else, including `Indeterminate` — the walk stopping early —
+propagates, because this is the verb where not-found means invoke again.
+
+### `maxPages` and `hasMorePath` on `continuationToken` (#710)
+
+`maxPages` is **optional, and absent means unbounded** — deliberately unlike `pageNumber`'s required
+one. The two strategies have different end signals: this one's default rule is token ABSENCE, which
+terminates a walk on its own.
+
+> `Note (2026-11-16)` — required was tried and **reverted before release**, and the reason should
+> survive the decision. `azuredevops-provider-kog`'s census found **4 live `continuationToken` findby
+> kinds and 0 `pageNumber` kinds**, none setting `maxPages`, on every cluster running their chart
+> 0.6.0–0.8.0. Required would have rejected an unchanged chart's apply. A default instead would have
+> capped walks that work unbounded today — turning an admission failure into a silent runtime one that
+> appears only on large tenants.
+>
+> This file had stated the blast radius was measured-empty, on the strength of ONE cluster's census.
+> The second cluster asked had four kinds and five suites.
+
+`hasMorePath` is a terminator for an API whose cursor does **not** disappear on the last page. Zendesk
+documents exactly one end signal — repeat *"until the `meta[has_more]` property is false"* — and says
+nothing about whether `after_cursor` is present, null or absent there. Under the absence rule such a
+page says "more pages", so the walk runs to the bound on every call.
+
+Measured against the real shapes rather than invented ones (#704): `acmp`'s fixture enumerates all
+three possible final pages rather than guessing, and the cursor-**present** row is `Exhausted` with
+`hasMorePath` and `MorePages` without it — the defect next to its fix.
+
+### `Ready=True` now says when it was ASSERTED rather than observed (#712, issue 709)
+
+A kind declaring **neither `get` nor `findby`** cannot be looked up, so Observe asserted success:
+`Ready=True/Available`, with the assumption only in the message. The handler returns no `Synced`, so
+the runtime stamps `ReconcileSuccess`. **The CR read `Ready=True/Available` + `Synced=ReconcileSuccess`
+whether or not its create ever landed.**
+
+`core-provider` measured the consequence: their rollup reads a child's `Ready=True` as `childHealthy`,
+so a parent Composition read healthy over an assertion — and, in their words, *"the rollup can't tell
+an asserted True from an observed one"*.
+
+The reason is now **`AssumedUpToDate`**. The STATUS stays `True`:
+
+> `Note (2026-11-16)` — `Unknown` is arguably more honest, and would be worse. `krateoReady` keys
+> Unknown on the REASON, so an Unknown it does not recognise falls to its default and holds every
+> parent at `Ready=False/Creating` for as long as the assumed path lasts. That swaps a false-healthy
+> for a permanent false-converging: the first is wrong and quiet, the second is wrong and looks like a
+> stuck deploy. core-provider found this by re-reading their own code after telling me the opposite.
+
+Two things deliberately unchanged: the **return value**, because reporting `exists: false` would
+dispatch a create on every reconcile for a kind that can never be observed; and the other
+assumed-up-to-date site (a nil response body), which is a different claim — the call was made and
+existence WAS observed, only the content was empty.
+
+> `Known issue (2026-11-16, issue 709)` — this makes the state **distinguishable**, not healthy. Until
+> a consumer keys on the reason, such a kind still reports as healthy. core-provider's PR #538 maps
+> `True` + `AssumedUpToDate` to `childUnevaluated`; their arm matches status `True` ONLY.
+
+### The retraction targets move to 0.72.0 (#714)
+
+All three entries — 0.70.0, 0.69.0, 0.66.0 — now say `use: 0.72.0`.
+
+> `Note (2026-11-16)` — the previous value had a reason and so does this one, and the file records both.
+> `use:` names the most-VERIFIED safe version, not the newest. On 2026-11-15 that was 0.71.0, which had
+> three consumers' released-artifact verdicts while 0.72.0 had a five-artifact supply-chain sweep and
+> nothing else — **published is not exercised.** `azuredevops-provider-kog` then ran a full 12-suite
+> regression on 0.72.0 (194/194, the `rdc.env` flip rolling 25/25 controllers both ways, #588 causing 0
+> restarts) plus the write-the-id remediation arm with an untouched control. **Expect it to move again:**
+> 0.73.0 is unexercised on arrival and should not be named until someone has run it.
+
+### A rule-count ledger for the CRD's CEL cost (#711)
+
+The schema-wide CEL cost budget already had a test — `TestGeneratedCRDIsWithinCELCostBudget`, since
+#239, which runs the shipped CRD through the apiserver's own validator and refuses an over-costed
+schema. The ledger added here answers the different question it cannot: whether the cost **moved** while
+still fitting.
+
+> `Note (2026-11-16)` — the motivating case is #710 itself, which spent **eight** rules while adding no
+> validation of its own, purely by embedding `Pagination` and `JQProgram` under `correlation.observe`.
+> Reusing a Go type is free; re-instantiating it in a CRD schema is not, and "does it fit" said yes
+> correctly. The ledger's own first run caught 70/33 → 78/37.
+>
+> Two sessions measured the headroom on real apiservers before this landed — `installer` on GKE
+> v1.36.4 and `core-provider` under envtest — and both reported the apiserver naming a rule **index**
+> that was already there and fine. So a cost rejection reads as a pre-existing CRD problem rather than
+> as the newest addition, and the PR that spent the headroom is not the one that goes red.
+
+### The shared walk's arms, and two bounds that nothing covered (#713)
+
+> `Note (2026-11-16)` — after the extraction the package was green and 15 tests matching
+> `FindBy|Paginat` ran, and **two mutations of the moved code both passed**: collapsing the `Exhausted`
+> arm into a plain error, and plumbing a nil verb into `normalizeItems`. `TestFindBy`'s subtests
+> declare no pagination, so they take `CallFindBySingle` and never enter the loop; the header-token test
+> matches on page one and returns before the end-of-collection arm. So "21 packages ok" was never
+> evidence the refactor preserved behaviour.
+
+Every live suite named as cover for the refactor is `continuationToken`, because azuredevops has no
+`pageNumber` kinds — a gap `github-provider-kog` pointed out, who have three live `pageNumber` findby
+kinds. #713 covers the `pageNumber` arms, and the **1000-page `MaxFindByPages` backstop**, which
+mutated cleanly with no test noticing.
+
+> `Note (2026-11-16)` — the backstop is **unreachable via `pageNumber` by construction**. The loop
+> checks it BEFORE fetching and the strategy bound AFTER, so at equal values the strategy one fires
+> first, and `NewPaginator` refuses a `pageNumber` `maxPages` above the backstop. It is reachable
+> exactly where the code says: a `continuationToken` walk with no author bound — which is also the live
+> shape, four azuredevops kinds being precisely that.
+
 ## 2026-11-15 — 0.72.0
 
 **`excludedSpecFields` is no longer immutable, and the three releases that duplicate external resources
