@@ -465,7 +465,7 @@
           "properties": {
             "nodeLocalEndpoint": {
               "type": "boolean",
-              "description": "Set OTEL_EXPORTER_OTLP_ENDPOINT from the pod's status.hostIP. Required to reach a node-local collector, whose service is headless and has no cluster IP. Does not by itself enable the audit trail -- that needs OTEL_LOGS_ENABLED=true through rdc.env."
+              "description": "Set OTEL_EXPORTER_OTLP_ENDPOINT from the pod's status.hostIP. Required to reach a node-local collector, whose service is headless and has no cluster IP. Does not by itself enable the audit trail -- that needs OTEL_LOGS_ENABLED=true through rdc.env. The endpoint says WHERE and nothing about WHETHER: there are three independent switches, all defaulting to false -- OTEL_ENABLED (metrics), OTEL_TRACING_ENABLED (traces) and OTEL_LOGS_ENABLED (the audit trail). Measured on a live cluster: 34 controllers carried OTEL_LOGS_ENABLED=true with no OTEL_ENABLED key and exported audit rows, so OTEL_ENABLED=true alone gets metrics and traces and no audit trail (issue 729)."
             },
             "nodeLocalPort": {
               "type": "integer",
