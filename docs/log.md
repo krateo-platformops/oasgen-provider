@@ -68,6 +68,27 @@ catches up. **A wrong condition for three minutes beats a silent permanent one.*
 **Anyone on 0.77.0 is exposed for any findby-addressed kind.** Consumers counted **15** such kinds in one
 chart and **11** in another, which is why both skipped that release for this path.
 
+### The chart documents all three OTEL switches, not one of three (issue 729)
+
+`values.yaml` and `values.schema.json` now name **all three** export switches with what each one gates,
+where they documented one. **The endpoint says WHERE and nothing about WHETHER**, and all three default to
+false — 34 generated controllers on krateo-057 had the endpoint set, every channel off, and exported
+nothing.
+
+**They are independent, not a master and sub-switches, and that is measured rather than inferred:** on that
+cluster all 34 rest-dynamic-controller ConfigMaps carried `OTEL_LOGS_ENABLED=true` with **no `OTEL_ENABLED`
+key at all** and exported audit rows, while 76 core-provider ConfigMaps carried the inverse —
+`OTEL_LOGS_ENABLED=false` with metrics and traces on. **So setting `OTEL_ENABLED=true` expecting "all
+telemetry" gets metrics and traces and no audit trail.**
+
+The schema text matters more than the yaml comment: an installer-schema description is what a UI shows, and
+`helm package` strips comments while schema text survives. It also states that `rdc.env` is **fleet-wide**
+and that there is no per-kind setting, because that is the question an operator asks next and the answer is
+not visible from the field's shape.
+
+**The startup-line half of that issue shipped in 0.76.0**; this is the chart half. Measurement by the
+`observability` session.
+
 ### A correlation walk can send the query parameter its vendor needs (issue 719)
 
 `correlation.observe` now accepts static `queries`, **sent on every page, including after the pagination
