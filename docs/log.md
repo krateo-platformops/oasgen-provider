@@ -26,6 +26,116 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-16 — 0.75.0
+
+**A create whose response was lost stops re-creating the resource.** The runtime bump to
+unstructured-runtime **v1.22.0** is the whole of this release's behaviour change, and the defect it fixes
+is a duplicate: a create whose response never arrived was indistinguishable from one that never happened,
+so the same event was re-delivered and the POST re-sent — bounded at `1 + REST_CONTROLLER_MAX_ERROR_RETRIES`,
+which is **six POSTs** at the default. On an API whose names are not unique, that is six resources.
+
+**And rest-dynamic-controller now tells the runtime when the vendor definitely did NOT create anything.**
+A create the vendor *refused* — `400 Bad Request` or `422 Unprocessable Entity` — is reported as a
+committed non-creation rather than an unknown outcome, so the runtime stops guessing about it. Not 409,
+because some vendors answer it precisely *because* the resource already exists; not 404; not 5xx; and not
+403, which never reaches the classification site at all because authorization denial is handled earlier
+and returns a nil error.
+
+### The one thing to know before upgrading: some resources will show red that previously showed converging
+
+`CreateOutcomeUnknown` is a reason core-provider maps to **`childFailed`**, where the same situation
+previously fell through to `default: childConverging`. Operators will see new red. Three facts bound it,
+and the second is narrower than this entry's first draft claimed:
+
+**It needs BOTH halves.** A lost create response does *not* by itself produce this. After an unclassified
+create failure the runtime runs an existence check — rest-dynamic-controller's Observe — and:
+
+```
+exists        -> stamped succeeded, routed to Observe.          NO red.
+absent        -> waits out a 2-minute recovery grace, then re-creates.
+check ERRORS  -> Ready=False / CreateOutcomeUnknown, plus Synced ReconcileError.
+```
+
+So new red means *"a create's outcome was unknown **and** the existence check could not answer"*, which is
+materially rarer than a lost response. Verified in `pkg/controller/worker.go:617-654` at v1.22.0: the
+condition is written only inside `if obsErr != nil`. A status-write conflict requeues before reaching it.
+
+**The consumer floor is 2.13.103.** Below it the reason is unmapped and falls to the converging default, so
+an operator on an older core-provider sees no change whatever. Confirmed against the files rather than the
+PR order: `git show <tag>:…/childhealth.go` carries the arm at 2.13.103 and not at 2.13.102.
+
+**It clears by itself.** A later existence check that succeeds ends it, which the ordinary resync provides;
+a human can also clear `krateo.io/external-create-pending`.
+
+> `Note (2026-11-16)` — **what a failed child does beyond the status, as far as its owner can see.**
+> core-provider reports the verdict feeding only the parent's own `Ready` write — `Ready=False`/
+> `Unavailable`, with the message naming the child — and its coverage counts: no requeue, retry policy,
+> event or helm action is keyed on it. `Unavailable` is itself `failed`, so it propagates up a composition
+> tree as status.
+>
+> **What nobody has verified, and it is where new red could do more than display:** consumers of
+> `Ready=False` *outside* core-provider — the installer's gates, a blueprint's `deps:` ordering, the
+> portal. The installer has classified `CreateOutcomeUnknown` as failed since 2.13.103.
+
+### What the conditions look like, on BOTH objects, because they are opposite
+
+An operator looking at this will see one pair on the resource and the inverse on its composition. Named
+explicitly here because two sessions crossed this exact object boundary while establishing it:
+
+```
+the CHILD        (the generated kind's own CR, written by unstructured-runtime)
+  Ready   False  CreateOutcomeUnknown
+  Synced  False  ReconcileError
+
+the COMPOSITION  (written by core-provider's child-health machinery)
+  Ready   False  Unavailable           <- names the child in its message
+  Synced  True   ReconcileSuccess
+```
+
+**`Synced=True` with `Ready=False` on the composition is the EXPECTED shape here, not a contradiction to
+chase.** A child failing does not fail the pass: the composition still completes its reconcile, so it
+reports success for the pass and unavailability for the child. core-provider establishes that the cdc
+writes `Synced` in exactly two places, both the graceful pause, and that all seven arms of its ready
+derivation go through one writer typed `TypeReady` — so **no child-health verdict can reach a
+composition's `Synced` at all**.
+
+The installer session said they would have treated that pair as suspicious and gone looking for a stale
+write. That is the cost of not writing it down.
+
+**The reason string is exactly `CreateOutcomeUnknown`**, and it is unstructured-runtime's own constant —
+core-provider imports it rather than re-typing it, so the two cannot drift apart.
+
+### What this release does NOT change, asked for by name
+
+**Nothing about the oas-version backfill.** Asked explicitly by the installer session, because 057 now has
+a verified 0.74.0 baseline for it — 28 unlabelled Configuration objects to 0, with three independent
+non-github controls holding their labels — and a release that moved it would invalidate that baseline.
+
+Measured rather than asserted, with a positive control so a zero reads as absence and not as a bad path:
+
+```
+git diff --name-only 0.74.0..origin/main          6 files, ALL in rest-dynamic-controller
+                                                  plus docs/log.md
+backfillrbac.go, clusterrole-backfill.yaml        present at BOTH refs (git cat-file -e)
+git diff 0.74.0..origin/main -- those paths       empty
+```
+
+**And the first-pass backfill Warnings do NOT recur on an 0.74.0 → 0.75.0 upgrade.** They come from the
+apiserver authorizer's RBAC cache lagging a *newly created* grant — `SyncBackfillRBAC` says so in its own
+comment — and on this upgrade the ClusterRoles already exist with byte-identical content, so `kubecli.Apply`
+changes nothing and there is no new grant for the authorizer to lag on. **Stated as a prediction with its
+mechanism rather than as a measurement**, because nobody has rolled it yet: it is falsified by a single
+`forbidden … cannot patch` event on a cluster already running 0.74.0, and the installer session is the one
+who would see it.
+
+**In fact no code in the oasgen-provider module changed at all.** Every change in this release is in
+rest-dynamic-controller; the provider image differs from 0.74.0's only by its version stamp. The generated
+CRDs, the aggregated-ClusterRole grant, the MutatingAdmissionPolicy and the render service are byte-identical.
+
+**A correction to 0.74.0's entry travels in this release**, not a code change: the unmodelled-key warning
+is reported from resyncs rather than on the write it warns about, and compares one level deep. Both are
+written into that section.
+
 ## 2026-11-16 — 0.74.0
 
 **This release is not what it was scoped to be, and the reason is worth stating first.** 0.74.0 was
@@ -66,6 +176,29 @@ stays auditable in the release.
 **Provisioned on the pass that uses it**, which is the actual lesson. #180 widened this backfill from one
 kind to two so it would agree with the admission policy's `resources: ["*"]`, and **the grant was not
 widened with it** — two files, one invariant, and no test that could see the disagreement.
+
+> `Runtime verification (2026-11-16)` — **expect UP TO one Warning per generated kind on the first pass
+> after upgrading into this release, and expect them to clear themselves.** Measured on 057 by the
+> installer session across 28 kinds:
+>
+> ```
+> 21 new `forbidden ... cannot patch` events, each within 2 minutes of its own
+>    oasgen-backfill-<kind> ClusterRole being created
+> every one self-clearing; nothing emitted after T+2m
+> 7 of 28 kinds did not race at all
+> ```
+>
+> The paragraph above already says a first-pass refusal is expected, which is why nobody on 057 treated
+> these as a fault. **The COUNT is the new information:** someone upgrading a cluster with 32 generated
+> kinds should expect a number of this ORDER, not one. A warning per kind looks like a systemic failure if
+> you are not told to expect it.
+>
+> **"Up to", not "one each", and the bound matters in the reassuring direction.** The measured ratio is
+> 21 of 28 — a quarter of the kinds did not race at all, because the grant can land before that kind's
+> first backfill attempt. **A cluster seeing fewer warnings than it has kinds has lost nothing**, and
+> someone told to expect exactly one each would go looking for the missing ones. Corrected on the
+> installer session's reading: this entry's own data block said 21 of 28 while its prose said one per
+> kind, and nobody compares a number to the sentence above it.
 
 > `Note (2026-11-16)` — the grant is `patch` only. Not `update`: the backfill issues a merge patch carrying
 > one label, and `update` would authorise a whole-object replacement this code never performs. Not `get` or
