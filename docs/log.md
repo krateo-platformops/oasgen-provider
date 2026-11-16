@@ -26,6 +26,64 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-16 — 0.75.0
+
+**A create whose response was lost stops re-creating the resource.** The runtime bump to
+unstructured-runtime **v1.22.0** is the whole of this release's behaviour change, and the defect it fixes
+is a duplicate: a create whose response never arrived was indistinguishable from one that never happened,
+so the same event was re-delivered and the POST re-sent — bounded at `1 + REST_CONTROLLER_MAX_ERROR_RETRIES`,
+which is **six POSTs** at the default. On an API whose names are not unique, that is six resources.
+
+**And rest-dynamic-controller now tells the runtime when the vendor definitely did NOT create anything.**
+A create the vendor *refused* — `400 Bad Request` or `422 Unprocessable Entity` — is reported as a
+committed non-creation rather than an unknown outcome, so the runtime stops guessing about it. Not 409,
+because some vendors answer it precisely *because* the resource already exists; not 404; not 5xx; and not
+403, which never reaches the classification site at all because authorization denial is handled earlier
+and returns a nil error.
+
+### The one thing to know before upgrading: some resources will show red that previously showed converging
+
+`CreateOutcomeUnknown` is a reason core-provider maps to **`childFailed`**, where the same situation
+previously fell through to `default: childConverging`. Operators will see new red. Three facts bound it,
+and the second is narrower than this entry's first draft claimed:
+
+**It needs BOTH halves.** A lost create response does *not* by itself produce this. After an unclassified
+create failure the runtime runs an existence check — rest-dynamic-controller's Observe — and:
+
+```
+exists        -> stamped succeeded, routed to Observe.          NO red.
+absent        -> waits out a 2-minute recovery grace, then re-creates.
+check ERRORS  -> Ready=False / CreateOutcomeUnknown, plus Synced ReconcileError.
+```
+
+So new red means *"a create's outcome was unknown **and** the existence check could not answer"*, which is
+materially rarer than a lost response. Verified in `pkg/controller/worker.go:617-654` at v1.22.0: the
+condition is written only inside `if obsErr != nil`. A status-write conflict requeues before reaching it.
+
+**The consumer floor is 2.13.103.** Below it the reason is unmapped and falls to the converging default, so
+an operator on an older core-provider sees no change whatever. Confirmed against the files rather than the
+PR order: `git show <tag>:…/childhealth.go` carries the arm at 2.13.103 and not at 2.13.102.
+
+**It clears by itself.** A later existence check that succeeds ends it, which the ordinary resync provides;
+a human can also clear `krateo.io/external-create-pending`.
+
+> `Note (2026-11-16)` — **what a failed child does beyond the status, as far as its owner can see.**
+> core-provider reports the verdict feeding only the parent's own `Ready` write — `Ready=False`/
+> `Unavailable`, with the message naming the child — and its coverage counts: no requeue, retry policy,
+> event or helm action is keyed on it. `Unavailable` is itself `failed`, so it propagates up a composition
+> tree as status.
+>
+> **What nobody has verified, and it is where new red could do more than display:** consumers of
+> `Ready=False` *outside* core-provider — the installer's gates, a blueprint's `deps:` ordering, the
+> portal. The installer has classified `CreateOutcomeUnknown` as failed since 2.13.103.
+
+**The reason string is exactly `CreateOutcomeUnknown`**, and it is unstructured-runtime's own constant —
+core-provider imports it rather than re-typing it, so the two cannot drift apart.
+
+**A correction to 0.74.0's entry travels in this release**, not a code change: the unmodelled-key warning
+is reported from resyncs rather than on the write it warns about, and compares one level deep. Both are
+written into that section.
+
 ## 2026-11-16 — 0.74.0
 
 **This release is not what it was scoped to be, and the reason is worth stating first.** 0.74.0 was
