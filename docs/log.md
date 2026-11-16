@@ -177,9 +177,9 @@ stays auditable in the release.
 kind to two so it would agree with the admission policy's `resources: ["*"]`, and **the grant was not
 widened with it** — two files, one invariant, and no test that could see the disagreement.
 
-> `Runtime verification (2026-11-16)` — **expect approximately ONE Warning per generated kind on the
-> first pass after upgrading into this release, and expect them to clear themselves.** Measured on 057 by
-> the installer session across 28 kinds:
+> `Runtime verification (2026-11-16)` — **expect UP TO one Warning per generated kind on the first pass
+> after upgrading into this release, and expect them to clear themselves.** Measured on 057 by the
+> installer session across 28 kinds:
 >
 > ```
 > 21 new `forbidden ... cannot patch` events, each within 2 minutes of its own
@@ -190,8 +190,15 @@ widened with it** — two files, one invariant, and no test that could see the d
 >
 > The paragraph above already says a first-pass refusal is expected, which is why nobody on 057 treated
 > these as a fault. **The COUNT is the new information:** someone upgrading a cluster with 32 generated
-> kinds should expect roughly 32 of these, not one. A warning per kind looks like a systemic failure if
+> kinds should expect a number of this ORDER, not one. A warning per kind looks like a systemic failure if
 > you are not told to expect it.
+>
+> **"Up to", not "one each", and the bound matters in the reassuring direction.** The measured ratio is
+> 21 of 28 — a quarter of the kinds did not race at all, because the grant can land before that kind's
+> first backfill attempt. **A cluster seeing fewer warnings than it has kinds has lost nothing**, and
+> someone told to expect exactly one each would go looking for the missing ones. Corrected on the
+> installer session's reading: this entry's own data block said 21 of 28 while its prose said one per
+> kind, and nobody compares a number to the sentence above it.
 
 > `Note (2026-11-16)` — the grant is `patch` only. Not `update`: the backfill issues a merge patch carrying
 > one label, and `update` would authorise a whole-object replacement this code never performs. Not `get` or
