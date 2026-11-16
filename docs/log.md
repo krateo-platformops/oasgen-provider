@@ -118,6 +118,31 @@ the write themselves. **Scoped to the update verb's body**, because a field the 
 be deleted by it, and a false positive in a warning about data loss teaches the reader to ignore the real
 one.
 
+> `Correction (2026-11-16)` — **this entry describes the warning as stronger than it is, in two ways, both
+> measured on this release within hours of it shipping.**
+>
+> **It never fires on the update an author's own edit triggers (#734).** The report runs in Observe, and a
+> spec edit reaches `handleUpdate` without one: `cmp.Diff(newSpec, oldSpec)` non-empty enqueues `CRUpdated`,
+> and that handler calls the external Update directly. Measured by `github-provider-kog` on released
+> 0.74.0: their `events` edit dispatched `update` with the PATCH and **no GET before it**, so no report ran
+> for that generation and **the PATCH that removed the secret went out unwarned**. The warning they DID see
+> existed only because a resync landed between the out-of-band change and the edit — so with the default
+> 180s resync there is a window up to three minutes wide, and it is exactly the window an author works in.
+> **The honest statement is that this warns from RESYNCS, not on the write it is warning about.**
+>
+> **And it compares only one level deep (#732).** A key present in the vendor's object and absent from the
+> CR's is reported only when both sit directly under the named top-level field. Both measured losses behind
+> issue 400 are depth 1 — Ironic's `spec.extra` keys and github's `spec.config.secret` — which is why the
+> shallow comparison covered them and the limit was invisible. **No consumer has yet demonstrated a depth-2
+> loss**, so this is a coverage gap with no known instance rather than a reported failure; an earlier
+> write-up of mine invented an example for it and attributed it to the session that had only asked a
+> question, and that is corrected on #732.
+>
+> **Why both corrections are here rather than only in the issues:** the text above is what an operator
+> reads, and a silence from this warning is exactly what they would otherwise take as "nothing is being
+> lost". The property that IS measured and does hold is the one in the paragraph above — reported whether or
+> not the comparison found drift, with **zero requests on the wire** while reporting, confirmed live.
+
 **An Event, deliberately not a `Ready` condition.** A reason a consumer does not map falls to
 core-provider's `default: childConverging` and holds every parent at `Ready=False/Creating` for as long as
 the state lasts — and this state lasts until a human acts. `AuthorizationDenied` and `DriftNotConverging`
