@@ -1685,17 +1685,11 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		return controller.CreateResult{}, err
 	}
 
-	reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
-	// Whole-document requestTransform, applied to the assembled body immediately before the call — after the
-	// per-field mappings have composed it, so the program sees the finished article. A failure fails the
-	// reconcile rather than sending a partially transformed body.
-	if reqConfiguration != nil {
-		tb, terr := fieldmapping.ApplyRequestTransform(ctx, callInfo.RequestTransform, reqConfiguration.Body)
-		if terr != nil {
-			log.Error(terr, "Applying requestTransform")
-			return controller.CreateResult{}, terr
-		}
-		reqConfiguration.Body = tb
+	// Build-and-transform are one step, shared with Update, Delete and dispatch (issue 718).
+	reqConfiguration, terr := buildTransformedCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
+	if terr != nil {
+		log.Error(terr, "Applying requestTransform")
+		return controller.CreateResult{}, terr
 	}
 	response, err := apiCall(ctx, &http.Client{}, callInfo.Path, reqConfiguration)
 	// NATIVE Create, so the vendor's own status is in hand -- unlike the delegated path, which can
@@ -1927,17 +1921,11 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		digestInScope = false
 	}
 
-	reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
-	// Whole-document requestTransform, applied to the assembled body immediately before the call — after the
-	// per-field mappings have composed it, so the program sees the finished article. A failure fails the
-	// reconcile rather than sending a partially transformed body.
-	if reqConfiguration != nil {
-		tb, terr := fieldmapping.ApplyRequestTransform(ctx, callInfo.RequestTransform, reqConfiguration.Body)
-		if terr != nil {
-			log.Error(terr, "Applying requestTransform")
-			return terr
-		}
-		reqConfiguration.Body = tb
+	// Build-and-transform are one step, shared with Create, Delete and dispatch (issue 718).
+	reqConfiguration, terr := buildTransformedCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
+	if terr != nil {
+		log.Error(terr, "Applying requestTransform")
+		return terr
 	}
 	response, err := apiCall(ctx, &http.Client{}, callInfo.Path, reqConfiguration)
 	// NATIVE Update, so the vendor's own status is in hand -- unlike the delegated path, which can
@@ -2184,7 +2172,15 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		resolved = nil
 	}
 
-	reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
+	// Build-and-transform are one step, shared with Create, Update and dispatch (issue 718). Done here
+	// AND at the rebuild below, so the single standalone transform that used to sit after both is gone --
+	// that ordering was correct and was also the thing that made a fourth caller easy to forget.
+	reqConfiguration, terr := buildTransformedCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
+	if terr != nil {
+		log.Error(terr, "Applying requestTransform")
+		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", terr))
+		return terr
+	}
 	if reqConfiguration == nil {
 		log.Error(fmt.Errorf("error building call configuration"), "Building call configuration")
 		return fmt.Errorf("building call configuration")
@@ -2232,7 +2228,15 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 				// is what turns that into an addressable request, and it is re-checked rather than assumed:
 				// populateStatusFields writes the identifiers it was given, which need not be the ones this
 				// path binds.
-				if rebuilt := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved); rebuilt != nil {
+				// The rebuild is transformed too: it is a FRESH config from the same declaration, so it
+				// needs the same whole-document program the first build got. A rebuild error here is not
+				// fatal -- the branch already treats a failed rebuild as "stay unrecovered" -- so it
+				// leaves reqConfiguration alone rather than raising.
+				rebuilt, rerr := buildTransformedCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
+				if rerr != nil {
+					log.Error(rerr, "Applying requestTransform to the rebuilt delete request")
+				}
+				if rerr == nil && rebuilt != nil {
 					if still := pathparsing.UnresolvedPathParams(callInfo.Path, rebuilt.Parameters); len(still) == 0 {
 						reqConfiguration = rebuilt
 						recovered = true
@@ -2290,14 +2294,6 @@ func (h *handler) Delete(ctx context.Context, mg *unstructured.Unstructured) err
 		}
 		// Recovered: fall through with a rebuilt, addressable request and delete the resource properly.
 	}
-
-	tb, terr := fieldmapping.ApplyRequestTransform(ctx, callInfo.RequestTransform, reqConfiguration.Body)
-	if terr != nil {
-		log.Error(terr, "Applying requestTransform")
-		h.eventRecorder.Event(mg, event.Warning(reasonDeleted, "Delete", terr))
-		return terr
-	}
-	reqConfiguration.Body = tb
 
 	// A 404 on DELETE is the SUCCESS condition, not a failure: it means the resource is already gone.
 	// Observe() a few hundred lines above already treats not-found this way; the delete path did not, and
