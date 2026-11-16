@@ -1742,6 +1742,28 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 	// still actively reconciling them and may still need to authenticate to the external API, so revoking
 	// its auth-secret access any earlier could break an in-flight reconcile of a resource that isn't
 	// actually going away yet.
+	// THE BACKFILL GRANT IS TORN DOWN HERE TOO, and it was not torn down AT ALL until this fix (issue 742).
+	//
+	// DeleteBackfillRBAC existed from #721, carried a doc comment describing its IsNotFound tolerance, and
+	// had ZERO call sites and ZERO tests. So every RestDefinition ever deleted left its labelled ClusterRole
+	// behind, aggregated into the provider's role, granting `patch` on a resource whose CRD had just been
+	// dropped. The leak is unbounded: one role per RestDefinition, forever.
+	//
+	// WHY THAT IS WORSE THAN DEAD WEIGHT. A grant on a resource that does not exist does nothing today. But
+	// the rule names a GROUP and a RESOURCE, not a UID -- so if anything later creates a CRD at the same
+	// group/resource, this provider silently holds `patch` on it, having been granted that for a kind nobody
+	// remembers. A grant must not outlive the thing it was scoped to.
+	//
+	// SAME CONTRACT AS teardownAuthSecretRBAC BELOW, for the same reason: this runs in Delete, so there is no
+	// object left to carry a condition and an event would be orphaned. Warn is the honest ceiling. It is also
+	// deliberately NOT fatal -- refusing the delete over a leaked ClusterRole would block the RestDefinition's
+	// removal on cleanup of something harmless-today, and a blocked delete is worse than a residual rule.
+	if berr := deploy.DeleteBackfillRBAC(ctx, e.kube, gvr.Group, gvr.Resource); berr != nil {
+		e.log.Warn("Could not remove the oas-version backfill ClusterRole; it remains aggregated and grants "+
+			"patch on a resource whose CRD is being dropped",
+			"clusterRole", deploy.BackfillClusterRoleName(gvr), "error", berr.Error())
+	}
+
 	if terr := e.teardownAuthSecretRBAC(ctx, cr, gvr); terr != nil {
 		// WARN, NOT DEBUG, AND THE COMPARISON IS THE ARGUMENT. Its counterpart syncAuthSecretRBAC is FATAL
 		// (returns an error, so the runtime conditions it and emits an event). This one cannot be: it runs
