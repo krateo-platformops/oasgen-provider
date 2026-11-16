@@ -43,6 +43,24 @@
 #
 # Remove an entry only when the version becomes safe again, which for a code defect means never.
 #
+# WHY `use:` MOVED FROM 0.71.0 TO 0.72.0 on 2026-11-16, recorded because the PREVIOUS value also had
+# a reason and a reader deserves both.
+#
+# The rule is that `use:` names the most-VERIFIED safe version, not the newest. On 2026-11-15 that was
+# 0.71.0: it had three consumers' released-artifact verdicts while 0.72.0 had a five-artifact supply
+# chain sweep and nothing else. "Published" is not "exercised", and the list must not route anyone onto
+# a version whose only evidence is that its images exist.
+#
+# That premise is now spent. azuredevops-provider-kog ran a full 12-suite regression on 0.72.0 on a real
+# cluster -- 194/194 checks, the rdc.env flip rolling 25/25 controllers in BOTH directions, #588 causing
+# 0 restarts, teardown verified clean -- plus the write-the-id remediation arm with an untouched control
+# proving convergence was attributable to the patch. 0.72.0 is now the better-evidenced of the two, and
+# it additionally carries #666 and the 641-line-stale generated reference fix.
+#
+# EXPECT THIS TO MOVE AGAIN. 0.73.0 tags shortly and will be unexercised on arrival; it should NOT be
+# named here until someone has run it. Each repoint is meant to be a deliberate act with evidence behind
+# it rather than a bump to whatever is newest.
+#
 # WHY THIS LIST BELONGS TO THIS REPO, in the installer session's words, because they state the
 # mechanism better than the mechanism does:
 #
@@ -87,7 +105,7 @@
 retracted:
   - version: 0.70.0
     charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
-    use: 0.71.0
+    use: 0.72.0
     reason: >-
       A create whose status write loses a race is re-issued on the next reconcile, duplicating the
       external resource, on any kind that declares no `findby` verb. MEASURED on 0.70.0 by two consumers
@@ -101,7 +119,7 @@ retracted:
       0.70.0's own fixes unchanged.
   - version: 0.69.0
     charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
-    use: 0.71.0
+    use: 0.72.0
     reason: >-
       The same duplicate as 0.70.0 and STRICTLY WORSE: 0.69.0 carries BOTH routes into it. Measured at
       the tags -- 0.69.0 has the no-identifier refusal that feeds #347's retry branch AND lacks the
@@ -116,7 +134,7 @@ retracted:
     # it is not retracted, because that route is a code reading there and unmeasured). An entry must not
     # route a pinning session onto a version its own publisher knows to be affected, so `use` points at
     # the first version with neither defect. Found by re-reading this file rather than reported.
-    use: 0.71.0
+    use: 0.72.0
     reason: >-
       A kind declaring no `create` verb writes krateo.io/external-create-pending about five times a
       second, for as long as the process lives, and the CR's conditions stay correct throughout so
