@@ -275,6 +275,21 @@ rdc:
 
   affinity: {}
 
+  # env is handed to EVERY generated rest-dynamic-controller Deployment, so a change here is
+  # fleet-wide and restarts every one of them. Pass values with --set-string: a bare --set turns
+  # "false" into a bool and a duration into something helm renders differently.
+  #
+  # REST_CONTROLLER_REQUEST_TIMEOUT bounds an external API request whose call site sets no timeout
+  # of its own -- which is every create, update, delete, get, findby and dispatch. Default 30s.
+  # The async poll and the lookup runner set their own and are unaffected by it.
+  #
+  # LOWERING IT IS A TEST INSTRUMENT, NOT A TUNING KNOB. A value below a vendor's write latency makes
+  # the controller give up on a request the vendor may already have COMMITTED, which is exactly how a
+  # duplicate external resource is produced -- and the whole reason the setting exists is so that state
+  # can be measured deliberately on a throwaway cluster instead of waited for in production.
+  #
+  #   env:
+  #     REST_CONTROLLER_REQUEST_TIMEOUT: "30s"
   env: {}
 env:
   OASGEN_PROVIDER_DEBUG: "false"

@@ -1493,7 +1493,7 @@ func (u *UnstructuredClient) do(cli *http.Client, req *http.Request, sensitive [
 	if err := u.HostPolicy.PermitsURL(req.URL); err != nil {
 		return nil, err
 	}
-	timeout := 30 * time.Second
+	timeout := DefaultRequestTimeout
 	if cli != nil && cli.Timeout > 0 {
 		timeout = cli.Timeout
 	}
@@ -1533,6 +1533,30 @@ func (u *UnstructuredClient) do(cli *http.Client, req *http.Request, sensitive [
 		CheckRedirect: u.HostPolicy.CheckRedirect,
 	}).Do(req)
 }
+
+// DefaultRequestTimeout bounds every external request whose caller did not set its own Timeout, which
+// is every CRUD and dispatch call site: they all construct a bare &http.Client{}, so this is the
+// effective timeout for create, update, delete, get, findby and dispatch.
+//
+// SETTABLE, and the reason it had to become settable is a test nobody could run. A consumer wanting to
+// measure what happens when a vendor COMMITS a create and the response never arrives had no way to
+// produce that state without inventing a proxy or a sidecar -- the 30s default is far longer than any
+// real POST, and nothing could shorten it. A timeout below the vendor's latency is the one injection
+// point that needs no new component, and refusing to provide it would have left the measurement to
+// something hand-built and unreviewable.
+//
+// A CALLER'S OWN Timeout STILL WINS, which is why this is a default rather than a cap. The async poll
+// (async.RequestTimeout) and the lookup runner (lookupRequestTimeout) set their own deliberately, and
+// a cap would silently shorten them.
+//
+// A PACKAGE VAR, SET ONCE AT STARTUP, and the alternative is worth stating rather than leaving implied.
+// The tidy shape would be a field on UnstructuredClient threaded from main through NewHandler,
+// newClientSet and five call sites -- which is how prettyJSONDebug and hostPolicyCfg are carried. It is
+// not done that way because this value is a single process-wide operator setting with no per-client
+// meaning, and the two existing timeouts it sits beside (async.RequestTimeout, lookupRequestTimeout)
+// are already package-level. It is assigned in main() before any client exists and never again; a
+// second writer would be a data race and there is no legitimate reason for one.
+var DefaultRequestTimeout = 30 * time.Second
 
 // credentialHeaders are redacted from a verbose dump BY NAME, whatever their value.
 //
