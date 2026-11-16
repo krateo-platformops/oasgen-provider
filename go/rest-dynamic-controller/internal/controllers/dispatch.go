@@ -192,6 +192,10 @@ func (h *handler) observeDispatch(ctx context.Context, mg *unstructured.Unstruct
 			Cookies:    cookies,
 		},
 		IdentifierFields: clientInfo.Resource.Identifiers,
+		// Static queries reach EVERY page without anything further: WalkPaginated reuses this one call
+		// configuration for the whole walk, and the paginator only adds its token to the existing query
+		// rather than replacing it. See CorrelationObserve.Queries for why that matters.
+		Queries: c.Observe.Queries,
 	}
 	conf := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, nil)
 	if conf == nil {
