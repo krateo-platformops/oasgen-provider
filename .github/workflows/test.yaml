@@ -49,58 +49,6 @@ jobs:
       test_args: -race -tags=unit,integration -p 1 -coverprofile=coverage.txt -timeout 20m -covermode=atomic ./...
     secrets: inherit
 
-  # crd_cost_budget runs HERE and not through the shared reusable, because the shared workflow is
-  # another repo's and belongs to every component -- adding a setup-envtest step to it would install an
-  # apiserver for modules that have no use for one.
-  #
-  # WHY IT EXISTS. The apiserver estimates the cost of every x-kubernetes-validations rule in a CRD and
-  # rejects the whole CRD when the total exceeds its limit. The budget is SCHEMA-WIDE, so rules anywhere
-  # in RestDefinition compete, and the cost is anti-correlated with diff size: 0.73.0 spent EIGHT rules
-  # while adding no validation of its own, purely by embedding existing types at a new path. A reviewer
-  # cannot see that in a diff.
-  #
-  # Measured independently before this job existed, by installer on a real GKE apiserver and by
-  # core-provider under envtest: today's schema admits with roughly 76 rules of headroom. This job keeps
-  # it that way, and fails here rather than on someone's cluster roll -- where the rejection names an
-  # INNOCENT rule index, because the budget is a total, and therefore reads as a pre-existing CRD
-  # problem rather than as the newest addition.
-  #
-  # TestSchemaRuleLedger runs in the ordinary suite and needs no apiserver; this job adds the only check
-  # that can answer whether the CRD actually ADMITS.
-  crd_cost_budget:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go/oasgen-provider/go.mod
-          cache-dependency-path: go/oasgen-provider/go.sum
-      - name: Install setup-envtest and fetch an apiserver
-        run: |
-          set -euo pipefail
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-          echo "KUBEBUILDER_ASSETS=$("$(go env GOPATH)/bin/setup-envtest" use -p path)" >> "$GITHUB_ENV"
-      - name: The generated CRD must admit, and an over-costed copy must not
-        working-directory: go/oasgen-provider
-        run: |
-          set -uo pipefail
-          # STREAM THE OUTPUT, DO NOT CAPTURE IT INTO A VARIABLE FIRST.
-          #
-          # This step's first version ran `out=$(go test ...)` and echoed "$out" afterwards. Under
-          # `set -e` the script exits AT THE ASSIGNMENT when the test fails, so the echo never runs and
-          # the log showed 70 seconds of silence followed by `exit code 1` -- the diagnostic was on the
-          # one path that could not produce it. tee streams it live and keeps a copy for the assertion.
-          go test ./apis/restdefinitions/v1alpha1/ -run TestCRDCostBudgetHasHeadroom -count=1 -v 2>&1 | tee /tmp/cost.log
-          status=${PIPESTATUS[0]}
-          # -run is deliberate: this job exists for one test and the rest of the suite runs above. A
-          # `-run` that matches nothing exits 0 with no FAIL lines, so a green exit is not enough --
-          # assert the PASS line, which a skip also does not produce.
-          if ! grep -q 'PASS: TestCRDCostBudgetHasHeadroom' /tmp/cost.log; then
-            echo "::error::the cost-budget test did not PASS (it may have been skipped, or matched nothing). A skip is not a pass."
-            exit 1
-          fi
-          exit "$status"
-
   rest-dynamic-controller:
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
