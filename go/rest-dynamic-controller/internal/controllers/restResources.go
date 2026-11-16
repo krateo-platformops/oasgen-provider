@@ -1994,6 +1994,44 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		log.Error(terr, "Applying requestTransform")
 		return terr
 	}
+	// A PARTIAL FIELD IS MERGED, NOT REPLAYED (issue 400).
+	//
+	// This is the only place the merge can happen: the body is assembled and transformed, so it is the
+	// exact object about to be sent, and nothing after this point can put back a key the request omits.
+	//
+	// WHY THE READ IS HERE AND NOT IN Observe. The write that deletes the keys is this one, and a spec
+	// edit reaches this method WITHOUT an Observe: the informer's three-way split enqueues CRUpdated on
+	// a spec change and handleUpdate calls the external Update directly. A merge driven by Observe's read
+	// would therefore miss exactly the case an author triggers by editing their CR -- the same window
+	// that makes the DETECTION half resync-only (#734).
+	if partial := partialFieldsFor(clientInfo.Resource.VerbsDescription, string(apiaction.Update)); len(partial) > 0 {
+		if body, isObject := reqConfiguration.Body.(map[string]interface{}); isObject {
+			remote, rerr := h.readRemoteForMerge(ctx, cs, clientInfo, mg, log)
+			switch {
+			case rerr != nil:
+				// THE READ FAILED, SO THE FIELD IS OMITTED rather than sent whole. Nothing is sent under
+				// that key, so the vendor replaces nothing. The CR's own changes to it wait for a
+				// successful read, and that delay is reported rather than folded into a clean update.
+				dropped := dropPartialFields(body, partial)
+				log.Error(rerr, "Could not read the current value to merge a partial field; the field is "+
+					"omitted from this update instead of replacing what the vendor holds",
+					"kind", mg.GetKind(), "fields", strings.Join(dropped, ","))
+				if len(dropped) > 0 {
+					h.eventRecorder.Event(mg, event.Warning(reasonPartialMergeUnavailable, "Update",
+						fmt.Errorf("%s omitted from this update: the current value could not be read (%w). "+
+							"Nothing was sent for %s, so no server-held key was deleted, and the change to "+
+							"it will be applied once the read succeeds",
+							strings.Join(dropped, ", "), rerr, strings.Join(dropped, ", "))))
+				}
+			default:
+				if merged := mergePartialFields(body, remote, partial); len(merged) > 0 {
+					log.Debug("Merged a partial field onto the vendor's current value instead of replacing it",
+						"kind", mg.GetKind(), "fields", strings.Join(merged, ","))
+				}
+			}
+		}
+	}
+
 	response, err := apiCall(ctx, &http.Client{}, callInfo.Path, reqConfiguration)
 	// NATIVE Update, so the vendor's own status is in hand -- unlike the delegated path, which can
 	// only see snowplow's. On failure it travels on *restclient.StatusError; on success it is on

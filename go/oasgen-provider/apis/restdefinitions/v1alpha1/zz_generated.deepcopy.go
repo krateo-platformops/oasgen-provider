@@ -914,6 +914,11 @@ func (in *VerbsDescription) DeepCopyInto(out *VerbsDescription) {
 		*out = make([]QueryParam, len(*in))
 		copy(*out, *in)
 	}
+	if in.PartialFields != nil {
+		in, out := &in.PartialFields, &out.PartialFields
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.TolerateCodes != nil {
 		in, out := &in.TolerateCodes, &out.TolerateCodes
 		*out = make([]int, len(*in))

@@ -78,6 +78,10 @@ func TestNoBodySendingCallSiteBypassesTheHelper(t *testing.T) {
 		"dispatch.go":                   "apiaction.FindBy -- observeDispatch's correlation walk. The DISPATCH call itself goes through the helper; TestDispatchGoesThroughTheHelper pins that separately",
 		"mutate_restaction.go":          "apiaction.Get -- reads before mutating a RestAction",
 		"restResources.go":              "apiaction.Get and apiaction.FindBy -- the two observe paths",
+		"partial_read.go": "apiaction.Get -- reads the current value before a partial-field merge (issue 400). " +
+			"Deliberately the SAME construction as observe's own get in restResources.go: both must resolve to the " +
+			"same URL, because the object the merge overlays onto has to be the object observe compares against. " +
+			"Routing this one through the helper and not that one would let the two reads diverge",
 	}
 
 	for _, s := range sites {
