@@ -25,6 +25,7 @@ import (
 
 	restResources "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/authn"
+	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/hostpolicy"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/snowplow"
@@ -89,6 +90,10 @@ func main() {
 	resyncInterval := flag.Duration("resync-interval",
 		env.Duration("REST_CONTROLLER_RESYNC_INTERVAL", time.Minute*3),
 		"resync interval")
+	requestTimeout := flag.Duration("request-timeout",
+		env.Duration("REST_CONTROLLER_REQUEST_TIMEOUT", restclient.DefaultRequestTimeout),
+		"timeout for an external API request whose call site sets none -- every create, update, delete, "+
+			"get, findby and dispatch. The async poll and lookup runner set their own and are unaffected")
 	resourceGroup := flag.String("group",
 		env.String("REST_CONTROLLER_GROUP", ""),
 		"resource api group")
@@ -163,6 +168,12 @@ func main() {
 	}
 
 	flag.Parse()
+
+	// Set BEFORE any UnstructuredClient exists, and never again. See restclient.DefaultRequestTimeout for
+	// why this is a package var rather than a field threaded through NewHandler.
+	if *requestTimeout > 0 {
+		restclient.DefaultRequestTimeout = *requestTimeout
+	}
 
 	// THE STARTUP HARD-FAIL ON THIS CONTROLLER'S OWN ServiceAccount IDENTITY IS GONE (#540).
 	//
