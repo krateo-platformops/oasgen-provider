@@ -57,9 +57,41 @@
 # proving convergence was attributable to the patch. 0.72.0 is now the better-evidenced of the two, and
 # it additionally carries #666 and the 641-line-stale generated reference fix.
 #
-# EXPECT THIS TO MOVE AGAIN. 0.73.0 tags shortly and will be unexercised on arrival; it should NOT be
-# named here until someone has run it. Each repoint is meant to be a deliberate act with evidence behind
-# it rather than a bump to whatever is newest.
+# WHY `use:` MOVED FROM 0.72.0 TO 0.73.0 on 2026-11-16, a few hours later. The paragraph above predicted
+# this move and set the bar for it: "0.73.0 tags shortly and will be unexercised on arrival; it should NOT
+# be named here until someone has run it." It has now been run, on four independent arms, so the bar is
+# met rather than waived.
+#
+#   azuredevops-provider-kog  194/194 checks, 12 of 12 suites, on a real cluster, released artifacts
+#                             only, 0.72.0 -> 0.73.0 on chart 0.10.0, teardown verified clean.
+#                             check-build 25/25 at stamp 0.73.0-f5f438c5; the carry-over CR kept its id;
+#                             the rdc.env flip rolled 25/25 in BOTH directions; #593 4/4 at both ends;
+#                             5/5 races fired with 0 duplicates (25 races over three releases, 0
+#                             duplicates). THIS IS THE COMPARABLE ARM: it is the same suite on the same
+#                             cluster shape that gave 0.72.0 its 194/194, which is what makes
+#                             "most-verified" a comparison rather than a judgement.
+#   github-provider-kog       a live pageNumber walk on kind v1.36.4 against real GitHub: 1 request for
+#                             a page-1 match, 2 for a page-2 match (so no over-paging after a match),
+#                             the Exhausted arm made exactly 1 POST and GitHub held 106 PRs with no
+#                             duplicates, and 0 list GETs across a 263s hold spanning a 180s resync.
+#                             Plus a 0.72.0->0.73.0 render diff of 32 kinds at ZERO, with a planted
+#                             maxLength as the positive control proving the diff could see a change.
+#   openstack-ironic-operator-kog  arm64: pods STARTED and did work from the arm64 images, a generated
+#                             controller reconciled a real CR, verifying -> manageable landed, and the
+#                             dispatch count was IDENTICAL to 0.61.0 (1 and 1; 2 and 2 on the second
+#                             ordering) -- so #710's walk refactor is behaviour-neutral for a findby
+#                             kind declaring no pagination, measured on the wire.
+#   acmp                      a GKE e2e against a request-logging fake: the walk stops at match_page+1
+#                             (1 and 2), Exhausted on all three final-cursor variants, and the
+#                             Indeterminate arm files NOTHING and errors loudly.
+#
+# WHAT THESE RUNS DO NOT ESTABLISH, recorded because "exercised" is not a single claim. All five
+# continuationToken walk suites in the regression are SINGLE-PAGE, so they read as "no regression" and
+# not as coverage; ironic captured no per-pod imageIDs, so the arm64 binary demonstrably RAN but the
+# digest it was selected from is unproven; and no arm covers a last page that is exactly full.
+#
+# EXPECT THIS TO MOVE AGAIN, on the same terms. The rule is unchanged: `use:` names the most-VERIFIED
+# safe version, not the newest, and each repoint is a deliberate act with evidence behind it.
 #
 # WHY THIS LIST BELONGS TO THIS REPO, in the installer session's words, because they state the
 # mechanism better than the mechanism does:
@@ -105,7 +137,7 @@
 retracted:
   - version: 0.70.0
     charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
-    use: 0.72.0
+    use: 0.73.0
     reason: >-
       A create whose status write loses a race is re-issued on the next reconcile, duplicating the
       external resource, on any kind that declares no `findby` verb. MEASURED on 0.70.0 by two consumers
@@ -119,7 +151,7 @@ retracted:
       0.70.0's own fixes unchanged.
   - version: 0.69.0
     charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
-    use: 0.72.0
+    use: 0.73.0
     reason: >-
       The same duplicate as 0.70.0 and STRICTLY WORSE: 0.69.0 carries BOTH routes into it. Measured at
       the tags -- 0.69.0 has the no-identifier refusal that feeds #347's retry branch AND lacks the
@@ -134,7 +166,7 @@ retracted:
     # it is not retracted, because that route is a code reading there and unmeasured). An entry must not
     # route a pinning session onto a version its own publisher knows to be affected, so `use` points at
     # the first version with neither defect. Found by re-reading this file rather than reported.
-    use: 0.72.0
+    use: 0.73.0
     reason: >-
       A kind declaring no `create` verb writes krateo.io/external-create-pending about five times a
       second, for as long as the process lives, and the CR's conditions stay correct throughout so
