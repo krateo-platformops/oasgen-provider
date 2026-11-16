@@ -26,6 +26,239 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-16 — 0.74.0
+
+**This release is not what it was scoped to be, and the reason is worth stating first.** 0.74.0 was
+scoped around #400 — a spec field holding a map or array is replayed to the vendor whole, deleting
+server-held keys the CR cannot express. It ships **#400's detection half and not its merge**: a live
+failure on krateo-057 (#717) took priority, and two peer-found defects arrived with measurements
+attached. The merge — a declaration, a fresh read before the update, a per-key merge — is next.
+
+`git log 0.73.0..0.74.0` holds **nine** commits: **#721** (the live one), **#725** (#400's first half),
+**#722** (issue 718), **#727** (an instrument), **#720**, **#726** and **#728** (contracts and targets),
+**#716**, which belongs to this range rather than 0.73.0's — and the PR carrying this section.
+
+> `Note (2026-11-16)` — that count was written before the last two merged and **verified against
+> `git log` immediately before this section was cut**, which is the check that found the error corrected
+> in 0.73.0's entry below. Writing the list from memory is how the wrong number got there; writing it
+> from memory and then not re-reading it is how it shipped.
+
+### oasgen-provider could read every generated kind and write none of them (#717, fixed by #721)
+
+The provider's own ClusterRole ends with `apiGroups: ["*"], resources: ['*'], verbs: [get, list, watch]`
+— read-only on purpose, because a generated kind's API group comes from each RestDefinition's
+`spec.resourceGroup` and cannot be enumerated in a release. Every other rule names a fixed group. **So
+the oas-version backfill, whose whole job is a PATCH, was refused on every generated kind.**
+
+Measured on krateo-057: **28 Configuration objects with no `krateo.io/oas-version` label**, failing every
+pass since **2026-11-10 08:13Z**. Zero bare resource kinds affected — the backfill selects on label
+ABSENCE and the admission policy stamps on WRITE, so a resource instance is written often and already
+labelled, while a Configuration written once at install is permanently selected and permanently refused.
+**The missing `patch` was cluster-wide; the unlabelled Configuration is only what exposed it.**
+
+The grant now arrives at runtime by **ClusterRole aggregation**. The provider publishes a labelled
+ClusterRole carrying `patch` on exactly the two resources one RestDefinition generates; the chart ships
+the aggregated role and **the only binding**. Three properties decided it: the provider never names a
+SUBJECT, so no defect here can grant permissions to another ServiceAccount; it needs no way to discover
+its own identity, which would otherwise mean a chart-set env var or a `SelfSubjectReview`; and the binding
+stays auditable in the release.
+
+**Provisioned on the pass that uses it**, which is the actual lesson. #180 widened this backfill from one
+kind to two so it would agree with the admission policy's `resources: ["*"]`, and **the grant was not
+widened with it** — two files, one invariant, and no test that could see the disagreement.
+
+> `Note (2026-11-16)` — the grant is `patch` only. Not `update`: the backfill issues a merge patch carrying
+> one label, and `update` would authorise a whole-object replacement this code never performs. Not `get` or
+> `list` either, though it lists — those are already covered cluster-wide, and restating them would make
+> this role look like the authority for a read it does not gate. **A grant that duplicates a wider one
+> reads as a control while restricting nothing**, which is the mistake 0.54.0's blanket `secrets` rule made.
+
+> `Note (2026-11-16)` — a **latent** chart defect was fixed on the way: `clusterrolebinding.yaml` named
+> `fullname` as its subject where the Deployment uses the `serviceAccountName` helper. Equal with the
+> shipped values, so nothing was broken — but the installer session confirmed their schema **can** set
+> `serviceAccount.name` and `serviceAccount.create`, either of which would have the pod running as one
+> ServiceAccount with every grant bound to another, and **every operation would 403**. Found because the
+> new binding had to pick a subject and could not reconcile the two spellings.
+
+> `Correction (2026-11-16)` — this entry first carried the figure **8,768 events in 24h**, then **52,375
+> over six days**, and described the latter as a denial of the event stream. **Both were records, not
+> Events.** Measured: **28 live Event objects** with `count` 314–408, ~196 Event generations over six days
+> as the apiserver's TTL deleted and recreated them, and ~52,250 recorder emissions folded into 28 objects
+> at a time. Aggregation works exactly as this repo's own comment claims. The honest harm is "an unreadable
+> diagnostic whose count climbs ~6/min until TTL", and the cost lands in a telemetry pipeline rather than
+> in etcd. `otel_logs k8s-events` is a **view** of Event objects; the record count was read as a claim about
+> the apiserver.
+
+**The second half of #717 is not in this release.** A permanent 403 that cannot clear without a human is
+still re-reported every pass. It belongs in a condition an operator reads once, with the Event on
+transition.
+
+### Warn before an update deletes vendor keys the CR cannot express (#400, half of it, #725)
+
+`processFields` assembles the request body by top-level spec key — `mapBody[field] = value` — so a CR
+modelling PART of a map enforces that partial view as the WHOLE object. #400's own framing is why this
+half exists on its own: *"nothing distinguishes 'this map is the complete desired state' from 'this map is
+a partial view', and **nothing says anything when a key present on the server is about to be removed**."*
+The merge fixes the first clause for an author who declares it. **This fixes the second for everyone,
+including the author who does not yet know the problem exists — which is every author today.**
+
+Measured by `openstack-ironic-operator-kog` on a live cluster: a sidecar mirrored two of the four keys a
+bare-metal node publishes into Ironic's `node.extra`, RDC sent those two as the whole `extra`, and
+`etcd_ip` and `cp_endpoint` were deleted. **82 seconds, across 6 PATCHes** — an enforcement loop, not a
+race. `cp_endpoint` was a control-plane VIP, so every replica rendered `curl -k https:///healthz`, a URL
+with no host, polled it 120 times and exited 1, while Ironic reported `active` for all six machines. The
+controlled arm is what makes it attributable: blade01 had a non-empty `spec.extra` and lost keys; blades
+02 and 03 had none, were sent no `extra`, and kept theirs.
+
+**Detected at Observe**, where the vendor's body is already in hand — the response the drift comparison
+just read — so it costs no extra request on any kind. **Reported whether or not the comparison found
+drift**, because the deletion happens on ANY update and the informer's spec-change path never reaches that
+comparison: gating on drift would be silent for exactly the author who edits a partial map and triggers
+the write themselves. **Scoped to the update verb's body**, because a field the update does not send cannot
+be deleted by it, and a false positive in a warning about data loss teaches the reader to ignore the real
+one.
+
+**An Event, deliberately not a `Ready` condition.** A reason a consumer does not map falls to
+core-provider's `default: childConverging` and holds every parent at `Ready=False/Creating` for as long as
+the state lasts — and this state lasts until a human acts. `AuthorizationDenied` and `DriftNotConverging`
+each wedged parents that way, and those were states that at least WERE unhealthy. This one is not: the
+resource reconciles correctly and the DECLARATION is incomplete. **Once per (generation, finding)**, which
+is #717's lesson applied from the start rather than after a storm.
+
+> `Note (2026-11-16)` — **maps only, and the omission is a decision.** An array is replayed whole too and
+> can lose elements, but naming WHICH element needs a notion of element identity, and this repo has three
+> in flight: positional comparison, set-typed arrays, and map-list keys. Choosing one inside a warning
+> would quietly establish it for the merge as well. Arrays get their own decision, and #725 must not be
+> read as covering them. `github-provider-kog` asked for that to be said in their words: the live array gap
+> is `dismissal_restriction` and `required_reviewers` inside a `pull_request` rule's `parameters` (nested
+> actor unions), **not** the "14 of 23 rule types" this issue's body still records — since 2026-11-04 every
+> ruleset rule type GitHub accepts is modelled, 25 repo-level and 21 org-level.
+
+> `Runtime verification (2026-11-16)` — a **second vendor, and a worse outcome than the Ironic one**,
+> measured live by `github-provider-kog`. A `PATCH /repos/{o}/{r}/hooks/{id}` whose `config` carried
+> `{url, content_type, insecure_ssl}` and no `secret` **cleared the HMAC secret** — absent from both the
+> response and a fresh GET — while the control, a PATCH of `active` only, kept it as `********`. Ironic lost
+> availability, loudly and traceably. **This loses integrity, silently: webhook signature verification
+> turns off and there is no observable difference until something downstream accepts a forged payload.**
+> #725 does report it: the scope check applies to the top-level key (`config`), and the inner keys come from
+> the vendor's response versus the CR, so an update schema that deliberately omits `secret` does not hide
+> it. **The warning disappears once the secret is already gone**, which is correct — it warns before the
+> deletion — but it means #725 cannot detect a loss that has already happened.
+
+### A dispatch verb's `requestTransform` was accepted, plumbed to the call, and dropped (#718, fixed by #722)
+
+`callInfo.RequestTransform` is populated for EVERY action, and Create, Update and Delete each applied it in
+place. `dispatch` — a hand-built call path next to those three — did only the first half. So a
+`requestTransform` on an `action: dispatch` verb was parsed, validated, admitted, carried all the way to
+the call, and then nobody read it. No dispatch test mentioned it.
+
+**The failure is silent, which is why it is worse than a 422.** A dispatch's correlation token is the only
+handle on what the invocation created. Where the token is injected BY the transform, an untransformed body
+can still be ACCEPTED: the vendor record exists, carries no token, can never be correlated, and the CR
+reports `DispatchedButNotObserved` with no error at any layer. **A real record is stranded and nothing
+says so.**
+
+Build-and-transform are now ONE step in one helper, used by all four body-sending callers. Delete's single
+standalone transform after both its build and its rebuild is gone: both build points transform now.
+
+> `Note (2026-11-16)` — **the enumeration found the fix complete, which was measured rather than assumed.**
+> Every `builder.BuildCallConfig` call site in the package was listed against the contract rather than
+> against the symptom: ten in all, and the nine others are `apiaction.Get` or `apiaction.FindBy`, every one
+> passing `nil` for `resolved`. A read assembles no body, so dispatch was genuinely the only body-sending
+> path that bypassed the transform. A shape test now requires every non-helper call site to be enumerated
+> with a reason, so a new one fails the build until someone justifies it.
+
+**Not fixed, and deliberately not papered over:** request-direction `fieldMapping` resolvers — `secretRef`
+among them — still do not run on a dispatch. It is not a line of wiring: Create answers an unresolvable
+resolver with a `PendingReferent` CreateResult, and `createDispatch` returns `(bool, error)` with no way to
+express "wait, this is not failed". **#718 stays open for it, and it must end in either resolvers working
+there or admission REFUSING a request-direction resolver on `action: dispatch`** — never in a declaration
+that is accepted and ignored.
+
+### The external request timeout is settable (#727)
+
+Every CRUD and dispatch call site constructs a bare `&http.Client{}`, so all of them took a hardcoded 30s
+inside `restclient.do()`. There was no flag, no env var and no field.
+
+That mattered for a reason that is not tuning: **a consumer wanting to measure what happens when a vendor
+COMMITS a create and the response never arrives had no way to produce that state** without inventing a
+proxy or a sidecar. `REST_CONTROLLER_REQUEST_TIMEOUT` (or `--request-timeout`) now sets the default, which
+remains 30s. **A caller's own `Timeout` still wins**, which is why it is a default and not a cap:
+`async.RequestTimeout` and `lookupRequestTimeout` are set deliberately by their call sites.
+
+> `Note (2026-11-16)` — **lowering it is a test instrument, not a tuning knob**, and the chart's `rdc.env`
+> entry says so. A value below a vendor's write latency makes the controller abandon a request the vendor
+> may already have committed, which is precisely how a duplicate external resource is made. The installer
+> session confirmed their schema materialises **no default** for anything under `rdc.env`, so it arrives
+> settable-but-unset.
+
+### Every reason we publish has a consumer version floor (#720)
+
+`AssumedUpToDate`'s doc comment explained why its status must stay `True` but not that the behaviour
+requires a consumer version. Bisected over core-provider's tags by `openstack-ironic-operator-kog`, with
+`childHealthy` present at every tag as a control, and confirmed by core-provider from their own code:
+
+```
+TerminalByDesign   mapped from core-provider 2.13.99     (not yet produced here)
+AssumedUpToDate    mapped from core-provider 2.13.104    (produced here since 0.73.0)
+```
+
+Below a floor the reason is unmatched and falls to `default: childConverging`. For `AssumedUpToDate` that
+means a cluster under 2.13.104 reads healthy through the generic `status == "True"` arm — **exactly as the
+`condition.Available()` that 0.73.0's #712 replaced.** So #712 changes what the CR SAYS and nothing about
+what any parent CONCLUDES there.
+
+> `Note (2026-11-16)` — how that stayed invisible is the reusable part, and it is the reporting session's
+> framing: every repo verified its own half at its own version, and core-provider's arm reached a third repo
+> as a **line number**. **A line number carries no version.** Three repos agreed on a contract none of them
+> had tested together, and each one's evidence was sound in isolation. For `TerminalByDesign` specifically,
+> below 2.13.99 the verdict is indistinguishable from the `Pending` it would replace — so, in their words,
+> *"the regression is not in the conditions, it is in the confidence"*.
+
+### `use:` moves to 0.73.0, and what the gate does and does not read (#726, #728)
+
+The previous entry set the bar and refused to name 0.73.0 until someone had run it. Four independent arms
+did: `azuredevops-provider-kog`'s 194/194 12-suite regression (the comparable arm — same suite and cluster
+shape that gave 0.72.0 its 194/194), `github-provider-kog`'s live `pageNumber` walk plus a 32-kind render
+diff at zero with a planted positive control, `openstack-ironic-operator-kog`'s arm64 run where pods
+started and did work, and `acmp`'s GKE e2e. **What they do not establish is recorded beside them**, because
+"exercised" is not one claim.
+
+#728 records the enforcement mechanism's measured reach and, in the `azuredevops-provider-kog` session's
+words, **when a consumer gate actually reads this file**: when it RUNS, not when the consumer RELEASES. A
+version retracted after a commit's lint can still be released from that commit — observed today, with a
+five-minute gap. And a passing pin never reads `use:` at all; only a refused version's message shows it.
+
+> `Correction (2026-11-16)` — recorded in `retracted-versions.yaml` as well, because that is where it would
+> have become fact: I told that session their chart 0.11.0 was "the first pin anywhere to go through a
+> consumer-side gate at a `use:` target that had just moved". **It was not** — their gate ran five minutes
+> before the repoint merged, and a passing pin never evaluates `use:`, so the claim was impossible rather
+> than early. It was flattering to this repo and arrived in writing from this repo's own author, which is
+> the kind nobody checks.
+
+### Known at ship time, and not fixed here
+
+> `Known issue (2026-11-16)` — **a create whose response is lost is re-issued, up to six times, with no
+> Observe between.** Measured by `acmp` against a fake that stores the request and then answers 500: six
+> POSTs, then a CR reading `correlation is ambiguous: 6 items … echo the token`. The cause is in
+> unstructured-runtime v1.18.0, which this release pins: a failed create re-enters as the same `Create`
+> event, and the incomplete-create recovery in `processItem` is gated by `meta.ExternalCreateIncomplete`,
+> which is true only while `pending` is the NEWEST tracking marker — so stamping `failed` turns it off **by
+> recency**. core-provider has confirmed it is **not** closed at v1.21.1 and is fixing it; the shape Diego
+> decided is that a handler may classify an error as definitely-not-committed, and everything else leaves
+> `pending` newest so an existence check runs before any second POST. **Any non-idempotent create has this
+> exposure on any 5xx, timeout or reset after the vendor committed** — `azuredevops-provider-kog` confirmed
+> three of their kinds accept an identical POST twice. The RDC-side classification is ours and is not in
+> this release.
+
+> `Known issue (2026-11-16, issue 724)` — **the stuck-latch Warning fires forever, by design, on a kind
+> whose findby can never match**, and its remedy advice is wrong for exactly that population: it names
+> `responseTransform` and `spec.resource.identifiers`, both of which are already correct for such a kind.
+> Measured on arm64 at 0.73.0 over 6.4 resync periods. It recurs per generation, not once per CR, because
+> the counter's signature is `gen=%d;<kind>`. The fix is for `restsAtNotReady` to suppress it — keyed on the
+> DECLARATION, never inferred from the latch, since inferring it would delete the detector for the
+> population it exists for.
+
 ## 2026-11-16 — 0.73.0
 
 **A dispatch kind's correlation observe read exactly one page.** That was a correctness problem rather
@@ -38,6 +271,13 @@ Scoped ahead of #702 and #690 because it unblocks a plugin removal already decid
 
 `git log 0.72.0..0.73.0` holds seven commits: **#704** and **#710** (the work), **#712** (issue 709),
 **#711** and **#713** (tests), **#714** (the retraction targets) and **#716**, this section.
+
+> `Correction (2026-11-16)` — **the seventh commit is #715, not #716, and #716 is not in that range at
+> all.** `git log 0.72.0..0.73.0` is: #715 (this section), #714, #711, #713, #712, #710, #704. #716 merged
+> AFTER the tag and is the first commit of 0.74.0's range -- it is the PR that added the tag-cleanup note
+> below, which is presumably how the two numbers changed places. Found while assembling 0.74.0's commit
+> list from `git log`, which is the only reason it was found: the sentence is self-consistent and names a
+> real PR about this very section.
 
 ### The correlation observe paginates, through the walk findby already uses (#710)
 
