@@ -124,6 +124,67 @@
 #                                             all three charts at 0.66.0 fails, all three at 0.67.0
 #                                             passes, and the provider alone at 0.66.0 also fails.
 #
+#                                             MEASURED REACH, from a run by that session on
+#                                             2026-11-16 against main @ 1303873:
+#
+#                                               scope          EVERY pin and Chart.yaml dependency
+#                                                              (91 + 2 = 93 checked)
+#                                               sources        7 retraction entries from 3 publishers
+#                                               may retract    controller-render-service,
+#                                                              oasgen-provider, oasgen-provider-crds
+#                                               matched on     the CHART field, not the component name
+#                                               triggers       pull_request, push, and nightly
+#                                                              19 3 * * *
+#                                               reads          this file from THIS repo at a pinned sha
+#
+#                                             So a `use:` moving here is visible to that gate with no
+#                                             change on their side, which is what makes this file a
+#                                             control rather than a notification.
+#
+#                                             AND THE GATE'S OWN BLIND SPOT, in its words: "a repo
+#                                             absent from .github/retraction-sources.yaml is not read
+#                                             at all, so its retractions are invisible here."
+#
+#                                             Declared there today, FULLY QUALIFIED because two orgs
+#                                             are live and a bare repo name is ambiguous between them:
+#
+#                                               krateo-platformops/frontend
+#                                               krateo-platformops/oasgen-provider
+#                                               krateo-platformops/portal
+#
+#                                             THREE publishers are wired in. For the denominator, that
+#                                             session counted by full registry path on 2026-11-16:
+#
+#                                               oci://ghcr.io/krateo-platformops/charts      50 pins
+#                                               oci://ghcr.io/krateo-blueprints/charts       21
+#                                               oci://ghcr.io/krateo-agentiko/charts         17
+#                                               oci://ghcr.io/krateo-platformops/krateo-saas  1
+#                                               oci://ghcr.io/cloudnative-pg/charts           1
+#                                               oci://ghcr.io/external-secrets/charts         1
+#                                               -> SIX distinct paths across FIVE orgs
+#                                                  (krateo-platformops appears at two paths)
+#
+#                                             So the coverage is three wired publishers against six
+#                                             registry paths, rather than unknown. If any unwired
+#                                             publisher retracts a version, that gate will not notice.
+#
+#                                             AND DO NOT QUOTE THAT DENOMINATOR ONWARD WITHOUT
+#                                             RE-DERIVING IT. An earlier figure of "seven registries"
+#                                             reached this file, attributed and about to become the
+#                                             authoritative count for the next reader. Its source was a
+#                                             header comment in that repo's own
+#                                             check-chart-requires-floors.py, written at some earlier
+#                                             state of the pins file, re-derived by nothing, and
+#                                             therefore drifting as pins moved. The session caught it
+#                                             by running the count and corrected it unprompted; the
+#                                             stale comment is being removed there.
+#
+#                                             A COUNT IN A COMMENT IS WORSE THAN A CLAIM IN A COMMENT,
+#                                             because a number is quotable: it travels into other
+#                                             people's files, arrives looking measured, and nothing it
+#                                             passes through can tell that it was not. Either the gate
+#                                             computes the figure or nothing states it.
+#
 #     krateo-blueprints/azuredevops-provider-kog
 #                                             hack/check-retracted.py, modelled on installer's. Reads
 #                                             the pin from $OASGEN_IMAGE, distinguishes rc 1 (refused)
@@ -133,6 +194,15 @@
 #
 # NOT a consumer: krateo-platformops/frontend keeps its own retracted-versions.yaml for its own charts.
 # It is a sibling publisher using the same format, not a reader of this file.
+#
+# AND WHAT THIS PUBLISHER CANNOT SEE EITHER, recorded because the installer session volunteered their
+# gap and the symmetrical one is mine. A retraction here is decided from measurements consumers send
+# me; I run a five-artifact supply-chain sweep per release and NO cluster probe of any kind. So the
+# class of defect that leaves every status green -- a provider that can read but not write, whose
+# affected instances cannot carry a condition or an event at all because version-scoped watching
+# filters them server-side -- is invisible to my checks AND to installer's roll verification, which
+# reads composition conditions and release states. #717 ran for six days and surfaced through an
+# event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
   - version: 0.70.0
