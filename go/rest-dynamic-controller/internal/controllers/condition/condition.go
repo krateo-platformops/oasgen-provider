@@ -441,6 +441,44 @@ func NoIdentifierRecorded(detail string) metav1.Condition {
 // fall through to converging. So this constructor must keep Status True, and a future change to Unknown
 // is a cross-repo change rather than a local one.
 //
+// AND IT TAKES A CONSUMER VERSION, which a reader of this constructor cannot otherwise discover.
+// Confirmed by the core-provider session from their own code, at their canonical ref
+// (kp/main; note their `origin` is a stale fork, so a reader checking this must name the remote):
+//
+//	childhealth.go:1044   case status == "True" && reason == "AssumedUpToDate": -> childUnevaluated
+//	                      pinned by assumeduptodate_test.go
+//	FIRST SERVED BY        core-provider 2.13.104
+//	ON 2.13.103 AND EARLIER it falls through the generic `status == "True"` arm to childHealthy --
+//	                      i.e. EXACTLY as the condition.Available() this replaced.
+//
+// So on a cluster below 2.13.104 this constructor changes what the CR SAYS and nothing about what any
+// parent composition CONCLUDES. That is not a reason to withhold it -- their stated rule is that
+// waiting for a consumer to map a reason is waiting for the defect -- but anyone citing #709 as "the
+// false-healthy fix" must say which core-provider version they mean. The openstack-ironic-operator-kog
+// session raised exactly this and was right to.
+//
+// EVERY REASON WE PUBLISH HAS SUCH A FLOOR, so they belong together rather than one per constructor.
+// Bisected by openstack-ironic-operator-kog over core-provider's tags at their canonical remote, with
+// `childHealthy` present at every tag as the control, and confirmed by core-provider themselves:
+//
+//	TerminalByDesign   mapped from core-provider 2.13.99    (not yet produced here)
+//	AssumedUpToDate    mapped from core-provider 2.13.104   (produced here since 0.73.0)
+//
+// BELOW A FLOOR THE REASON IS NOT MATCHED AND FALLS TO THEIR `default: childConverging`. For
+// TerminalByDesign that is indistinguishable from the Pending it would replace -- so, in that session's
+// words, "the regression is not in the conditions, it is in the confidence": three repos' documents
+// would say it reads healthy while the parent converges exactly as before.
+//
+// AND HOW THAT STAYED INVISIBLE, which is the reusable part: every repo verified its own half at its own
+// version, and core-provider's arm reached a third repo as a LINE NUMBER. A line number carries no
+// version. Cite a reason's mapping by the consumer's TAG, never by the file and line it lives on.
+//
+// Two further facts about the rollup, so nobody re-derives them from this file: an unevaluated child
+// never holds a parent back (the parent is Ready=True/Available, or AvailablePartialCoverage once
+// unevaluated*2 > total, and only Ready=Unknown/ZeroEvidence when ALL children are unevaluated); and
+// from their #539 such children are counted under status.unevaluatedChildren.assertedReady, which makes
+// this countable on a cluster instead of inferred.
+//
 // WHAT IT DOES NOT MEAN. This is not "the resource is fine". It is "nothing here looked, so take the
 // True with that in mind". The only reader that could previously tell the difference was a human
 // reading the message, and a rollup cannot key on prose.
