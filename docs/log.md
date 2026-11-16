@@ -91,9 +91,17 @@ a human can also clear `krateo.io/external-create-pending`.
 > would let recovery recreate on every grace-period expiry."*
 >
 > Found by **github-provider-kog**, who asked what their Issue, RepoDeployment and Release kinds would do
-> before documenting the reason — all three are exactly this shape. **The remedy that makes such a kind
-> self-healing is a findby**: any list endpoint plus `identifiers` the vendor echoes lets the check answer,
-> and the condition then clears on its own.
+> before documenting the reason — all three are exactly this shape.
+>
+> **A findby makes such a kind self-healing ONLY IF its key is one the vendor keeps UNIQUE**, and this
+> correction is theirs: an earlier draft of this entry said "any list endpoint plus `identifiers` the vendor
+> echoes". That is wrong, and wrong in the dangerous direction. GitHub does not make issue titles unique,
+> nor a deployment's `ref`/`environment`, nor a draft release's `tag_name` — so a findby keyed on any of
+> them lets recovery **adopt someone else's object**. That trades a stuck CR for a CR confidently managing
+> the wrong external resource, which is worse than the state it was trying to fix. `identifiersMatchPolicy:
+> AND` does not rescue it either: an AND over non-unique fields is still non-unique.
+>
+> So the remedy has a precondition, and without it the remedy is a worse defect than the problem.
 
 > `Note (2026-11-16)` — **what a failed child does beyond the status, as far as its owner can see.**
 > core-provider reports the verdict feeding only the parent's own `Ready` write — `Ready=False`/
