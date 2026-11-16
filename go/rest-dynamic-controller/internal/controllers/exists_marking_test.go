@@ -21,9 +21,16 @@ import (
 // nothing saying why. That is the defect CreateOutcomeUnknown was added to fix.
 //
 // So the marking has to be per-site and deliberate, and this test is what makes "deliberate" checkable:
-// adding a sixth mark, or dropping one of the five, fails here and names the count.
+// adding a fifth mark, or dropping one of the four, fails here and names the count.
+//
+// IT WAS 5/11 IN 0.77.0. "A list succeeded and matched nothing" was reverted in issue 758 because that
+// one return covers a transient cause AND a permanent one -- "not listed yet" and "never created" are
+// indistinguishable from a single pass -- so it is the same shape as the seven setup failures that were
+// deliberately held back, and marking it made a never-created resource requeue forever reporting
+// Creating, which the cdc rolls up as converging. The count changing is the point of this test: it
+// forced that revert to be argued rather than slipped in.
 func TestExactlyTheFiveTransientRefusalsAreMarked(t *testing.T) {
-	const wantMarked, wantUnmarked = 5, 11
+	const wantMarked, wantUnmarked = 4, 12
 
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "exists.go", nil, parser.ParseComments)

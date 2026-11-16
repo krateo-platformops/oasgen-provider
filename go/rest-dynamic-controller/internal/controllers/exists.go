@@ -180,17 +180,38 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 		// deciding whether to clear krateo.io/external-create-pending, and "not proof of absence" does not
 		// tell them what goes wrong if they get it wrong. The outer create-recovery message already names
 		// the annotation, so this half says why clearing it may be unsafe rather than naming it twice.
-		// TRANSIENT, and this one is a deliberate choice rather than an obvious reading. An
-		// eventually-consistent vendor can accept a create and not yet show it in a list -- Ironic
-		// demonstrated exactly that, a node `active` on disk while a list did not show it. So "no match"
-		// is a state the vendor leaves. It stays an ERROR rather than becoming (false, nil) for the
-		// reason the message gives: absence would license a re-create.
-		return false, ucontroller.ExistenceUndetermined(fmt.Errorf("existence check: %s listed successfully but no item matched the "+
+		// NOT MARKED TRANSIENT, and it was in 0.77.0. That marking is reverted here (issue 758).
+		//
+		// The reasoning for marking it was: an eventually-consistent vendor can accept a create and not
+		// yet show it in a list -- Ironic demonstrated exactly that, a node `active` on disk while a list
+		// did not show it -- so "no match" is a state the vendor leaves.
+		//
+		// IT IS ONLY A STATE THE VENDOR LEAVES IF THE CREATE LANDED. The same observation also means the
+		// create never happened, and then there is nothing to leave. github-provider-kog found it on a
+		// findby-addressed PullRequest: with no status.number the check goes to findby, the list succeeds,
+		// nothing matches because nothing exists, and marked transient that resource reports
+		// Ready=False/Creating and requeues forever -- which the cdc rolls up as CONVERGING, so a parent
+		// composition looks healthy indefinitely over a resource that will never exist. That is the defect
+		// CreateOutcomeUnknown was added to fix, reintroduced in the release that adopted the fix for it.
+		//
+		// SO THIS IS THE SAME SHAPE AS THE SEVEN SETUP FAILURES, and I did not see it: one return covering
+		// a transient cause and a permanent one, indistinguishable from a single pass, so one marking must
+		// be wrong for one of them.
+		//
+		// THE COST OF LEAVING IT UNMARKED IS ONE RESYNC. An unmarked refusal still clears itself: the
+		// digest dedupe is released at the top of processItem, so the periodic resync runs the check again.
+		// Ironic's late-listing resource therefore shows CreateOutcomeUnknown for about one interval and
+		// then resolves when the list catches up. A wrong condition for three minutes beats a silent
+		// permanent one -- the identical trade already accepted for the seven.
+		//
+		// It stays an ERROR rather than becoming (false, nil) for the reason the message gives: absence
+		// would license a re-create.
+		return false, fmt.Errorf("existence check: %s listed successfully but no item matched the "+
 			"resource's identifiers, which is not proof of absence -- the matching can fail for reasons "+
 			"unrelated to existence (identifiers absent from the list response, an envelope resolving to "+
 			"the wrong collection, a findby query that cannot be evaluated against the items returned), so "+
 			"proceeding as though the resource is absent may CREATE A DUPLICATE of one that already "+
-			"exists: %w", action, callErr))
+			"exists: %w", action, callErr)
 	case restclient.IsNotFoundError(callErr):
 		// A definite negative: the API answered, and answered that it is not there. This is the ONLY path
 		// that may return false.
