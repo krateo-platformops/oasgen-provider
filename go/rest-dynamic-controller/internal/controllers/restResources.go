@@ -1750,6 +1750,43 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		}
 		log.Error(err, "Performing REST call")
 		logVendorBody(log, "create", mg, err)
+
+		// TELL THE RUNTIME WHEN THE VENDOR DEFINITELY DID NOT CREATE ANYTHING.
+		//
+		// Without this, every create error leaves `krateo.io/external-create-pending` as the newest
+		// tracking marker, so the runtime's confirm-the-negative recovery runs an existence check before
+		// any second attempt. That is correct and it is the whole point of the v1.22.0 bump -- but it is
+		// a wasted round trip for an error that CANNOT have created anything, and on a kind whose
+		// existence cannot be answered it ends in a CreateOutcomeUnknown refusal that needs a human. A
+		// vendor that refused the request outright should simply be retried.
+		//
+		// THE ASYMMETRY DECIDES THE LIST, and it is core-provider's statement of it rather than mine: an
+		// unclassified error costs one existence check (plus the two-minute grace if the resource is
+		// absent); a WRONGLY classified one costs a duplicate external resource. So this classifies only
+		// what the vendor answered having rejected the request, and leaves everything else alone.
+		//
+		//	400 Bad Request         the request was malformed; nothing was created
+		//	422 Unprocessable       the request was understood and refused on content
+		//
+		// NOT 409 Conflict, and that is the important exclusion: some vendors answer 409 BECAUSE the
+		// resource now exists, which makes "not committed" false for exactly the case that would
+		// duplicate. NOT 404 either -- on a create it usually means a parent is missing, but a vendor
+		// that answers 404 from a route that nevertheless wrote something would be unrecoverable, and the
+		// cost of leaving it unclassified is one existence check.
+		//
+		// AND NOT 403, which never reaches this line: restclient.IsAuthorizationDenied is handled above
+		// and returns a NIL error, so the runtime sees no failure and retries nothing. I proposed 403 to
+		// core-provider before reading this path; it is already short-circuited, and classifying it here
+		// would be dead code that implied otherwise.
+		//
+		// A ResultCreator reporting Requested=false already counts as not committed in the runtime, so
+		// the "nothing was sent" cases -- an endpoint refusal, a policy rejection -- are not wrapped here
+		// either. Wrapping them would be a second source of truth for the same fact.
+		if code := externalStatusCode(&response, err); createRefusedWithoutCreating(code) {
+			log.Debug("Classifying the create error as definitely-not-committed, so the runtime retries "+
+				"directly instead of confirming the negative first", "status", code)
+			return controller.CreateResult{}, controller.CreateNotCommitted(err)
+		}
 		return controller.CreateResult{}, err
 	}
 
