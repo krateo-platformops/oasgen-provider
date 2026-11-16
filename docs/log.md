@@ -26,7 +26,97 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-16 — 0.76.0
+
+**0.75.0's headline fix did nothing. This release is what makes it work.** Four defects that were
+shipping in 0.75.0, and the first of them is a correction to that release's own central claim.
+
+### The duplicate-create recovery now engages (issue 746)
+
+`CreateWithResult` told the runtime that **nothing had been sent**, on every error path after the POST.
+The runtime's gate is `createCommittedNot(actionErr) || !created.Requested`, and `CreateResult{}` is a zero
+value — so a 5xx, a transport failure, a timeout and a lost response all read as "no request was made":
+`external-create-failed` was stamped, `ExternalCreateIncomplete` went false, **the existence-confirm
+recovery never ran, and the next pass POSTed again.** The 400/422 classification shipped in the same
+release was irrelevant, because everything was already being treated as not-committed.
+
+**Twelve sites now report `Requested: true`** — every error return at or after the point the request leaves
+the process. Seven of them are *after a successful create*: a response-body parse failure or a lost status
+write was reporting that nothing had been created, **which is a duplicate route with no network failure in
+it at all.** Eight sites deliberately still report false: the setup failures before the request, where
+nothing reached the vendor.
+
+> `Note (2026-11-16)` — **the comment at the defect site had the mechanism right and the value wrong, in
+> adjacent lines.** It reads: *"A ResultCreator reporting Requested=false already counts as not committed
+> in the runtime, so the 'nothing was sent' cases … are not wrapped here either."* An accurate description
+> of the gate, written immediately above a return of exactly that value on the path where something HAD
+> been sent. Understanding the mechanism was not enough, and nothing checked that the value matched the
+> sentence beside it.
+
+**Found by github-provider-kog, who read it in source and then measured it on the released artifact**, and
+confirmed independently from source by azuredevops-provider-kog. The guard is source-level
+(`TestNoCreateResultAfterTheRequestClaimsNothingWasSent`), because every individual return is
+syntactically fine and returns a correct error — what was wrong is one bool, on one side of a gate in
+another repository.
+
+### Every backfill ClusterRole was leaking (issue 742)
+
+`DeleteBackfillRBAC` shipped in 0.74.0 with a doc comment, **zero call sites and zero tests**. So every
+RestDefinition ever deleted left its labelled ClusterRole behind, aggregated into the provider's role,
+granting `patch` on a resource whose CRD had just been dropped. The rule names a **group and a resource,
+not a UID** — so a later CRD at the same group/resource would silently inherit the grant.
+
+**The fix does not clean up what already leaked.** On a cluster that deleted a RestDefinition while running
+0.74.0 or 0.75.0, the audit is in issue 742. A one-time sweep is deliberately absent: *"no current
+RestDefinition"* races one still being created, and revoking a grant mid-creation is worse than leaking one
+for a kind that is gone.
+
+### A partial spec field is merged instead of replayed (issue 400)
+
+A verb may declare `partialFields`, naming top-level body fields the CR carries as a **partial view**. The
+controller reads the resource before the update and overlays the CR's keys onto the current value, so keys
+the CR does not model survive. If that read fails the field is **omitted** rather than sent whole, so the
+vendor replaces nothing.
+
+Three measured losses it prevents, on three vendors: Ironic's `spec.extra` (82 seconds without a
+control-plane VIP), a github webhook's `config.secret` (the HMAC secret, silently), and — the first found
+*before* any loss — keycloak's `spec.attributes` on a realm and two clients, 14 keys named by the warning
+0.74.0 shipped.
+
+### The OTLP endpoint is not the switch (issue 729)
+
+A startup line now says whether the endpoint and the three export channels agree. `OTEL_EXPORTER_OTLP_ENDPOINT`
+says *where* and nothing about *whether*: 34 generated controllers on krateo-057 had the endpoint set,
+every channel defaulting false, and exported nothing. Both directions warn, and the worse one is a channel
+enabled with **no** endpoint — telemetry produced and discarded, which a consumer cannot distinguish from
+no activity.
+
+Measured on 057 by the observability session: all 34 RDC ConfigMaps carry `OTEL_LOGS_ENABLED=true` with
+**no `OTEL_ENABLED` key at all**, against 76 cdc ConfigMaps at logs=false and traces=on. **So the switches
+are independent, not a master and sub-switches** — an operator setting `OTEL_ENABLED=true` expecting
+everything gets traces and metrics and no audit trail.
+
 ## 2026-11-16 — 0.75.0
+
+> `Correction (2026-11-16, issue 746)` — **this release's central claim is false. The fix did not engage
+> in rest-dynamic-controller at all.**
+>
+> `CreateWithResult` returned a zero-value `CreateResult` on every error path after the POST, and its
+> `Requested` field is therefore false. The runtime's gate is `createCommittedNot(actionErr) ||
+> !created.Requested`, so every unclassified create error — including the lost response this release
+> exists to fix — read as "nothing was sent": `external-create-failed` was stamped,
+> `ExternalCreateIncomplete` went false, and the next pass POSTed again. **The existence-confirm branch
+> below was unreachable from this controller.**
+>
+> Measured on the released artifact by github-provider-kog: `external-create-failed` stamped in the same
+> second as `external-create-pending` on every attempt, never `CreateOutcomeUnknown`. And measured on a
+> second vendor by azuredevops-provider-kog: **3 of 4 triggered trials re-fired, leaving 4 runs at the
+> vendor that no CR references** — every CR reported `Ready=True` tracking only its last attempt.
+>
+> **So everything below about `CreateOutcomeUnknown` describes a path 0.75.0 could not reach**, including
+> the `Known issue` about a kind with no findby. Fixed in **0.76.0**; the condition becomes reachable
+> there, which means the stuck state that `Known issue` describes arrives with the fix rather than
+> predating it.
 
 **A create whose response was lost stops re-creating the resource.** The runtime bump to
 unstructured-runtime **v1.22.0** is the whole of this release's behaviour change, and the defect it fixes
