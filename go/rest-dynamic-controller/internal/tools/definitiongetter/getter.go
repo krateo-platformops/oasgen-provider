@@ -66,6 +66,12 @@ type CorrelationObserve struct {
 	// fallen past page one was reported ABSENT. On a dispatch kind not-found means dispatch again, so a
 	// collection longer than a page could re-run an invocation that had already happened.
 	Pagination *Pagination `json:"pagination,omitempty"`
+	// Queries are static query parameters sent on every page of the correlation walk (issue 719).
+	//
+	// MIRRORS oasgen-provider's types.go. A field present in only one of the two is silently dropped --
+	// which here would mean the CRD ACCEPTS a queries declaration the walk never sends, so a vendor that
+	// needs it to paginate at all would answer in the wrong mode and the walk would see one page.
+	Queries []QueryParam `json:"queries,omitempty"`
 	// ResponseTransform reshapes EACH ITEM of the collection before the echoed token is looked for,
 	// exactly as a findby verb's does (#145). Without it echoedAt has to address the vendor's raw item
 	// shape, which cannot select one element of an array by a field value -- so a token carried in, say,

@@ -1086,6 +1086,33 @@ and NEVER as absence.<br/>
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobservequeriesindex">queries</a></b></td>
+        <td>[]object</td>
+        <td>
+          Queries are static query parameters sent on EVERY page of the correlation walk, including after
+the pagination token is appended.
+
+WHY THIS EXISTS. A vendor can make its pagination MODE depend on a query parameter. Zendesk
+switches to cursor pagination only when `page[size]` is sent: without it the response carries no
+`meta.has_more` or `meta.after_cursor`, so a declared continuationToken pagination has nothing to
+follow and the walk sees one page. A dispatch kind whose correlation token is not on that page can
+then never reach Ready, and files nothing either -- with no error on the CR (issue 719).
+
+ON EVERY PAGE is the load-bearing half. The obvious implementation threads these into the first
+request and lets pagination build the rest, which drops them from page 2 onward -- and on such a
+vendor the walk silently reverts to offset mode mid-walk, so the token path disappears and the walk
+stops after one page with no error. It works here because WalkPaginated reuses one call
+configuration for every page and the paginator only ADDS its token to the existing query
+(continuation_token.go: `q := req.URL.Query()`, then `q.Set`), rather than replacing it.
+
+A MISSPELLED KEY IS REFUSED, NOT PRUNED, which is why this reuses QueryParam rather than a map:
+`name` and `value` are both required, so `{nmae: "x"}` prunes to `{}` at admission and then fails
+the required check. An open map would accept the typo and drop it silently -- the shape that made
+this field necessary in the first place, since `queries` on a verb was pruned with only a helm
+warning on 0.73.0.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b><a href="#restdefinitionspecresourceverbsdescriptionindexcorrelationobserveresponsetransform">responseTransform</a></b></td>
         <td>object</td>
         <td>
@@ -1554,6 +1581,40 @@ rel="next". Covers GitHub, GitLab and Jira without the engine knowing any of the
         <td>string</td>
         <td>
           Name of the header, e.g. "Link".<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### RestDefinition.spec.resource.verbsDescription[index].correlation.observe.queries[index]
+<sup><sup>[↩ Parent](#restdefinitionspecresourceverbsdescriptionindexcorrelationobserve)</sup></sup>
+
+
+
+QueryParam is a single static query parameter injected on every request for a verb.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>name</b></td>
+        <td>string</td>
+        <td>
+          Name is the query parameter name, e.g. 'api-version'.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>value</b></td>
+        <td>string</td>
+        <td>
+          Value is the query parameter value, sent verbatim.<br/>
         </td>
         <td>true</td>
       </tr></tbody>

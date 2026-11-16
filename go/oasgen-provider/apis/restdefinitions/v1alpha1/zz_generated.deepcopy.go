@@ -160,6 +160,11 @@ func (in *CorrelationObserve) DeepCopyInto(out *CorrelationObserve) {
 		*out = new(Pagination)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.Queries != nil {
+		in, out := &in.Queries, &out.Queries
+		*out = make([]QueryParam, len(*in))
+		copy(*out, *in)
+	}
 	if in.ResponseTransform != nil {
 		in, out := &in.ResponseTransform, &out.ResponseTransform
 		*out = new(JQProgram)
