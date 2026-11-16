@@ -1567,11 +1567,11 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", err))
 			// statusCode 0: delegated, so the vendor's status is snowplow's to report, not ours.
 			h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, err)
-			return controller.CreateResult{}, err
+			return controller.CreateResult{Requested: true}, err
 		}
 		h.emitAudit(ctx, mg, cli.ServerURL(), "", 0, nil)
 		if err := unstructuredtools.SetConditions(mg, condition.Creating()); err != nil {
-			return controller.CreateResult{}, err
+			return controller.CreateResult{Requested: true}, err
 		}
 		if _, err := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{Pluralizer: h.pluralizer, DynamicClient: h.dynamicClient}); err != nil {
 			// The RESTAction was already invoked, so this is issue 676's shape.
@@ -1746,7 +1746,7 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			return h.createAuthorizationDeniedResult(mg, "create", err, log), nil
 		}
 		if handled, cerr := h.stopOnEndpointRefusal(ctx, mg, "create", err, log); handled || cerr != nil {
-			return controller.CreateResult{}, cerr
+			return controller.CreateResult{Requested: true}, cerr
 		}
 		log.Error(err, "Performing REST call")
 		logVendorBody(log, "create", mg, err)
@@ -1785,9 +1785,28 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		if code := externalStatusCode(&response, err); createRefusedWithoutCreating(code) {
 			log.Debug("Classifying the create error as definitely-not-committed, so the runtime retries "+
 				"directly instead of confirming the negative first", "status", code)
-			return controller.CreateResult{}, controller.CreateNotCommitted(err)
+			return controller.CreateResult{Requested: true}, controller.CreateNotCommitted(err)
 		}
-		return controller.CreateResult{}, err
+		// Requested:TRUE, AND IT WAS FALSE UNTIL ISSUE 746 -- which disabled v1.22.0's entire recovery.
+		//
+		// The runtime's gate is `createCommittedNot(actionErr) || !created.Requested`. A zero-value
+		// CreateResult means Requested=false, so EVERY unclassified create error here -- a 5xx, a
+		// transport failure, a timeout, a lost response -- read as "nothing was sent", stamped
+		// external-create-failed, made ExternalCreateIncomplete false, and the next pass POSTed again.
+		// The existence-confirm branch was unreachable from this controller, so the defect 0.75.0
+		// shipped to fix was still open in it.
+		//
+		// THE COMMENT ABOVE HAD THE MECHANISM RIGHT AND THE VALUE WRONG. It says, correctly, that
+		// "a ResultCreator reporting Requested=false already counts as not committed in the runtime,
+		// so the 'nothing was sent' cases are not wrapped here either" -- and then returned exactly
+		// that value on the path where something HAD been sent. Found by github-provider-kog, who
+		// read it and measured it, and confirmed independently by azuredevops-provider-kog.
+		//
+		// THE INVARIANT, which TestNoCreateResultAfterTheRequestClaimsNothingWasSent now enforces:
+		// every error return AFTER the request leaves this process reports Requested:true. Only the
+		// setup failures above it -- no swagger getter, no client info, a client that would not build
+		// -- may report false, because for those nothing reached the vendor.
+		return controller.CreateResult{Requested: true}, err
 	}
 
 	// If create is asynchronous, drive the long-running operation. Two modes:
@@ -1802,14 +1821,14 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		if asyncRequeueEnabled(cfg) {
 			if err := h.recordAsyncOperation(ctx, mg, cfg, string(apiaction.Create), response, reqConfiguration, log); err != nil {
 				log.Error(err, "Recording async create operation")
-				return controller.CreateResult{}, err
+				return controller.CreateResult{Requested: true}, err
 			}
 			asyncRequeued = true
 		} else {
 			response, err = driveAsync(ctx, cli, clientInfo, mg, cfg, string(apiaction.Create), response, reqConfiguration, log)
 			if err != nil {
 				log.Error(err, "Driving async create operation")
-				return controller.CreateResult{}, err
+				return controller.CreateResult{Requested: true}, err
 			}
 		}
 	}
@@ -1825,18 +1844,18 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		b, ok := body.(map[string]interface{})
 		if !ok {
 			log.Error(fmt.Errorf("body is not an object"), "Performing REST call")
-			return controller.CreateResult{}, fmt.Errorf("body is not an object")
+			return controller.CreateResult{Requested: true}, fmt.Errorf("body is not an object")
 		}
 
 		if err := fieldmapping.NormalizeResponseBody(ctx, clientInfo.Resource.VerbsDescription, []string{"create"}, b); err != nil {
 			log.Error(err, "Normalizing response body (fieldMapping)")
-			return controller.CreateResult{}, err
+			return controller.CreateResult{Requested: true}, err
 		}
 
 		err = populateStatusFields(clientInfo, mg, b)
 		if err != nil {
 			log.Error(err, "Populating status fields (identifiers and additionalStatusFields)")
-			return controller.CreateResult{}, err
+			return controller.CreateResult{Requested: true}, err
 		}
 	} else {
 		log.Debug("Create response has no body, status will remain empty until discovered by next observe", "kind", mg.GetKind())
@@ -1850,13 +1869,13 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		err = unstructuredtools.SetConditions(mg, customcondition.Pending())
 		if err != nil {
 			log.Error(err, "Setting condition")
-			return controller.CreateResult{}, err
+			return controller.CreateResult{Requested: true}, err
 		}
 	} else { // Set creating condition if not pending
 		err = unstructuredtools.SetConditions(mg, condition.Creating())
 		if err != nil {
 			log.Error(err, "Setting condition")
-			return controller.CreateResult{}, err
+			return controller.CreateResult{Requested: true}, err
 		}
 	}
 
