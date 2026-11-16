@@ -276,3 +276,57 @@ func TestNoAuditCallSiteInventsAnHTTPMethod(t *testing.T) {
 	assert.GreaterOrEqual(t, sites, 10,
 		"expected to inspect at least the 10 known emitAudit sites; found %d, so this check is not reaching them", sites)
 }
+
+// TestEmitAuditCarriesTheSchemaVersion settles a question that otherwise needs a cluster.
+//
+// The observability session's dz-audit sweep found 24 RDC rows on krateo-057 with no
+// `krateo.audit.schema_version`, while core-provider, the cdc, authn and the gateway projection all
+// carried '1'. The first reading was that RDC's audit pin (v0.6.0, against their v0.13.0) predated the
+// stamp -- which would have made it a dependency bump.
+//
+// THEY THEN CORRECTED THEMSELVES, and the correction is why this test exists: `Emit` has stamped the
+// version since **v0.4.0**, so the pinned v0.6.0 should already carry it. The 24 rows are from
+// `service.version` 0.48.0 and 0.56.0, written 2026-11-09/10, and carry the pre-v0.4 shape -- an
+// `outcome` key, no EventName, no schema_version. **No RDC build has written an audit row on 057 since
+// 11-10**, so the current builds were unobserved rather than defective.
+//
+// So the open question was "does a 0.71.0+ build stamp it", and the honest answer was "nobody has seen
+// one write". That is a cluster question only while nothing asserts it here. This asserts it here.
+//
+// WHY IT BELONGS IN THIS REPO rather than audit's own suite: the stamp is the library's behaviour, and
+// what this pins is that WE STILL GET IT -- through our constructor call, our Event shape, and whatever
+// version go.mod resolves. A bump that regressed it, or a constructor change that needed an option we
+// did not pass, fails here instead of being discovered by a sweep three weeks later.
+func TestEmitAuditCarriesTheSchemaVersion(t *testing.T) {
+	lg := &recordingLogger{}
+	h := &handler{auditEmitter: audit.New(lg)}
+
+	h.emitAudit(context.Background(), auditTestCR(), "https://api.arubacloud.com/v1", "POST", 201, nil)
+
+	require.Len(t, lg.records, 1)
+	a := lg.attrs(0)
+
+	got, present := a["krateo.audit.schema_version"]
+	require.True(t, present,
+		"krateo.audit.schema_version is absent. A consumer sweep that filters on it excludes every row "+
+			"this controller writes -- and because the rows still ROUTE correctly (event.name=audit is "+
+			"set), they look healthy while being invisible. Attributes present: %v", a)
+	assert.Equal(t, "1", got,
+		"the schema version changed. That is the library's call, not a defect here -- but a consumer "+
+			"keying on '1' needs to know, so this fails rather than tracking it silently.")
+
+	// AND THE ROUTING KEY, asserted in the same place because the 057 rows had schema_version absent
+	// and event.name PRESENT. The two travel together and a reader who finds one missing will ask
+	// about the other.
+	assert.Equal(t, "audit", a["event.name"],
+		"event.name=audit is what routes the row to krateo_audit at all; without it the row is not an "+
+			"audit record regardless of its other attributes")
+
+	// NEGATIVE CONTROL. Both assertions above are presence checks against a map, and a map that
+	// returned a value for every key would pass them while proving nothing. This is the cheap proof
+	// that `present` can be false at all.
+	if _, bogus := a["krateo.audit.no_such_attribute"]; bogus {
+		t.Fatal("the attribute map reports a key that cannot exist, so the presence assertions above " +
+			"are vacuous -- attrs() is not reading the record's attributes")
+	}
+}
