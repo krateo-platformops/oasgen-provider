@@ -95,6 +95,14 @@ backfillrbac.go, clusterrole-backfill.yaml        present at BOTH refs (git cat-
 git diff 0.74.0..origin/main -- those paths       empty
 ```
 
+**And the first-pass backfill Warnings do NOT recur on an 0.74.0 → 0.75.0 upgrade.** They come from the
+apiserver authorizer's RBAC cache lagging a *newly created* grant — `SyncBackfillRBAC` says so in its own
+comment — and on this upgrade the ClusterRoles already exist with byte-identical content, so `kubecli.Apply`
+changes nothing and there is no new grant for the authorizer to lag on. **Stated as a prediction with its
+mechanism rather than as a measurement**, because nobody has rolled it yet: it is falsified by a single
+`forbidden … cannot patch` event on a cluster already running 0.74.0, and the installer session is the one
+who would see it.
+
 **In fact no code in the oasgen-provider module changed at all.** Every change in this release is in
 rest-dynamic-controller; the provider image differs from 0.74.0's only by its version stamp. The generated
 CRDs, the aggregated-ClusterRole grant, the MutatingAdmissionPolicy and the render service are byte-identical.
@@ -143,6 +151,22 @@ stays auditable in the release.
 **Provisioned on the pass that uses it**, which is the actual lesson. #180 widened this backfill from one
 kind to two so it would agree with the admission policy's `resources: ["*"]`, and **the grant was not
 widened with it** — two files, one invariant, and no test that could see the disagreement.
+
+> `Runtime verification (2026-11-16)` — **expect approximately ONE Warning per generated kind on the
+> first pass after upgrading into this release, and expect them to clear themselves.** Measured on 057 by
+> the installer session across 28 kinds:
+>
+> ```
+> 21 new `forbidden ... cannot patch` events, each within 2 minutes of its own
+>    oasgen-backfill-<kind> ClusterRole being created
+> every one self-clearing; nothing emitted after T+2m
+> 7 of 28 kinds did not race at all
+> ```
+>
+> The paragraph above already says a first-pass refusal is expected, which is why nobody on 057 treated
+> these as a fault. **The COUNT is the new information:** someone upgrading a cluster with 32 generated
+> kinds should expect roughly 32 of these, not one. A warning per kind looks like a systemic failure if
+> you are not told to expect it.
 
 > `Note (2026-11-16)` — the grant is `patch` only. Not `update`: the backfill issues a merge patch carrying
 > one label, and `update` would authorise a whole-object replacement this code never performs. Not `get` or
