@@ -50,12 +50,29 @@ const (
 	// resource is reported converged -- see latched_absence.go for why that needs its own signal.
 	reasonAbsenceLatched event.Reason = "AbsenceLatchedWhileCreatePending"
 
-	// reasonUnmodelledKeys says an update WOULD delete keys the vendor holds and the CR cannot express.
+	// reasonUnmodelledKeys says the vendor holds keys this CR does not express. It does NOT say what an
+	// update would do to them, because that is the vendor endpoint's behaviour and this controller cannot
+	// observe it (issue 757).
 	//
-	// Named for the CAUSE, not the symptom: the keys are unmodelled in the RestDefinition, and the remedy
-	// is a declaration change rather than anything the controller can do. "DataLoss" would read as an
-	// event about something that has already happened, and this fires BEFORE the update that would do it.
-	reasonUnmodelledKeys event.Reason = "UnmodelledKeysWouldBeRemoved"
+	// RENAMED FROM "UnmodelledKeysWouldBeRemoved", which asserted the removal. Measured against Azure
+	// DevOps on four kinds and nine key rows: SIX were kept by the vendor and three were reset. Every
+	// server-computed echo -- type.displayName, type.url, resource.name -- survived; of the author-set
+	// settings, three of four were reset and one was kept. So the old name was wrong about two thirds of
+	// the instances that produced it, and it is the channel most often read ALONE, in a REASON column,
+	// with no message beside it.
+	//
+	// NOT CLASSIFIED BY THE CONTROLLER, deliberately. "Suppress the server-computed keys" is the obvious
+	// next step and it requires GUESSING which keys those are -- and a wrong guess suppresses a real
+	// warning, which is the fatal direction. settings.creatorVoteCounts is the counterexample that rules
+	// the heuristic out: author-set, and kept.
+	//
+	// Still named for the CAUSE rather than the symptom: the keys are unmodelled in the RestDefinition and
+	// the remedy is a declaration change. "DataLoss" would read as something that has already happened.
+	//
+	// A CONSUMER'S ALERT FILTER KEYED ON THE OLD NAME STOPS MATCHING. That is the cost of the rename and
+	// it is why it is stated here: the name is an assertion, an operator reads it without the message, and
+	// a filter is cheaper to update than a false belief about data loss is to undo.
+	reasonUnmodelledKeys event.Reason = "UnmodelledKeysPresent"
 
 	// reasonCreateUnreachable is the opposite inference to reasonAbsenceLatched. There, findby did NOT
 	// match and a create was pending, so absence was inferred and nothing was issued. Here findby DID

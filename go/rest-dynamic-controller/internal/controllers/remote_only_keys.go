@@ -176,12 +176,23 @@ func (h *handler) reportUnmodelledKeys(ctx context.Context, mg *unstructured.Uns
 	}
 	detail := strings.Join(parts, "; ")
 
+	// WHAT WE SEND IS OBSERVABLE; WHAT THE VENDOR DOES WITH IT IS NOT (issue 757). The old wording said an
+	// update "would DELETE" these keys. Measured on Azure DevOps across four kinds and nine key rows, six
+	// were KEPT -- so the assertion was wrong about two thirds of the cases that produced it, and it sent
+	// operators to model keys the vendor was never going to drop.
+	//
+	// The split is reported rather than guessed at: it is a per-endpoint property, and the controller
+	// cannot tell a server-computed echo from an author-set setting without a heuristic whose wrong answers
+	// SUPPRESS real warnings.
 	h.eventRecorder.Event(mg, event.Warning(reasonUnmodelledKeys, "Observe", fmt.Errorf(
-		"the vendor holds keys this CR does not express, and an update sends each of these fields WHOLE, "+
-			"so issuing one would DELETE them -- %s. Nothing is failing: the resource reconciles correctly "+
-			"and the declaration is incomplete. Either model the missing keys in the CR, or confirm the CR "+
-			"is meant to own the whole field", detail)))
-	log.Info("An update would remove keys the vendor holds and the CR does not express",
+		"the vendor holds keys this CR does not express, and an update sends each of these fields WHOLE -- "+
+			"%s. Whether the vendor then drops the keys it was not sent is that endpoint's behaviour and is "+
+			"not observable from here: measured on one vendor, server-computed values were preserved and "+
+			"author-set settings were reset about as often as not. Nothing is failing; the resource "+
+			"reconciles correctly and the declaration is incomplete. Check the endpoint's own semantics, "+
+			"then either model the missing keys in the CR or confirm the CR is meant to own the whole field",
+		detail)))
+	log.Info("The vendor holds keys the CR does not express, and an update sends those fields whole",
 		"kind", mg.GetKind(), "name", mg.GetName(), "fields", detail)
 
 	if perr := h.patchAnnotations(ctx, mg, map[string]interface{}{
