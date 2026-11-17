@@ -265,8 +265,14 @@ retracted:
     reason: >-
       On a findby-addressed kind, a create whose outcome cannot be determined stays
       Ready=False/Creating indefinitely instead of reaching CreateOutcomeUnknown -- and
-      core-provider's rollup reads Creating as CONVERGING, so a parent composition reports healthy
-      over a resource that will never exist. MEASURED on two vendors by two consumer sessions
+      core-provider's rollup classifies a Creating child as CONVERGING, so a parent composition reads
+      Ready=False/Creating with NO DEADLINE over a resource that will never exist: never green, and
+      never failed either. (CORRECTED 2026-11-17: this said "reports healthy", which overstates it.
+      core-provider's childhealth_test.go and TestRollup_ConvergingNamesTheChild pin that a
+      Ready=False/Creating child holds the parent NOT ready, naming the child. The retraction stands --
+      the harm is that "still working on it" is indistinguishable from progress and nothing ever
+      escalates -- but the parent does not go green, and a consumer quoted the old wording back to me
+      as current.) MEASURED on two vendors by two consumer sessions
       independently: on GitHub (PullRequest, and Collaborator which has no `get` so its existence
       check is always findby) and on Keycloak, each with a manufactured never-landed create and a
       6-minute hold. NO duplicates and NO data loss were observed -- requests stayed flat across
