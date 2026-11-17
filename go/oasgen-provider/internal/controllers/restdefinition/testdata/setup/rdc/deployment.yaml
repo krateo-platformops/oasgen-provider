@@ -29,6 +29,15 @@ spec:
         - name: {{ .name }}
           image: "ghcr.io/krateoplatformops/rest-dynamic-controller:0.1.4" 
           imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           envFrom:
             - configMapRef:
                 name: {{ .name }}

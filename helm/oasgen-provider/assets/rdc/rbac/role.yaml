@@ -4,3 +4,22 @@ metadata:
   name: {{`{{ .resource }}`}}-{{`{{ .apiGroup }}`}}-{{`{{ .apiVersion }}`}}
   namespace: {{`{{ .namespace }}`}}
 rules:
+  # THE LEASE THIS CONTROLLER HOLDS WHILE RECONCILING (issue 771, half two).
+  #
+  # Until this change the Role existed with NO RULES AT ALL -- a bound, empty object, because every
+  # permission a generated controller needed was cluster-scoped and lived in the ClusterRole. This is what
+  # the empty shell was for.
+  #
+  # resourceNames PINS IT TO THIS CONTROLLER'S OWN LEASE, which is the point: a blanket leases grant would
+  # let any generated controller take any other's Lease, and the whole mechanism is about one writer per
+  # Kind x version. The name is this Role's own name, which is also what main.go computes -- one agreement,
+  # two sides, asserted by TestTheLeaseNameMatchesTheGeneratedRole.
+  #
+  # NO `delete`: controller-runtime releases a Lease by clearing its holder, not by deleting the object, so
+  # delete would be a permission nothing uses. `create` is needed for first acquisition, `get`/`update` for
+  # renewal, and `watch` is what the lease lock uses to notice a change rather than polling.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames:
+      - {{`{{ .resource }}`}}-{{`{{ .apiGroup }}`}}-{{`{{ .apiVersion }}`}}
+    verbs: ["get", "watch", "create", "update"]

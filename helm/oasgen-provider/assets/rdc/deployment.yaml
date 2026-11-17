@@ -31,6 +31,23 @@ spec:
         - name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
           image: {{ include "krateo.image" (dict "img" .Values.rdc.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.rdc.image.pullPolicy }}
+          # THE POD'S OWN IDENTITY, for the Lease this controller holds while reconciling (issue 771).
+          #
+          # Unconditional, because ownership defaults ON: without these the controller EXITS rather than
+          # reconciling without a Lease, since carrying on would be the concurrent-writer state ownership
+          # exists to prevent and it would be invisible.
+          #
+          # The namespace comes from the downward API and NOT from the -namespace flag, which is the
+          # WATCHED namespace and empty for a cluster-wide watch.
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           {{- if .Values.rdc.otel.nodeLocalEndpoint }}
           # Node-local OTLP endpoint for the C8 audit trail (#253).
           #
@@ -41,7 +58,9 @@ spec:
           # simply never arrive -- with no error from the controller, which does not know where its
           # logs go.
           #
-          # Order is therefore load-bearing: HOST_IP must come first.
+          # Order is therefore load-bearing: HOST_IP must PRECEDE the entry that references it. It is no
+          # longer first in the list -- POD_NAME and POD_NAMESPACE are above it -- and that is fine,
+          # because neither of those references anything. The rule is about the reference, not the index.
           #
           # Why node-local at all: the OTLP collector service is headless, so there is no cluster IP to
           # send to. status.hostIP gives each pod the node it is running on.
@@ -49,7 +68,6 @@ spec:
           # An `env:` entry WINS over an `envFrom` entry of the same name, so this would silently
           # override an OTEL_EXPORTER_OTLP_ENDPOINT set through rdc.env -- which is why it is gated off
           # by default rather than always present.
-          env:
             - name: HOST_IP
               valueFrom:
                 fieldRef:

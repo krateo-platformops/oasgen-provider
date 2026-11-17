@@ -93,6 +93,20 @@ var (
 	Build string
 )
 
+// generatedControllerLeaseName builds the Lease name for one generated controller.
+//
+// IT MUST EQUAL THE GENERATED ROLE'S NAME. assets/rdc/rbac/role.yaml is
+// `{{ .resource }}-{{ .apiGroup }}-{{ .apiVersion }}` and grants the Lease by that resourceName, so this
+// is the Go side of one agreement rather than a second convention. Extracted as a function so a test can
+// assert it against the template's text; inline it and the agreement becomes untestable.
+//
+// An apiGroup contains dots, which are legal in a Kubernetes object name -- and the Role itself has used
+// this exact shape as its own name since before this change, so it is proven as a name rather than
+// assumed.
+func generatedControllerLeaseName(resource, apiGroup, apiVersion string) string {
+	return fmt.Sprintf("%s-%s-%s", resource, apiGroup, apiVersion)
+}
+
 func main() {
 	// Flags
 	kubeconfig := flag.String("kubeconfig",
@@ -161,6 +175,19 @@ func main() {
 	resourceName := flag.String("resource",
 		env.String("REST_CONTROLLER_RESOURCE", ""),
 		"resource plural name")
+	// ownership makes this controller reconcile only while it holds a coordination.k8s.io Lease, so a
+	// second process for the same Kind x version waits instead of reconciling alongside (issue 771).
+	//
+	// DEFAULT TRUE, because this is a correctness setting and not an availability one. A rolling update is
+	// two writers by construction -- the old pod and the new one both reconcile until the old terminates --
+	// so an opt-in default would leave the ordinary case unprotected. Same reasoning as the provider's own
+	// leader election, which #781 defaulted on for the same reason.
+	//
+	// It needs the namespaced Lease grant in the generated Role, and POD_NAME / POD_NAMESPACE from the
+	// downward API. Both ship in the same change; see the EXIT below for what happens when they do not.
+	ownership := flag.Bool("ownership",
+		env.Bool("REST_CONTROLLER_OWNERSHIP", true),
+		"Hold a coordination.k8s.io Lease while reconciling, so only one process per Kind x version writes.")
 	namespace := flag.String("namespace",
 		env.String("REST_CONTROLLER_NAMESPACE", ""),
 		"namespace to watch, empty for all namespaces")
@@ -479,6 +506,44 @@ func main() {
 		builder.WithGlobalRateLimiter(workqueue.NewExponentialTimedFailureRateLimiter[any](*minErrorRetryInterval, *maxErrorRetryInterval)),
 		builder.WithMaxRetries(*maxErrorRetry),
 		builder.WithTelemetryMetrics(telemetryMetrics),
+	}
+
+	// OWNERSHIP: hold a Lease while reconciling, so one Kind x version has one writer (issue 771).
+	//
+	// THE LEASE NAME IS THE GENERATED ROLE'S NAME, deliberately and not coincidentally.
+	// assets/rdc/rbac/role.yaml is named `{{ .resource }}-{{ .apiGroup }}-{{ .apiVersion }}` and grants
+	// this Lease by that same resourceName, so the string computed here and the string the RBAC permits
+	// are derived from the same three values. If they ever diverge the controller cannot acquire and
+	// EXITS -- a failure with N generated controllers rather than one provider -- which is why
+	// TestTheLeaseNameMatchesTheGeneratedRole asserts the Go format against the template's own text
+	// rather than against a copy of it.
+	//
+	// THE NAMESPACE IS THE POD'S OWN, from the downward API, and NOT the -namespace flag: that one is the
+	// WATCHED namespace and is empty for a cluster-wide watch, which would put the Lease in the empty
+	// namespace. The pod's actual namespace cannot drift from where the pod runs; a templated guess can.
+	//
+	// THE IDENTITY IS THE POD NAME, which is what controller-runtime's own leader election uses and what
+	// makes a holder readable in `kubectl get lease`.
+	if *ownership {
+		podName := env.String("POD_NAME", "")
+		podNamespace := env.String("POD_NAMESPACE", "")
+		if podName == "" || podNamespace == "" {
+			// NOT a warn-and-continue. Ownership is a correctness setting: carrying on without the Lease
+			// is exactly the concurrent-writer state it exists to prevent, and it would be invisible --
+			// the controller would work, and two of them would work twice. A half-populated downward API
+			// is a deployment defect, so it fails loudly here instead.
+			log.Error(fmt.Errorf("POD_NAME=%q POD_NAMESPACE=%q", podName, podNamespace),
+				"Ownership is enabled but the pod's own identity is not in the environment. The generated "+
+					"Deployment supplies both through the downward API (fieldRef metadata.name and "+
+					"metadata.namespace). Set them, or disable ownership with "+
+					"REST_CONTROLLER_OWNERSHIP=false, which permits concurrent writers.")
+			os.Exit(1)
+		}
+		leaseName := generatedControllerLeaseName(*resourceName, *resourceGroup, *resourceVersion)
+		log.Info("Ownership enabled", "lease", podNamespace+"/"+leaseName, "identity", podName)
+		opts = append(opts, builder.WithOwnership(podNamespace, leaseName, podName))
+	} else {
+		log.Info("Ownership disabled: this controller does not hold a Lease, so concurrent writers are possible")
 	}
 
 	metricsServerBindAddress := ""
