@@ -41,6 +41,23 @@
 # upgrades. A code-derived route with no measurement is exactly where that bites. If anyone measures a
 # duplicate on 0.67.0 or 0.68.0, they belong here on the same day.
 #
+# WHY 0.77.0 IS LISTED THOUGH NOTHING WAS DAMAGED, recorded because it sits under a different standard
+# than the 0.67.0/0.68.0 decision above and a reader comparing them deserves the difference.
+#
+# That decision refused entries on a CODE READING with no measurement. This one has the measurement --
+# two vendors, two sessions, independently -- and what it measured is not damage: no duplicates, no data
+# loss, recovery works. The harm is that THE SIGNAL IS GONE. A composition reads healthy indefinitely
+# over a resource that will never exist, so nothing ever prompts the human whose intervention is the only
+# available recovery.
+#
+# That is admitted as "actively harmful" deliberately: a failure nobody is told about is worse than a
+# visible one, and `CreateOutcomeUnknown` exists for no other purpose than to tell someone. A defect that
+# deletes the only prompt for its own recovery is not merely superseded.
+#
+# AND IT IS NOT A PUSH. 0.77.0 was superseded within hours, two consumers already refuse it on their own
+# measurements, and exists.go is byte-identical from 0.78.0 onward -- so nobody holds 0.77.0 for a reason
+# the list is taking away.
+
 # Remove an entry only when the version becomes safe again, which for a code defect means never.
 #
 # WHY `use:` MOVED FROM 0.71.0 TO 0.72.0 on 2026-11-16, recorded because the PREVIOUS value also had
@@ -242,6 +259,21 @@
 # event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
+  - version: 0.77.0
+    charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
+    use: 0.78.0
+    reason: >-
+      On a findby-addressed kind, a create whose outcome cannot be determined stays
+      Ready=False/Creating indefinitely instead of reaching CreateOutcomeUnknown -- and
+      core-provider's rollup reads Creating as CONVERGING, so a parent composition reports healthy
+      over a resource that will never exist. MEASURED on two vendors by two consumer sessions
+      independently: on GitHub (PullRequest, and Collaborator which has no `get` so its existence
+      check is always findby) and on Keycloak, each with a manufactured never-landed create and a
+      6-minute hold. NO duplicates and NO data loss were observed -- requests stayed flat across
+      every hold -- and both recovery arms work. THE SUPPRESSED SIGNAL IS THE HARM: CreateOutcomeUnknown
+      exists to prompt a human, and 0.77.0 removed that prompt for exactly the kinds where a lost
+      create answer is unrecoverable without one. Consumers counted 15 and 11 findby-addressed kinds
+      in their charts. Fixed by #759 in 0.78.0; exists.go is byte-identical from 0.78.0 to 0.80.0.
   - version: 0.70.0
     charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
     use: 0.73.0
