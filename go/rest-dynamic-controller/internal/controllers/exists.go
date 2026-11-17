@@ -217,9 +217,41 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 		// that may return false.
 		log.Debug("Existence check: the external resource is definitely absent", "action", action)
 		return false, nil
+	case restclient.IsAuthorizationDenied(callErr):
+		// 403 IS NOT TRANSIENT AND MUST NOT BE MARKED AS ONE. "The credential is not permitted to do this"
+		// does not change by asking again, so a marker that says "ask later" is a false promise -- and the
+		// composition rollup acts on it: a child at Ready=False/Creating classifies as CONVERGING and the
+		// parent reads Ready=False/Creating with NO DEADLINE, naming the child but never failing. Unmarked,
+		// the child reaches CreateOutcomeUnknown and the parent reads Unavailable, which is the honest
+		// shape for "needs a human". core-provider stated that contract from childhealth.go, 2026-11-17.
+		//
+		// 401 DELIBERATELY STAYS TRANSIENT, in the case below, and the split is the same one validators.go
+		// already draws everywhere else in this package: a 401 is how a credential being REPLACED looks,
+		// and rotation is delegated to a secret manager here, so it heals without anyone acting. Marking it
+		// terminal would report Unavailable through every ordinary rotation.
+		return false, fmt.Errorf("existence check: the vendor REFUSED the credential for %s with 403, so "+
+			"whether the resource exists cannot be read and asking again will not change it. This is an "+
+			"authorization decision about the credential this resource uses, not a transient failure: "+
+			"check that the credential in the resource's authenticationRefs grants the %s verb on this "+
+			"endpoint: %w", action, action, callErr)
+	case restclient.HasStatusErr(callErr, http.StatusUnauthorized):
+		// TRANSIENT, as above, but the message must say WHAT was rejected. It previously read only
+		// "unexpected status: 401", leaving an operator to translate a number into "a token is wrong" and
+		// then to find which token. A message that needs inference is the same defect as a condition that
+		// needs inference, one layer down -- raised by a consumer who had to make exactly that inference
+		// while reading a live cluster.
+		return false, ucontroller.ExistenceUndetermined(fmt.Errorf("existence check: the vendor REJECTED "+
+			"the credential for %s with 401, so whether the resource exists cannot be read on this pass. "+
+			"This is the shape a credential being ROTATED takes, and it clears by itself once a valid one "+
+			"is in place -- the resource is re-checked every resync. If it persists, the credential in "+
+			"the resource's authenticationRefs is expired or revoked rather than rotating: %w",
+			action, callErr))
 	default:
-		// Transport failure, 5xx, timeout, 401/403, an unevaluable findby query -- every one of these is
+		// Transport failure, 5xx, timeout, an unevaluable findby query -- every one of these is
 		// "I could not look". Returning false here is what would recreate a live resource.
+		//
+		// 401 and 403 are handled ABOVE and no longer reach here; this arm is the codes that genuinely
+		// heal by waiting.
 		//
 		// TRANSIENT, and measured: observability found 321 of these on krateo-057 from a vendor 503 that
 		// recovered, all 17 affected resources clearing within the same second. A vendor outage is the
