@@ -13,6 +13,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// OwnerOf reports which RestDefinition (namespace/name) owns the live CRD for gr, or "" if the CRD does
+// not exist or carries no owner. Errors other than NotFound are returned: a delete path must not read a
+// failed GET as "unowned" and proceed to uninstall.
+//
+// IT LOOKS THE CRD UP EXACTLY AS Uninstall DOES, by gr.String(). That is deliberate -- the point of this
+// function is to answer a question about the object Uninstall is ABOUT to delete, so a different lookup
+// would make the answer about a different object (issue 763).
+func OwnerOf(ctx context.Context, kube client.Client, gr schema.GroupResource) (string, error) {
+	if err := registerEventually(); err != nil {
+		return "", err
+	}
+
+	obj := apiextensionsv1.CustomResourceDefinition{}
+	if err := kube.Get(ctx, client.ObjectKey{Name: gr.String()}, &obj, &client.GetOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+
+	return ownerOf(&obj), nil
+}
+
 func Uninstall(ctx context.Context, kube client.Client, gr schema.GroupResource) error {
 	if err := registerEventually(); err != nil {
 		return err
