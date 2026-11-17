@@ -360,7 +360,7 @@ func (h *handler) observeDispatch(ctx context.Context, mg *unstructured.Unstruct
 // up in the collection, and that is the only evidence that the invocation happened. A dispatch that
 // returns 204 with an empty body gives this call nothing else to verify against, which is the entire
 // premise of the verb.
-func (h *handler) createDispatch(ctx context.Context, mg *unstructured.Unstructured, cli restclient.UnstructuredClientInterface, httpCli *http.Client, clientInfo *getter.Info, log logging.Logger) (bool, error) {
+func (h *handler) createDispatch(ctx context.Context, mg *unstructured.Unstructured, cs *clientSet, cli restclient.UnstructuredClientInterface, httpCli *http.Client, clientInfo *getter.Info, log logging.Logger) (bool, error) {
 	verb := dispatchVerb(clientInfo)
 	if verb == nil {
 		return false, nil
@@ -395,14 +395,25 @@ func (h *handler) createDispatch(ctx context.Context, mg *unstructured.Unstructu
 	//
 	// Shared with the other three rather than copied, so the next action cannot repeat it.
 	//
-	// STILL `nil` FOR resolved, AND THAT HALF IS NOT FIXED HERE. Request-direction fieldMapping resolvers
-	// (secretRef among them) do not run on a dispatch. Fixing it is not a line of wiring: the Create path
-	// answers a resolver that cannot yet resolve with a PendingReferent CreateResult, and this function
-	// returns (bool, error) and has no way to express "wait, do not treat this as failed". That is a
-	// signature and a design question, tracked on issue 718, and it must end in EITHER resolvers working
-	// here OR admission refusing a request-direction resolver on action: dispatch -- never in a declaration
-	// that is accepted and ignored, which is what this comment would otherwise be excusing.
-	conf, terr := buildTransformedCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, nil)
+	// RESOLVERS RUN HERE NOW (#718). They did not, and a request-direction fieldMapping -- secretRef among
+	// them -- was accepted at admission and silently never applied, so a dispatch could file a vendor record
+	// missing the value its declaration named.
+	//
+	// The comment this replaced said (bool, error) "has no way to express 'wait, do not treat this as
+	// failed'". That was the wrong reading of its own problem. `handled` means "this resource declares a
+	// dispatch verb", NOT "something was sent" -- so `false` cannot mean "wait", because the caller would
+	// fall through to the ordinary create path. What carries the distinction is the ERROR'S IDENTITY: the
+	// caller tests isLookupReferentMissing before it audits, exactly as the Create path tests it before it
+	// builds a CreateResult. No extra return value was needed, only a discriminator that already existed.
+	//
+	// Returning the resolver's error unwrapped is therefore load-bearing: wrapping it would hide the
+	// referent-missing sentinel from the caller and turn a wait into an audited failure.
+	resolved, rerr := h.resolveRequestFields(ctx, cs, clientInfo, callInfo.FieldMapping, mg)
+	if rerr != nil {
+		return true, rerr
+	}
+
+	conf, terr := buildTransformedCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, resolved)
 	if terr != nil {
 		return true, fmt.Errorf("applying the dispatch requestTransform: %w", terr)
 	}
