@@ -53,11 +53,38 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/*
 Create the name of the service account to use
 */}}
+{{/*
+REFUSES create=false WITH AN EMPTY NAME (#785), and that is the whole reason this helper is not the
+unmodified Helm scaffold.
+
+The scaffold's `default "default"` fallback is harmless for a chart whose bindings are narrow. It is not
+harmless for this one: with create=false and no name, ALL THREE of this chart's bindings attach to the
+namespace's `default` ServiceAccount -- the one every pod gets when it names none -- and between them they
+grant secrets, roles/rolebindings and customresourcedefinitions. Any workload scheduled in that namespace
+without an explicit serviceAccountName inherits the lot.
+
+WHY IT SURVIVED THE INVESTIGATION THAT LOOKED STRAIGHT AT IT. clusterrolebinding.yaml documents a
+DIFFERENT problem on this same values key (#717): the binding subject and the Deployment's
+serviceAccountName could DIVERGE, 403ing every call. That one fails loudly, and #717 was hunting a
+mismatch. This is a MATCH -- the Deployment also runs as `default` -- so the provider works perfectly and
+nothing surfaces. The grant simply reaches further than the operator asked for.
+
+A REFUSAL AND NOT A WARNING, because the failure mode is invisible: there is no error to read, no
+condition to see, and the extra grant is found by whoever audits RBAC next, or by whoever uses it. A
+template that renders is a template nobody re-reads.
+
+Found because a consumer added "create=false with an empty name, render only" to a validation harness and
+mentioned authn had added a refusal for the same case (authn#164) -- so this is matching a precedent
+rather than inventing a policy.
+*/}}
 {{- define "oasgen-provider.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
 {{- default (include "oasgen-provider.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
-{{- default "default" .Values.serviceAccount.name }}
+{{- if not .Values.serviceAccount.name }}
+{{- fail "serviceAccount.create is false but serviceAccount.name is empty. This chart's bindings would attach to the namespace's `default` ServiceAccount, granting secrets, roles/rolebindings and customresourcedefinitions to every pod there that names no ServiceAccount. Set serviceAccount.name to an existing ServiceAccount, or leave serviceAccount.create true." }}
+{{- end }}
+{{- .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
 
