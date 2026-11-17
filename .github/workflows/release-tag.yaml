@@ -89,8 +89,18 @@ jobs:
       # Stamp the build into the binary. Without this every published image reports an empty
       # service.version, the collector falls back to the chart label, and an incident cannot be
       # attributed to a commit (#127). Both Dockerfiles consume BUILD_VERSION via -ldflags.
-      # The dispatch's tag when there is one, the git tag otherwise. github.ref_name on a dispatch is the
-      # BRANCH, which would publish an image called "main" -- mutable, and looking like a channel.
-      image_tag: ${{ github.event.inputs.image_tag || github.ref_name }}
+      # The reusable's input is `version`, NOT `image_tag`. I passed `image_tag` first, having read the
+      # local workflow and not the contract it calls: GitHub rejected the whole definition with
+      # startup_failure and no jobs, which is the one failure mode that looks like infrastructure rather
+      # than like a mistake.
+      #
+      # Left EMPTY on the tag path, which is the reusable's documented default -- "the tags are derived
+      # from the ref as before". Setting it to github.ref_name there would work and would also be a second
+      # way to say the same thing, so the empty string keeps one source of truth.
+      #
+      # github.event.inputs.image_tag is still the DISPATCH's input name, which is this workflow's own and
+      # deliberately not renamed: `image_tag` is what an operator is choosing, and `version` is what the
+      # reusable calls it.
+      version: ${{ github.event.inputs.image_tag || '' }}
       build_args: |
         BUILD_VERSION=${{ github.event.inputs.image_tag || github.ref_name }}-${{ github.sha }}
