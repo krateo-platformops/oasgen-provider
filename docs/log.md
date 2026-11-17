@@ -26,6 +26,136 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-17 — 0.79.0
+
+**Two declarations that were accepted and silently ignored now do something**, a delete that could take away
+someone else's CRD no longer can, a warning stops asserting what it cannot observe, and the plumbing bump
+carries a change that can refuse CRs that already exist.
+
+### A request-direction fieldMapping on a dispatch verb now runs (issue 718)
+
+A `fieldMapping` on an `action: dispatch` verb — **`secretRef` among them** — was parsed, validated,
+admitted, plumbed to the call and **never applied**. The resolved map was a literal `nil`. So a dispatch
+could file a vendor record missing the value its own declaration named, with nothing on the CR and nothing
+in the logs to say so.
+
+> `Note (2026-11-17)` — **the comment that stood over this misdiagnosed its own problem**, and the
+> correction is the design. It said `(bool, error)` *"has no way to express 'wait, do not treat this as
+> failed'"* and called that a signature question.
+>
+> `handled == false` means *"this resource declares no dispatch verb"*, so returning it to mean "wait" makes
+> the caller **fall through to the ordinary create path** — dangerous, not merely wrong. And `(true, nil)` is
+> handled-and-succeeded. **It is true that no pair says "mine, nothing sent".**
+>
+> **But the discriminator does not have to be a return VALUE. It is the error's IDENTITY**, and
+> `isLookupReferentMissing` already existed and is already what the Create path tests. No signature change
+> for the wait; only a `clientSet` parameter so the resolvers have something to resolve with.
+>
+> **The audit is why ORDER matters, and reading the dispatch function alone would have missed it.** The
+> caller audits unconditionally on `handled`, because a dispatch IS this resource's external write. The
+> resolvers run strictly before the request is built, so a referent that does not exist yet means **nothing
+> was sent** — and auditing it writes a row asserting an external write that never happened, into the trail
+> that block exists to keep complete. **Worse than the gap the audit was added to close.**
+
+### A RestDefinition that does not own a generated CRD no longer uninstalls it (issue 763)
+
+Ownership was enforced on apply and **not on delete**. A RestDefinition that was *refused* the CRD at apply
+time — told so explicitly, by owner name — could still uninstall it when deleted, because `Undeploy` drops
+the CRD by group-resource and nothing on the delete path read the annotation.
+
+```
+owner has instances    the non-owner wedges on ErrLiveInstances, forever, for a delete that
+                       should have been a no-op
+owner has none         the owner's CRD goes, and DeleteBackfillRBAC is keyed by GROUP AND RESOURCE
+                       rather than by this RestDefinition's name, so the owner's ClusterRole goes too
+```
+
+**`SkipCRD` is reused rather than a new code path**, so a non-owner's delete becomes the same shape as a
+delete that must not touch the CRD — **and the live-instance guard is never reached, which is what unwedges
+the first case.** A failed owner read is **not** treated as "unowned": anything but `NotFound` skips the
+shared teardown, because refusing to drop a CRD we cannot prove we own is the safe direction. The finalizer
+is removed either way, so the delete always completes.
+
+**The test asserts the CRD's `uid`, not its existence** — a recovery path that recreated the CRD would
+satisfy "a CRD is present" while having cascade-deleted every CR of the kind. Reported by
+`keycloak-provider-kog`, found by accident: re-applying `helm get manifest` output without a namespace, which
+is what an operator doing the same thing would hit.
+
+### The unmodelled-key warning stops asserting what the vendor will do (issue 757)
+
+It said an update **"would DELETE"** the keys the vendor holds and the CR cannot express, and the event reason
+said so too.
+
+```
+MEASURED on Azure DevOps, 7 kinds, 16 key rows:  10 KEPT, 5 RESET, 1 where a reset would be invisible
+every server-filled key was KEPT, 16 rows, no exceptions
+five of SIX author-set settings were RESET
+```
+
+**So the assertion was wrong about most of the cases that produced it**, and it sent operators to model keys
+the endpoint was never going to drop. What this controller can observe is its own behaviour — it sends each
+field whole. **What happens to a key it did not send is the endpoint's semantics, and nothing here can see
+that.**
+
+> `Note (2026-11-17)` — **the event reason is RENAMED**, `UnmodelledKeysWouldBeRemoved` →
+> `UnmodelledKeysPresent`, and **a filter keyed on the old name stops matching.** The reason is the channel
+> most often read alone, in a `REASON` column with no message beside it, so a name that predicts the vendor's
+> behaviour is exactly the assertion this fixes. The one consumer who might have filtered on it checked and
+> does not.
+>
+> **No classifier, deliberately.** Every server-filled key measured survived, so "suppress the
+> server-computed class" is the obvious next step — and the controller would have to GUESS which keys those
+> are, where **a wrong guess suppresses a real warning.** `settings.creatorVoteCounts` is the counterexample
+> that rules the heuristic out: author-set, and kept.
+
+### plumbing v1.60.0 → v1.93.0, and it can refuse CRs that already exist (issue 767)
+
+Audited **per package** against the version gap rather than from the release announcement, which describes
+the announcing PR:
+
+```
+crdgen     9 commits   generates every CRD this provider ships
+fieldpath  1 commit    Set/Remove added; Get and Parse unchanged
+```
+
+**MVS dragged more than plumbing**, and these are not cosmetic: `krateo-platformops/audit` v0.6.0 → v0.13.0
+(a **direct** dependency, v0.x, seven minors — for a v0.x module MVS picking the higher minor is a *breaking*
+upgrade), `go-openapi/jsonpointer` and `jsonreference` each to **v1.0.0**, `go-openapi/swag` plus twelve new
+sub-modules.
+
+> `Note (2026-11-17)` — **crdgen's #209 is a TIGHTENING of a shipped CRD, and "carried natively"
+> understates it.** Measured with one variable, the same probe source against both versions:
+>
+> ```
+>                  v1.60.0        v1.93.0
+> not: in the CRD  0              3
+> warnings         3x "not on non-scalar node unsupported -> dropped"   0
+> ```
+>
+> **`not: {required: ["x"]}` means x must be ABSENT.** While the constraint was dropped a CR setting `x` was
+> admitted; now the apiserver **rejects** it. crdgen is correct — the OAS author wrote "must not be present"
+> and meant it — and the exposure is to CRs created while it was silently gone.
+>
+> **THE DECISIVE CHECK IS STATIC: walk every key of your OAS assets and look for a schema key named
+> `not`.** No `not` in the input means crdgen has nothing to enforce, whatever any version does. It needs a
+> positive control — plant `a: {not: {required: [x]}}` and confirm the walker finds it — and it requires the
+> assets to be self-contained, since an external `$ref` can carry one in.
+>
+> **The old version's warning is a SUPPORTING check, not a decisive one.** Grepping a render for
+> `not on non-scalar node unsupported -> dropped` is appealing because a deprecation-shaped warning is a
+> forward-looking inventory of what a later version will enforce — **but a grep that finds nothing is
+> evidence only if that warning is emitted at the configured log level, and the level comes from the
+> chart.** An absence found that way is indistinguishable from a warning that was never printed.
+>
+> **This correction is a consumer's.** Asked for the grep, they did the static walk instead, reported the log
+> grep as "supporting only" and said why: they had not confirmed the provider logs that warning at its
+> configured level. **The weaker check was the one in the original draft of this note.**
+>
+> **Validated on a 32-kind consumer corpus**: 64 objects, schemas identical, no warning appeared or
+> disappeared, with a `maxLength` control in both renders and both images built the same way. **That corpus
+> contains no such `not`, so it clears the bump without exercising #209** — which is why #209 was then
+> exercised with a crafted input instead.
+
 ## 2026-11-16 — 0.78.0
 
 **A marking from 0.77.0 was wrong and is reverted**, and a dispatch kind can finally send the query
