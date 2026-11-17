@@ -487,6 +487,22 @@
           "type": "boolean",
           "default": false,
           "description": "Disable endpoint-allowlist matching entirely. The unconditional refusals (loopback, link-local, multicast, unspecified) still apply."
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The generated controllers' metrics endpoint. 0 disables it, which is the default: until issue 772 the flag defaulted to 0 and nothing in this chart could set it, so the runtime's requeue-after and failure counters were incremented and discarded. Not on by default because a port on every generated controller is a surface change and nothing was measured scraping them.",
+          "properties": {
+            "port": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "Port for the generated controllers' metrics server. 0 disables it. Set it when you add a scrape, not before."
+            }
+          },
+          "required": [
+            "port"
+          ]
         }
       }
     },
