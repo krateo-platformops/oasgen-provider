@@ -102,6 +102,17 @@ type Verb struct {
 	// means "adopt the first item matching ANY identifier" (#444). Read only off the findby verb, which
 	// is also the only verb rest-dynamic-controller copies it from.
 	IdentifiersMatchPolicy string
+	// SuccessCodes are the status codes this verb's author declared as success, BEYOND the generator's
+	// default set. Without them a create that answers 202 has no response schema the generator can find:
+	// the default is {200, 201} and nothing could widen it, so an asynchronous create -- an ordinary
+	// shape, and the one async.poll exists for -- warned "no suitable response schema found for action
+	// 'create'" with no way for an author to say otherwise (#804).
+	//
+	// MERGED with the default, never replacing it, which is what the API field's own documentation
+	// promises and what rest-dynamic-controller already does at runtime (builder.go:93). Before this the
+	// field reached the runtime and NOT the generator, so the concept existed, the field existed, the
+	// documentation promised it, and the generator could not see it.
+	SuccessCodes []int
 	// FieldMapping carries the unified request/response field mappings declared for this verb.
 	//
 	// The generation layer consumes the response-direction entries (InResponse set) to resolve the type

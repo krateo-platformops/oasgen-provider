@@ -32,8 +32,14 @@ func everyFieldSet() definitionv1alpha1.VerbsDescription {
 		// fieldMapping for any check asking whether a parameter will have a value -- and they beat both
 		// spec and status, because rest-dynamic-controller sets them before auto-population and
 		// auto-population does not overwrite. The shim dropped them until #463 needed them.
-		Queries: []definitionv1alpha1.QueryParam{{Name: "api-version", Value: "2024-01-01"}},
-		Headers: []definitionv1alpha1.HeaderItem{{Name: "Accept", Value: "application/json"}},
+		// An ASYNC CREATE's success code. The generator's default is {200, 201}, so a create answering
+		// 202 had no findable response schema and no way for an author to say otherwise -- the field
+		// reached rest-dynamic-controller's runtime and not the generator (#804). Populated here because
+		// this guard is what makes the copy in toDomainVerbs testable: without a non-zero value on the
+		// CR side, a missing assignment and a copied nil are indistinguishable.
+		SuccessCodes: []int{202},
+		Queries:      []definitionv1alpha1.QueryParam{{Name: "api-version", Value: "2024-01-01"}},
+		Headers:      []definitionv1alpha1.HeaderItem{{Name: "Accept", Value: "application/json"}},
 	}
 }
 
@@ -161,8 +167,14 @@ func TestEveryResourceConfigFieldIsCarriedByTheShim(t *testing.T) {
 func TestTheShimCarriesStaticInjections(t *testing.T) {
 	verbs := toDomainVerbs([]definitionv1alpha1.VerbsDescription{{
 		Action: "get", Method: "GET", Path: "/x",
-		Queries: []definitionv1alpha1.QueryParam{{Name: "api-version", Value: "2024-01-01"}},
-		Headers: []definitionv1alpha1.HeaderItem{{Name: "Accept", Value: "application/json"}},
+		// An ASYNC CREATE's success code. The generator's default is {200, 201}, so a create answering
+		// 202 had no findable response schema and no way for an author to say otherwise -- the field
+		// reached rest-dynamic-controller's runtime and not the generator (#804). Populated here because
+		// this guard is what makes the copy in toDomainVerbs testable: without a non-zero value on the
+		// CR side, a missing assignment and a copied nil are indistinguishable.
+		SuccessCodes: []int{202},
+		Queries:      []definitionv1alpha1.QueryParam{{Name: "api-version", Value: "2024-01-01"}},
+		Headers:      []definitionv1alpha1.HeaderItem{{Name: "Accept", Value: "application/json"}},
 	}})
 	require.Len(t, verbs, 1)
 

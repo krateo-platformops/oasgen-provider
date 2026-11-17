@@ -266,7 +266,10 @@ func extractRawResponseSchemaForAction(docs *DocumentSet, verbs []Verb, targetAc
 			}
 		}
 
-		for _, code := range config.SuccessCodes {
+		// The generator default UNION this verb's declared codes. Merged rather than replaced, because the
+		// API field is documented as "additional ... beyond the 2xx codes declared for the operation" and
+		// because an author adding 202 must not thereby lose 200.
+		for _, code := range append(append([]int{}, config.SuccessCodes...), verb.SuccessCodes...) {
 			resp, ok := responses[code]
 			if !ok {
 				continue

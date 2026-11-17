@@ -104,11 +104,15 @@ func toDomainVerbs(verbs []definitionv1alpha1.VerbsDescription) []oas2jsonschema
 			// client for findby alone -- but converting it for every verb keeps this a faithful copy
 			// rather than a filter whose rule has to be kept in step with the consumer's (#444).
 			IdentifiersMatchPolicy: v.IdentifiersMatchPolicy,
-			StaticQueries:          toDomainStaticQueries(v.Queries),
-			StaticHeaders:          toDomainStaticHeaders(v.Headers),
-			FieldMapping:           toDomainFieldMapping(v),
-			Correlation:            toDomainCorrelation(v.Correlation),
-			Async:                  toDomainAsync(v.Async),
+			// Copied for EVERY verb, not just create: the extractor merges them per verb, and a filter
+			// here would be a second rule to keep in step with the consumer's -- the same reasoning the
+			// comment above gives for IdentifiersMatchPolicy.
+			SuccessCodes:  v.SuccessCodes,
+			StaticQueries: toDomainStaticQueries(v.Queries),
+			StaticHeaders: toDomainStaticHeaders(v.Headers),
+			FieldMapping:  toDomainFieldMapping(v),
+			Correlation:   toDomainCorrelation(v.Correlation),
+			Async:         toDomainAsync(v.Async),
 		}
 	}
 	return out
