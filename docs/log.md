@@ -83,6 +83,27 @@ standard helper, so the gap was in the older cluster-scoped templates only.
 
 ### A rolling update no longer runs ~15 seconds with no leader
 
+> `Runtime verification (2026-11-17)` -- **MEASURED ON 0.82.0, and the gap is 3.9 SECONDS rather than the
+> milliseconds this entry implies.** github-provider-kog rolled published 0.82.0 to itself:
+>
+> ```
+> new pod  "Attempting to acquire"  22:20:16.490
+>          "Successfully acquired"  22:20:20.399     -> 3.909 s   (0.81.0: 17.5 s)
+> lease    22:20:15 old holder | 22:20:18 holder EMPTY, transitions 0, renewTime 22:20:16.494
+>          22:20:22 new holder, transitions 1
+> ```
+>
+> **The fix works and the claim was too strong.** The old pod DID release -- the holder went empty at
+> renewTime 22:20:16.49 -- so `ReleaseOnCancel` does what the entry says. What remains is about two
+> controller-runtime `RetryPeriod`s: the new pod's first acquisition attempt found the lease still held
+> and then waited for retry ticks, not for the 15 s LeaseDuration. **That is an inference from the
+> timestamps rather than a log read of the old pod**, which is how the reporter put it.
+>
+> **17.5 s -> 3.9 s, not 17.5 s -> 0.005 s.** The 5-millisecond number above is a FRESH INSTALL, where no
+> lease exists to contend for, and reading it as the post-fix roll figure is the mistake this annotation
+> exists to stop. A shorter `RetryPeriod` is the lever if 3.9 s ever matters; it is not being pulled,
+> because it costs API traffic on every manager of every consumer to save two seconds on an upgrade.
+
 ```
 new pod  "Attempting to acquire leader lease"   15:25:04.415
 new pod  "Successfully acquired lease"          15:25:21.921    17.5 s, one LeaseDuration
