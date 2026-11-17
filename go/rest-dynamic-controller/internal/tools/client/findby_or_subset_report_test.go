@@ -162,61 +162,60 @@ func TestANDPolicyThatDoesNotMatchProducesNoReport(t *testing.T) {
 	assert.Nil(t, report)
 }
 
-// ARM D -- THE CONTROL-FLOW CONTROL. #444's fix is diagnostic: the same item must be adopted as before, in
-// the same order, in every case. A previous attempt at a three-valued match outcome DID move control flow
-// and was reverted after breaking a live kind, so this is asserted rather than assumed.
+// ARM D -- THE CONTROL-FLOW CONTROL, REWRITTEN BY #444's COUNTING FIX.
 //
-// Both sub-cases put a SECOND item in the list that would also match, so adopting the wrong one is
-// detectable: the pre-change code returns the first item for which isItemMatch is true, and nothing else.
+// The purpose is unchanged: the diagnostic report must not move which item is adopted. What changed is
+// the fixture. This arm used to put a SECOND matching item in each list precisely so that adopting the
+// wrong one would be detectable -- and the counting fix makes a list with two matching items an ERROR,
+// so that fixture no longer reaches an adoption at all.
+//
+// So the control now uses one matching item plus one that matches nothing, which still detects a matcher
+// that adopts by position rather than by match, and the two-match lists move to their own sub-cases
+// where refusal is the assertion.
 func TestTheReportDoesNotMoveWhichItemIsAdopted(t *testing.T) {
-	t.Run("first-identifier match", func(t *testing.T) {
+	t.Run("one match among non-matching items", func(t *testing.T) {
 		u := &UnstructuredClient{
 			IdentifierFields: []string{"chassis", "name"},
 			Resource:         or444CR(),
 		}
 
-		first := map[string]interface{}{"chassis": "rack-1", "name": "enclosure-a"}
-		// Agrees on BOTH identifiers -- the object the CR actually names. The pre-change code never
-		// reaches it, and neither may this one.
-		second := map[string]interface{}{"chassis": "rack-1", "name": "child-b"}
+		// Agrees on `chassis`, the first declared identifier.
+		match := map[string]interface{}{"chassis": "rack-1", "name": "enclosure-a"}
+		// Agrees on NEITHER, so the list is unambiguous and an adoption is legal.
+		other := map[string]interface{}{"chassis": "rack-9", "name": "unrelated"}
 
-		item, found, report, err := u.findItemInList([]interface{}{first, second})
+		item, found, report, err := u.findItemInList([]interface{}{other, match})
 
 		require.NoError(t, err)
 		require.True(t, found)
-		assert.True(t, sameMapObject(first, item),
-			"still the FIRST matching item, not the better one. Preferring `second` would be a fix to the "+
-				"default, which #444 explicitly does not make here")
+		assert.True(t, sameMapObject(match, item),
+			"the MATCHING item, not the first item in the list -- the ordering is incidental here and a "+
+				"matcher that adopted by position would fail this")
 
-		// Byte-identical to what the pre-change code adopted.
 		got, merr := json.Marshal(item)
 		require.NoError(t, merr)
 		assert.JSONEq(t, `{"chassis":"rack-1","name":"enclosure-a"}`, string(got))
 
-		assert.NotNil(t, report, "the report is the only thing that is new")
+		assert.NotNil(t, report, "the report is still produced: the basis was 1 of 2 declared identifiers")
 	})
 
-	t.Run("later-identifier match", func(t *testing.T) {
+	t.Run("a later-identifier match still reports its basis", func(t *testing.T) {
 		u := &UnstructuredClient{
 			IdentifierFields: []string{"serial", "chassis"},
 			Resource:         or444CR(),
 		}
 
-		// serial disagrees, chassis agrees -> adopted on the second identifier.
-		first := map[string]interface{}{"serial": "SN-ENCLOSURE-A", "chassis": "rack-1"}
-		second := map[string]interface{}{"serial": "SN-CHILD-B", "chassis": "rack-1"}
+		// serial disagrees, chassis agrees -> matched on the SECOND identifier. The CR is child-b
+		// (or444CR), so SN-ENCLOSURE-A is a DIFFERENT object that agrees only on the shared field --
+		// which is #444's shape, made legal here only because nothing else in the list matches.
+		match := map[string]interface{}{"serial": "SN-ENCLOSURE-A", "chassis": "rack-1"}
+		other := map[string]interface{}{"serial": "SN-OTHER", "chassis": "rack-9"}
 
-		item, found, report, err := u.findItemInList([]interface{}{first, second})
+		item, found, report, err := u.findItemInList([]interface{}{match, other})
 
 		require.NoError(t, err)
 		require.True(t, found)
-		assert.True(t, sameMapObject(first, item),
-			"iteration order is unchanged: a later identifier matching does not make the matcher keep "+
-				"looking for a better item")
-
-		got, merr := json.Marshal(item)
-		require.NoError(t, merr)
-		assert.JSONEq(t, `{"serial":"SN-ENCLOSURE-A","chassis":"rack-1"}`, string(got))
+		assert.True(t, sameMapObject(match, item))
 
 		require.NotNil(t, report)
 		assert.Equal(t, "chassis", report.MatchedIdentifier)
@@ -224,6 +223,65 @@ func TestTheReportDoesNotMoveWhichItemIsAdopted(t *testing.T) {
 			"the match landed on the LAST declared identifier, so nothing went unconsulted -- yet the "+
 				"basis is still 1 of 2, which is why the report is still produced")
 		assert.Equal(t, []string{"serial"}, report.PresentButDiffering)
+	})
+
+	// THE TWO CASES THIS ARM USED TO ASSERT. Both lists hold two items that match the declared
+	// identifiers, which is #444's measured shape: a shared non-unique field, two vendor objects, and the
+	// controller adopting whichever came first. Before the fix each of these returned the first item and
+	// a caller would have deleted it.
+	t.Run("two items matching the first identifier is REFUSED", func(t *testing.T) {
+		u := &UnstructuredClient{
+			IdentifierFields: []string{"chassis", "name"},
+			Resource:         or444CR(),
+		}
+
+		first := map[string]interface{}{"chassis": "rack-1", "name": "enclosure-a"}
+		second := map[string]interface{}{"chassis": "rack-1", "name": "child-b"}
+
+		item, found, report, err := u.findItemInList([]interface{}{first, second})
+
+		require.Error(t, err, "two items agree on `chassis`, so the list does not identify one resource")
+		assert.Contains(t, err.Error(), "exactly one is required")
+		assert.False(t, found, "found must be false alongside the error: a caller that reads only the "+
+			"boolean must not see a match")
+		assert.Nil(t, item, "and no item, so there is nothing for a caller to act on by mistake")
+		assert.Nil(t, report)
+	})
+
+	t.Run("two items matching a later identifier is REFUSED", func(t *testing.T) {
+		u := &UnstructuredClient{
+			IdentifierFields: []string{"serial", "chassis"},
+			Resource:         or444CR(),
+		}
+
+		first := map[string]interface{}{"serial": "SN-ENCLOSURE-A", "chassis": "rack-1"}
+		second := map[string]interface{}{"serial": "SN-CHILD-B", "chassis": "rack-1"}
+
+		item, found, report, err := u.findItemInList([]interface{}{first, second})
+
+		require.Error(t, err, "the ambiguity is on `chassis` whichever identifier matched first")
+		assert.False(t, found)
+		assert.Nil(t, item)
+		assert.Nil(t, report)
+	})
+
+	// THE ORDER CONTROL. The refusal must not depend on where in the list the second match sits, or a
+	// vendor that happens to return the ambiguous pair far apart would still adopt.
+	t.Run("the refusal does not depend on adjacency", func(t *testing.T) {
+		u := &UnstructuredClient{
+			IdentifierFields: []string{"chassis", "name"},
+			Resource:         or444CR(),
+		}
+
+		_, found, _, err := u.findItemInList([]interface{}{
+			map[string]interface{}{"chassis": "rack-1", "name": "enclosure-a"},
+			map[string]interface{}{"chassis": "rack-9", "name": "a"},
+			map[string]interface{}{"chassis": "rack-9", "name": "b"},
+			map[string]interface{}{"chassis": "rack-1", "name": "child-b"},
+		})
+
+		require.Error(t, err)
+		assert.False(t, found)
 	})
 }
 

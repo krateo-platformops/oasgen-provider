@@ -1164,6 +1164,10 @@ func valueAtPath(body map[string]interface{}, path string) (interface{}, bool, e
 // gets its create -- because no error is produced on that path. Only a structurally broken lookup changes
 // behaviour, and for that one "nothing matched" was never the truthful answer.
 func (u *UnstructuredClient) findItemInList(items []interface{}) (map[string]interface{}, bool, *OrMatchReport, error) {
+	// Accumulators rather than an early return: see the comment on the isMatch branch below.
+	var first map[string]interface{}
+	var firstReport *OrMatchReport
+	matched := 0
 	if len(items) == 0 {
 		return nil, false, nil, nil
 	}
@@ -1188,10 +1192,34 @@ func (u *UnstructuredClient) findItemInList(items []interface{}) (map[string]int
 			return nil, false, nil, fmt.Errorf("matching a list item against the resource's identifiers: %w", err)
 		}
 
-		// If a match is found, return the item immediately.
+		// EVERY item is examined, because "exactly one matched" cannot be known from the first match.
+		//
+		// This loop used to return on the first match and never look further. That made the function
+		// unable to express ambiguity at all: with two vendor items matching the declared identifiers,
+		// item 1 was adopted, reported Synced=True, and DELETED with the CR -- which is #444, measured on
+		// a live cluster on a resource the CR did not own.
+		//
+		// The caller that makes this load-bearing is the runtime's existence gate: it TRUSTS a true
+		// answer, marks the create succeeded, and on a deleting object proceeds straight to Delete. So
+		// "the first thing that looked right" is a delete authorisation.
+		//
+		// WHAT IS DELIBERATELY NOT CHANGED: which items match. The policy stays OR by default and
+		// isItemMatch is untouched, so every list that matches exactly one item behaves exactly as before
+		// -- that is every working configuration. Only the ambiguous case changes, and its current
+		// behaviour is a coin flip between the right object and someone else's.
 		if isMatch {
-			return itemMap, true, report, nil
+			matched++
+			if matched > 1 {
+				return nil, false, nil, fmt.Errorf("findby matched %d or more items on the declared identifiers (%v); "+
+					"exactly one is required, because acting on a list that identifies several resources would adopt "+
+					"and later delete one the resource does not own", matched, u.IdentifierFields)
+			}
+			first, firstReport = itemMap, report
 		}
+	}
+
+	if matched == 1 {
+		return first, true, firstReport, nil
 	}
 
 	// Return false if no match was found in the entire list.
