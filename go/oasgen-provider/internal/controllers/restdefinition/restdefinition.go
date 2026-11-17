@@ -1707,13 +1707,44 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 
 	skipDeploy := meta.FinalizerExists(cr, restresourcesStillExistFinalizer)
 
+	// OWNERSHIP IS ENFORCED ON DELETE TOO, NOT ONLY ON APPLY (#763). A RestDefinition that was REFUSED this
+	// CRD at apply time -- told so explicitly, by name -- could still uninstall it here, because Undeploy
+	// drops the CRD by group-resource and nothing on this path read the owner. Two outcomes, both bad: with
+	// live instances the non-owner wedges on ErrLiveInstances for a delete that should be a no-op, and with
+	// none the owner's CRD and its GVR-keyed backfill ClusterRole are taken away by a stranger.
+	//
+	// This is reused rather than a new code path: SkipCRD already means "leave the CRD alone", so a
+	// non-owner's delete becomes the same shape as a delete that must not touch it.
+	//
+	// A FAILED READ IS NOT "UNOWNED". OwnerOf returns an error rather than "" for anything but NotFound, and
+	// an error here skips the shared teardown: refusing to drop a CRD we could not prove we own is the safe
+	// direction, and the finalizer is still removed so the delete completes either way.
+	notOwner := false
+	ownedBy, oerr := crd.OwnerOf(ctx, e.kube, gvr.GroupResource())
+	self := cr.Namespace + "/" + cr.Name
+	switch {
+	case oerr != nil:
+		notOwner = true
+		e.log.Warn("Could not read the generated CRD's owner, so its uninstall and the GVR-keyed backfill "+
+			"teardown are skipped; this RestDefinition's own objects are still removed",
+			"crd", gvr.GroupResource().String(), "error", oerr.Error())
+	case ownedBy != "" && ownedBy != self:
+		notOwner = true
+		// WARN, AND THE SAME CEILING AS THE TWO TEARDOWNS BELOW: this runs in Delete, so there is no object
+		// left to carry a condition and an event would be orphaned. An operator removing a duplicate learns
+		// it was a duplicate from this line and nowhere else.
+		e.log.Warn("This RestDefinition does not own the generated CRD, so the CRD and its GVR-keyed "+
+			"backfill ClusterRole are left in place; only this RestDefinition's own objects are removed",
+			"crd", gvr.GroupResource().String(), "ownedBy", ownedBy, "thisRestDefinition", self)
+	}
+
 	configurationGVR := getConfigurationGVR(cr, hasSecuritySchemes)
 	opts := deploy.UndeployOptions{
 		ConfigurationGVR: configurationGVR,
 		// GVK lets Undeploy LIST live instances before dropping the CRD (#125). Without it the count
 		// cannot be taken, and Undeploy refuses rather than assuming zero.
 		GVK:            listGVK,
-		SkipCRD:        false,
+		SkipCRD:        notOwner,
 		SkipDeploy:     skipDeploy,
 		RBACFolderPath: RDCrbacConfigFolder,
 		KubeClient:     e.kube,
@@ -1758,7 +1789,14 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 	// object left to carry a condition and an event would be orphaned. Warn is the honest ceiling. It is also
 	// deliberately NOT fatal -- refusing the delete over a leaked ClusterRole would block the RestDefinition's
 	// removal on cleanup of something harmless-today, and a blocked delete is worse than a residual rule.
-	if berr := deploy.DeleteBackfillRBAC(ctx, e.kube, gvr.Group, gvr.Resource); berr != nil {
+	// GATED ON OWNERSHIP, because this grant is keyed by GROUP AND RESOURCE and not by this RestDefinition's
+	// name: removing it on a non-owner's delete takes away the OWNER's grant (#763). Everything below that is
+	// named after this CR's own namespace/name stays unconditional -- a non-owner must still clean up after
+	// itself.
+	if notOwner {
+		e.log.Debug("Leaving the oas-version backfill ClusterRole in place: this RestDefinition does not own "+
+			"the CRD it is keyed to", "clusterRole", deploy.BackfillClusterRoleName(gvr))
+	} else if berr := deploy.DeleteBackfillRBAC(ctx, e.kube, gvr.Group, gvr.Resource); berr != nil {
 		e.log.Warn("Could not remove the oas-version backfill ClusterRole; it remains aggregated and grants "+
 			"patch on a resource whose CRD is being dropped",
 			"clusterRole", deploy.BackfillClusterRoleName(gvr), "error", berr.Error())
