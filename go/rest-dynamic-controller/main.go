@@ -93,20 +93,6 @@ var (
 	Build string
 )
 
-// generatedControllerLeaseName builds the Lease name for one generated controller.
-//
-// IT MUST EQUAL THE GENERATED ROLE'S NAME. assets/rdc/rbac/role.yaml is
-// `{{ .resource }}-{{ .apiGroup }}-{{ .apiVersion }}` and grants the Lease by that resourceName, so this
-// is the Go side of one agreement rather than a second convention. Extracted as a function so a test can
-// assert it against the template's text; inline it and the agreement becomes untestable.
-//
-// An apiGroup contains dots, which are legal in a Kubernetes object name -- and the Role itself has used
-// this exact shape as its own name since before this change, so it is proven as a name rather than
-// assumed.
-func generatedControllerLeaseName(resource, apiGroup, apiVersion string) string {
-	return fmt.Sprintf("%s-%s-%s", resource, apiGroup, apiVersion)
-}
-
 func main() {
 	// Flags
 	kubeconfig := flag.String("kubeconfig",
@@ -185,6 +171,14 @@ func main() {
 	//
 	// It needs the namespaced Lease grant in the generated Role, and POD_NAME / POD_NAMESPACE from the
 	// downward API. Both ship in the same change; see the EXIT below for what happens when they do not.
+	// leaseName is GIVEN by the provider, which builds it from the same rbacVersion the generated Role's
+	// name uses. Deriving it here from -resource/-group/-version was wrong for one release: the Role is
+	// named with a FIXED v1alpha1 while this Deployment is rendered with the OBSERVED version, so any kind
+	// whose CR version is not v1alpha1 computed a name its Role does not grant -- could not acquire, and
+	// EXITED. See generatedRBACName in oasgen-provider's deploy package.
+	leaseName := flag.String("lease-name",
+		env.String("REST_CONTROLLER_LEASE_NAME", ""),
+		"The coordination.k8s.io Lease to hold while reconciling. Supplied by oasgen-provider; it is the generated Role's own name.")
 	ownership := flag.Bool("ownership",
 		env.Bool("REST_CONTROLLER_OWNERSHIP", true),
 		"Hold a coordination.k8s.io Lease while reconciling, so only one process per Kind x version writes.")
@@ -539,9 +533,20 @@ func main() {
 					"REST_CONTROLLER_OWNERSHIP=false, which permits concurrent writers.")
 			os.Exit(1)
 		}
-		leaseName := generatedControllerLeaseName(*resourceName, *resourceGroup, *resourceVersion)
-		log.Info("Ownership enabled", "lease", podNamespace+"/"+leaseName, "identity", podName)
-		opts = append(opts, builder.WithOwnership(podNamespace, leaseName, podName))
+		if *leaseName == "" {
+			// NOT a fallback to a derived name. A derivation here is exactly the bug this replaced: it
+			// would compute a plausible string that the Role does not grant, and the controller would
+			// exit with an RBAC error rather than with this one.
+			log.Error(fmt.Errorf("-lease-name is empty"),
+				"Ownership is enabled but no Lease name was supplied. oasgen-provider passes it (it is the "+
+					"generated Role's own name, built from the fixed rbacVersion); a controller that "+
+					"derived its own would compute a name its Role does not grant. Set -lease-name or "+
+					"REST_CONTROLLER_LEASE_NAME, or disable ownership with REST_CONTROLLER_OWNERSHIP=false, "+
+					"which permits concurrent writers.")
+			os.Exit(1)
+		}
+		log.Info("Ownership enabled", "lease", podNamespace+"/"+*leaseName, "identity", podName)
+		opts = append(opts, builder.WithOwnership(podNamespace, *leaseName, podName))
 	} else {
 		log.Info("Ownership disabled: this controller does not hold a Lease, so concurrent writers are possible")
 	}

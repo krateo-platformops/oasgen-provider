@@ -31,6 +31,26 @@ const (
 	ConfigmapResourceSuffix = "-configmap"
 )
 
+// generatedRBACName is the name every RDC RBAC object carries, and therefore the name of the Lease the
+// generated controller must acquire (issue 771, half two).
+//
+// IT USES rbacVersion AND NOT gvr.Version, which is the whole point and was a shipped bug for one
+// release. The RBAC objects are deliberately named with the FIXED version so a CRD version bump does not
+// orphan the previous set -- but the RDC Deployment is rendered with the OBSERVED version, so a
+// controller deriving its own Lease name from its -version flag computes a different string from the one
+// its Role grants. For any kind whose CR version is not v1alpha1 that is a controller that cannot
+// acquire and therefore EXITS: a crash loop across every generated controller, not a 403 on one call.
+//
+// Found by github-provider-kog reading this file, against 32 kinds at v2022-11-28. The agreement check
+// shipped with the bug did not catch it: it compared the Go format string with the YAML template's text,
+// and both read "<resource>-<apiGroup>-<apiVersion>" -- the same WORDS bound to different VALUES.
+//
+// So the controller is now TOLD its Lease name rather than deriving one. There is nothing left for two
+// derivations to disagree about.
+func generatedRBACName(gvr schema.GroupVersionResource) string {
+	return fmt.Sprintf("%s-%s-%s", gvr.Resource, gvr.Group, rbacVersion)
+}
+
 type UndeployOptions struct {
 	ConfigurationGVR schema.GroupVersionResource
 	KubeClient       client.Client
@@ -406,7 +426,9 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		deploymentNSName,
 		opts.DeploymentTemplatePath,
 		"serviceAccountName", sa.Name,
-		"labelSelector", opts.LabelSelector)
+		"labelSelector", opts.LabelSelector,
+		// Passed, not derived: see generatedRBACName.
+		"leaseName", generatedRBACName(opts.GVR))
 	if err != nil {
 		opts.Log("Error creating deployment object", "error", err)
 		return "", &PermanentRenderError{What: "the controller Deployment", Err: err}
@@ -437,7 +459,9 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			deploymentNSName,
 			opts.DeploymentTemplatePath,
 			"serviceAccountName", sa.Name,
-			"labelSelector", opts.LabelSelector)
+			"labelSelector", opts.LabelSelector,
+			// Passed, not derived: see generatedRBACName.
+			"leaseName", generatedRBACName(opts.GVR))
 		if err != nil {
 			opts.Log("Error creating deployment object", "error", err)
 			return "", err
