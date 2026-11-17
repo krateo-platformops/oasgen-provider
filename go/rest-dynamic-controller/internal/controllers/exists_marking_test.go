@@ -30,7 +30,7 @@ import (
 // Creating, which the cdc rolls up as converging. The count changing is the point of this test: it
 // forced that revert to be argued rather than slipped in.
 func TestExactlyTheFiveTransientRefusalsAreMarked(t *testing.T) {
-	const wantMarked, wantUnmarked = 4, 12
+	const wantMarked, wantUnmarked = 5, 13
 
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "exists.go", nil, parser.ParseComments)
@@ -74,9 +74,26 @@ func TestExactlyTheFiveTransientRefusalsAreMarked(t *testing.T) {
 	}
 
 	// CALIBRATION: if the AST walk found no refusals at all, the two numbers above could both be zero
-	// and the test would be asserting nothing. 16 is the population this census covers.
-	if marked+unmarked != 16 {
-		t.Fatalf("found %d refusal returns, expected 16. Either exists.go was restructured or this "+
+	// and the test would be asserting nothing. 18 is the population this census covers.
+	//
+	// 16 -> 18 and 4/12 -> 5/13 on 2026-11-17, and the ARGUMENT, since this test asks for one:
+	//
+	// 401 and 403 used to share the default arm, which is MARKED. They now have one arm each, so the
+	// population grows by two -- but only ONE behaviour changed:
+	//
+	//   401  was marked, IS STILL MARKED. Credential rotation is delegated to a secret manager here, so
+	//        a 401 is how a credential being REPLACED looks and it heals without anyone acting. Marking
+	//        it terminal would report Unavailable through every ordinary rotation. Its own arm exists
+	//        only so the MESSAGE can name the credential instead of a status number.
+	//   403  was marked, IS NOW UNMARKED. "The credential is not permitted to do this" does not change
+	//        by asking again, and core-provider confirmed from childhealth.go that a marked refusal
+	//        leaves the parent at Ready=False/Creating with NO DEADLINE -- never green, never failed.
+	//        Unmarked it reaches CreateOutcomeUnknown and the parent reads Unavailable, which is the
+	//        honest shape for "needs a human".
+	//
+	// The split is the one validators.go already draws everywhere else in this package.
+	if marked+unmarked != 18 {
+		t.Fatalf("found %d refusal returns, expected 18. Either exists.go was restructured or this "+
 			"walk no longer recognises its returns -- a census that cannot find its population must "+
 			"not report a count", marked+unmarked)
 	}
