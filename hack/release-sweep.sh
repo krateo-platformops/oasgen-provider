@@ -78,6 +78,22 @@ echo "SWEEP $V: $n/5"
 # The imageless list below is therefore a list of THIS repo's charts, verified by file content
 # (0 templates containing `image:`, 0 Deployments), not an inference from a missing appVersion.
 # ====================================================================================================
+# ONLY FOR CHARTS THAT RESOLVED ABOVE. A chart that is not published yet returns an EMPTY appVersion,
+# which the comparison below would report as `appVersion=<none>  MISMATCH` -- indistinguishable from a
+# chart that IS published and points at the wrong image. That false alarm fired on the first pre-publish
+# run of this script, on two rows at once, while its own control held.
+#
+# Third time in this file that an absence with a legitimate cause needed its own branch rather than a
+# louder alarm: an imageless chart has no appVersion, a chart pinning image.tag explicitly has no use for
+# one, and an unpublished chart has nothing to read. The check is VOID in all three, and says which.
+if [ "$n" != "5" ]; then
+  echo "CHART -> IMAGE LINK: VOID -- not all artifacts are published yet, so an empty appVersion would"
+  echo "                     be indistinguishable from a wrong one. Re-run when the sweep reads 5/5."
+  link_ok=1
+  echo "VERDICT: INCOMPLETE $n/5"
+  exit 0
+fi
+
 echo "CHART -> IMAGE LINK:"
 link_ok=1
 for c in "${CHARTS[@]}"; do
