@@ -335,6 +335,28 @@ rdc:
   #
   #   env:
   #     REST_CONTROLLER_REQUEST_TIMEOUT: "30s"
+  # DELEGATION (*ApiRef) NEEDS THESE, AND WITH `env` EMPTY IT FAILS AT RECONCILE RATHER THAN AT INSTALL.
+  # Any resource declaring observeApiRef / createApiRef / updateApiRef / deleteApiRef reports
+  # ReconcileError with "resource declares observeApiRef ... but no snowplow client is configured (set
+  # the snowplow/authn URLs)". Measured on a live cluster, verbatim (issue 262).
+  #
+  #   env:
+  #     URL_SNOWPLOW: http://<snowplow-service>.<namespace>.svc:8081
+  #     URL_AUTHN:    http://<authn-service>.<namespace>.svc:8082
+  #
+  # It also needs a projected ServiceAccount token, set through rdc.volumes and rdc.volumeMounts above:
+  # a `projected` volume with a `serviceAccountToken` source (audience `authn`, path `token`), mounted
+  # read-only at /var/run/secrets/krateo.io/serviceaccount.
+  #
+  # DO NOT POINT URL_AUTHN AT AUTHN'S `<release>-internal` SERVICE (PORT 8090). It serves only
+  # POST /usernames/check, and a NetworkPolicy admits only identity-lifecycle. A URL to it RESOLVES and
+  # CONNECTS, then returns 404 or is refused depending on the caller -- so it fails as a wrong answer
+  # rather than as a connection error, which is the harder shape to diagnose. Use authn's main Service
+  # on 8082.
+  #
+  # NOT DEFAULTED HERE, DELIBERATELY. The service names and namespace are not knowable from this chart,
+  # and a wrong default would point delegation at something that resolves. The Krateo installer supplies
+  # them declaratively (installer#578); set them here only for a chart-only install.
   env: {}
 env:
   OASGEN_PROVIDER_DEBUG: "false"
