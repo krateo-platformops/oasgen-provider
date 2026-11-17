@@ -14,8 +14,23 @@ import (
 // `return true`, which is the catastrophic direction.
 func TestCreateRefusedWithoutCreating(t *testing.T) {
 	classified := []int{
-		http.StatusBadRequest,          // 400 -- malformed; nothing created
-		http.StatusUnprocessableEntity, // 422 -- understood and refused on content
+		http.StatusBadRequest,
+		// 401 WAS IN THE REFUSED MAP BELOW, and its stated reason was "401 is retryable by design:
+		// credential rotation is delegated to a secret manager and a request failing against a token
+		// being replaced must be retried".
+		//
+		// THAT REASON ARGUES FOR CLASSIFYING IT, not against. Leaving a code unclassified does not
+		// produce a retry of the create: it sends the runtime to an existence check first, and on a kind
+		// whose existence cannot be answered -- no findby, or a get needing an identifier the create
+		// never recorded -- that check never answers. The CR then sits at CreateOutcomeUnknown
+		// indefinitely and cannot even be deleted, because the create-recovery gate runs before the
+		// deletion dispatch. CreateNotCommitted is the mechanism that DOES retry, so the old rationale
+		// is satisfied by the change it forbade.
+		//
+		// Measured: a consumer's service desk strands every create issued during an end-user token
+		// expiry, and another session's `kubectl delete` on such a CR hung for 58 minutes.
+		http.StatusUnauthorized,
+		http.StatusUnprocessableEntity,
 	}
 	for _, code := range classified {
 		if !createRefusedWithoutCreating(code) {
@@ -38,8 +53,6 @@ func TestCreateRefusedWithoutCreating(t *testing.T) {
 		http.StatusGatewayTimeout:     "same as 500",
 		http.StatusForbidden: "never reaches the caller -- IsAuthorizationDenied is handled earlier and " +
 			"returns a nil error, so classifying it here would be dead code",
-		http.StatusUnauthorized: "401 is retryable by design: credential rotation is delegated to a " +
-			"secret manager and a request failing against a token being replaced must be retried",
 		http.StatusTooManyRequests: "throttling says nothing about whether the write landed",
 		0:                          "externalStatusCode's answer when there is no HTTP status to read: the request may never have completed",
 		http.StatusCreated:         "not an error path at all; must not be classified if it ever arrives here",
@@ -54,9 +67,13 @@ func TestCreateRefusedWithoutCreating(t *testing.T) {
 
 // TestCreateRefusedWithoutCreatingIsExhaustive is the guard against the list growing by accident.
 //
-// Every status code from 100 to 599 is asked, and exactly two may answer true. A new code added to the
+// Every status code from 100 to 599 is asked, and exactly THREE may answer true. A new code added to the
 // switch without a decision fails here, which is the point: widening this list is how a duplicate gets
 // created, and it must not be possible to do it quietly.
+//
+// IT WORKED. Adding 401 failed this guard with "needs its own argument in the doc comment", which is
+// exactly the interruption it exists to cause -- the argument was written first, in
+// create_not_committed.go, and this expectation moved after it rather than before.
 func TestCreateRefusedWithoutCreatingIsExhaustive(t *testing.T) {
 	var got []int
 	for code := 100; code < 600; code++ {
@@ -64,7 +81,7 @@ func TestCreateRefusedWithoutCreatingIsExhaustive(t *testing.T) {
 			got = append(got, code)
 		}
 	}
-	want := []int{http.StatusBadRequest, http.StatusUnprocessableEntity}
+	want := []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusUnprocessableEntity}
 	if len(got) != len(want) {
 		t.Fatalf("classified %v, want exactly %v.\nEvery addition to this set risks a duplicate external "+
 			"resource and needs its own argument in the doc comment.", got, want)

@@ -1642,14 +1642,21 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			// may retry DIRECTLY instead of confirming the negative with an existence check first.
 			// AUTHORIZATION DENIED IS HANDLED FIRST, exactly as the ordinary create path handles it
 			// before any classification (#783). The dispatch block had no such branch, so after #776
-			// gave it a Requested: true path a 401 or 403 landed there and held the CR at
+			// gave it a Requested: true path a 403 landed there and held the CR at
 			// CreateOutcomeUnknown -- waiting for a human on what is an ordinary operational event, a
 			// rotated or expired credential.
 			//
-			// AND THE FIX IS NOT ADDING 401/403 TO createRefusedWithoutCreating, which is deliberately a
-			// short list: that function's own comment says 403 would be dead code there, because the
-			// ordinary path never reaches it with one. The gap was the MISSING EARLIER BRANCH, not the
-			// list.
+			// THE FIX FOR 403 IS NOT ADDING IT TO createRefusedWithoutCreating: that function's own
+			// comment says 403 would be dead code there, because the ordinary path never reaches it with
+			// one. For 403 the gap was the MISSING EARLIER BRANCH, not the list.
+			//
+			// AN EARLIER VERSION OF THIS COMMENT SAID "a 401 or 403" AND THE CODE HANDLED ONLY 403,
+			// because IsAuthorizationDenied is 403-only -- correctly, since a 401 is how rotation in
+			// flight looks and must stay retryable. So the sentence asserting both halves sat above a
+			// branch that fixed one, and the 401 half stayed broken behind it until a consumer measured
+			// it. 401 is now handled by createRefusedWithoutCreating, which RETRIES rather than resting
+			// terminal -- see its doc comment for why that is the right home for it and this branch is
+			// not.
 			//
 			// createAuthorizationDeniedResult returns Requested: false with BOTH condition halves and NO
 			// error, so the runtime retries nothing and the CR says what is wrong. Rotating the
