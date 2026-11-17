@@ -143,6 +143,23 @@ rdc:
   # allowlist is set when it is not. The schema rejects a typo here.
   endpointAllowlist: []
 
+  # The generated controllers' metrics endpoint (#772).
+  #
+  # 0 DISABLES IT, and that is the shipped default -- unchanged from before this key existed, so nothing
+  # about an existing release moves. What changes is that it is now REACHABLE: until #772 the flag
+  # defaulted to 0 and nothing in this chart could set it, so the runtime's IncReconcileRequeueAfter and
+  # IncReconcileFailure counters were incremented and thrown away on every deployment.
+  #
+  # WHY IT IS NOT ON BY DEFAULT, stated so the decision is visible rather than inherited: a port on every
+  # generated controller is a surface change, and on the one cluster where this was measured NOTHING
+  # scrapes them -- the collector declares a `prometheus` receiver that sits in no pipeline, so it never
+  # starts. Turning this on by default would open N ports that nothing reads. Set it when you add a scrape.
+  #
+  # Those two counters are what separate a pass that DEFERRED from one that FAILED -- a distinction that
+  # took log arithmetic to recover during a real investigation (#769) and would have been one scrape.
+  metrics:
+    port: 0
+
   # Disable endpoint matching entirely. The unconditional refusals above still apply.
   #
   # Its own key rather than a `*` entry in the list, so "permit any host" appears in a values diff

@@ -22,6 +22,17 @@ data:
   # That is why the dedicated values key exists -- rdc.env is a free-form map where a typo is silent.
   REST_CONTROLLER_ENDPOINT_ALLOWLIST: {{ join "," .Values.rdc.endpointAllowlist | quote }}
   REST_CONTROLLER_ALLOW_ANY_HOST: {{ .Values.rdc.allowAnyHost | quote }}
+  # #772. The runtime COUNTS IncReconcileRequeueAfter and IncReconcileFailure on every pass, and until now
+  # no deployment this chart produces could be scraped: the flag defaults to 0 and nothing here set it, so
+  # the counters were incremented and discarded.
+  #
+  # Rendered unconditionally and always explicit, for the reason the allowlist above gives: an absent key
+  # and a 0 are the same to the controller, but only one of them tells a reader what the policy is.
+  #
+  # A DEDICATED KEY rather than rdc.env, for the same reason again -- rdc.env is a free-form map where a
+  # typo is silent, so an operator would believe metrics were on. Note the precedence: rdc.env is rendered
+  # AFTER these keys, so an operator setting this through rdc.env still wins. Documented, not prevented.
+  REST_CONTROLLER_METRICS_SERVER_PORT: {{ .Values.rdc.metrics.port | quote }}
   # home should be set to /tmp or any other writable directory to avoid permission issues with helm https://github.com/helm/helm/issues/8038
   HOME: /tmp
   {{- range $key, $value := .Values.rdc.env }}
