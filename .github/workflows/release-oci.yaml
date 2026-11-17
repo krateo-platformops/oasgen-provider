@@ -20,7 +20,37 @@ on:
         required: false
 
 jobs:
+  # THE SAME REFUSAL release-tag.yaml CARRIES, AND THIS IS THE MORE DANGEROUS HALF.
+  #
+  # installer pins CHARTS, and retracted-versions.yaml names CHARTS -- so a plain `0.83.0` chart
+  # published from a dispatch would be pinnable, would satisfy the version-line gate, and would be
+  # invisible to the one control between a cluster and a bad version. An image at least has to be
+  # referenced by a chart to reach anything.
+  #
+  # Only fires on a dispatch: on the tag path the version IS the git tag, which is a release by
+  # definition and already plain semver.
+  guard-prerelease-chart:
+    # EVERY dispatch, including one that leaves chart_version empty. The input's description says the
+    # default is "the git tag" -- but a dispatch runs from a BRANCH, where there is no tag to default to,
+    # so an empty value on this path is not "use the release version", it is undefined. The regex refuses
+    # empty, so letting the guard run is what catches it.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: A dispatched chart version must be a pre-release
+        run: |
+          v='${{ github.event.inputs.chart_version }}'
+          if printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'; then
+            echo "OK: $v is a pre-release chart version"
+            exit 0
+          fi
+          echo "REFUSED: chart_version '$v' is not a pre-release." >&2
+          echo "A plain semver chart is a RELEASE: it is pinnable by installer and nameable in" >&2
+          echo "retracted-versions.yaml, so it must come from a git tag. Use something like 0.83.0-rc1." >&2
+          exit 1
+
   release-oci:
+    needs: [guard-prerelease-chart]
     uses: krateo-platformops/.github/.github/workflows/release-oci.yaml@main
     permissions:
       contents: read

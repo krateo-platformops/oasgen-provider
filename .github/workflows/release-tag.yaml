@@ -19,8 +19,50 @@ name: release-tag
 on:
   push:
     tags: ["[0-9]+.[0-9]+.[0-9]+"]
+  # A PRE-RELEASE IMAGE, SO A CLUSTER RUN CAN PRECEDE A TAG.
+  #
+  # Until this existed, images came ONLY from a plain-semver tag: release-oci's dispatch publishes CHARTS
+  # and points app_version at an image that must already exist, and PR builds never push. So a change
+  # whose failure mode is only visible on a cluster could not be validated before shipping -- the gate
+  # needed an artifact that only the thing being gated could produce.
+  #
+  # That bit for real. 0.83.0's Lease work (#771) makes every generated controller acquire a Lease at
+  # startup, and controller-runtime EXITS when it cannot -- a crash loop across N kinds per consumer,
+  # not a 403 on one call. It was held for a cluster run, three consumers had clusters ready, and there
+  # was nothing to install. Diego's decision, 2026-11-17: make the pre-release image possible rather
+  # than tag-and-retract or accept render-only verification.
+  #
+  # THE TAG MUST NOT LOOK LIKE A RELEASE, and guard-prerelease-tag below refuses one that does.
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Pre-release image tag, e.g. 0.83.0-rc1. MUST carry a -suffix: a plain semver is a release and belongs on a git tag."
+        required: true
 
 jobs:
+  # REFUSE A DISPATCH WHOSE TAG LOOKS LIKE A RELEASE, before anything is built.
+  #
+  # A plain `0.83.0` from a dispatch would be indistinguishable in the registry from a released 0.83.0,
+  # would satisfy a consumer's version-line check, and would be invisible to retracted-versions.yaml --
+  # which keys on plain semver and is the only control between a cluster and a bad version. A refusal
+  # rather than a convention: a convention is a comment nobody reads at the moment they dispatch.
+  guard-prerelease-tag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: The image tag must be a pre-release
+        run: |
+          tag='${{ github.event.inputs.image_tag }}'
+          if printf '%s' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'; then
+            echo "OK: $tag is a pre-release tag"
+            exit 0
+          fi
+          echo "REFUSED: image_tag '$tag' is not a pre-release." >&2
+          echo "A plain semver is a RELEASE and must come from a git tag, so release-oci publishes the" >&2
+          echo "charts beside it and retracted-versions.yaml can name it if it turns out bad." >&2
+          echo "Use something like 0.83.0-rc1." >&2
+          exit 1
+
   # Release gate. Without this a tag published an image that had never run the suite: tests were
   # bound to pull_request only, so anything reaching main outside a PR was released unverified.
   test:
@@ -34,7 +76,10 @@ jobs:
     # second of each other, and the images were built while the tests were still running. They passed,
     # so that release is sound, but it was sound by luck. Images are immutable once pushed and an
     # untested one is indistinguishable from a good one afterwards.
-    needs: [test]
+    # The guard is a needs: too, so a REFUSED dispatch builds nothing. A skipped need counts as
+    # satisfied, which is exactly right here: on the tag path guard-prerelease-tag does not run and must
+    # not block.
+    needs: [test, guard-prerelease-tag]
     uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@main
     permissions:
       contents: read
@@ -44,5 +89,8 @@ jobs:
       # Stamp the build into the binary. Without this every published image reports an empty
       # service.version, the collector falls back to the chart label, and an incident cannot be
       # attributed to a commit (#127). Both Dockerfiles consume BUILD_VERSION via -ldflags.
+      # The dispatch's tag when there is one, the git tag otherwise. github.ref_name on a dispatch is the
+      # BRANCH, which would publish an image called "main" -- mutable, and looking like a channel.
+      image_tag: ${{ github.event.inputs.image_tag || github.ref_name }}
       build_args: |
-        BUILD_VERSION=${{ github.ref_name }}-${{ github.sha }}
+        BUILD_VERSION=${{ github.event.inputs.image_tag || github.ref_name }}-${{ github.sha }}
