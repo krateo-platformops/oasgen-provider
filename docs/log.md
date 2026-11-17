@@ -26,6 +26,178 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-17 — 0.82.0
+
+**Five fixes that consumers found, four of them in code I had described as working.** A chart that bound
+cluster-wide grants to the namespace's `default` ServiceAccount; cluster-scoped resources with no labels;
+~15 seconds with no leader on every rolling update; and a 401 that stranded a resource forever.
+
+### The chart refuses `serviceAccount.create=false` with no name (issue 785)
+
+With that combination **all three of this chart's bindings attached to the namespace's `default`
+ServiceAccount** — the one every pod gets when it names none — and between them they grant `secrets`,
+`roles`/`rolebindings` and `customresourcedefinitions`. **Any workload scheduled there without an explicit
+`serviceAccountName` inherited the lot.**
+
+**Why it survived an investigation that looked straight at it.** `clusterrolebinding.yaml` documents a
+*different* problem on the same values key (#717): the binding subject and the Deployment's
+`serviceAccountName` could **diverge**, 403ing every call. That fails loudly, and #717 was hunting a
+mismatch. **This is a match** — the Deployment also runs as `default` — so the provider works perfectly and
+nothing surfaces. **A defect that makes the system work is invisible to every check aimed at a failure.**
+
+A refusal rather than a warning, because there is no error to read and no condition to see: a template that
+renders is a template nobody re-reads.
+
+> `Note (2026-11-17)` — **this exposure is not new in 0.81.0.** A consumer rendered published **0.74.0 and
+> 0.80.0** and found the same `default` binding in both: it has been there since #717 made the
+> ClusterRoleBindings follow the helper. **0.81.0 only added the Lease RoleBinding to the set.** Without that
+> check this entry would have sat beside the leader-election work and implied a regression.
+>
+> The installer's schema exposes `componentValues.oasgen-provider.serviceAccount` with `create` and `name`
+> both optional, so the case is expressible through an Installer CR today. **This refusal is the only
+> control.**
+
+### Every chart resource carries labels (issue from a consumer's harness)
+
+**Five of twelve rendered resources had no `metadata.labels`:** both ClusterRoles, both ClusterRoleBindings,
+and the rbac ConfigMap. Everything namespaced already had them.
+
+```
+kubectl get clusterrole -l app.kubernetes.io/instance=<release>   ->   nothing
+```
+
+**So a label-driven audit or cleanup silently skipped exactly the objects that grant the most** — and
+cluster-scoped objects survive a namespace deletion. `helm uninstall` works from release metadata rather
+than labels, so the chart behaved correctly and **the absence stayed invisible until something tried to
+SELECT them.** Which is what a consumer's validation harness did, falling back to helm's release-name
+annotation.
+
+The leader-election Role and RoleBinding added in 0.81.0 already had labels, written fresh against the
+standard helper, so the gap was in the older cluster-scoped templates only.
+
+> `Note (2026-11-17)` — **my first audit of this measured the wrong revision.** I rendered the working tree,
+> detached at an older commit, and reported 8 resources with 4 unlabelled; the shipped chart renders **12
+> with 5**. The tree predated 0.81.0's Role, so I was auditing a chart no consumer has, and had I stopped
+> there I would have told them their live observation was impossible. **A render of the wrong revision looks
+> exactly like a render of the right one.**
+
+### A rolling update no longer runs ~15 seconds with no leader
+
+```
+new pod  "Attempting to acquire leader lease"   15:25:04.415
+new pod  "Successfully acquired lease"          15:25:21.921    17.5 s, one LeaseDuration
+fresh install, same chart, same image                            5 MILLISECONDS
+```
+
+**The two numbers together are the diagnosis:** acquiring is instant when no stale lease exists, so the
+17.5 seconds was entirely the wait for an abandoned lease to expire. `LeaderElectionReleaseOnCancel` was
+unset, so a terminating manager kept its Lease until it timed out.
+
+**Nothing was wrong with the old behaviour** — a single writer held the Lease throughout, which is what
+issue 771 asks for. It was availability: 15 seconds of no reconciliation on each upgrade.
+
+**The precondition is why this is not merely a flag flip.** With `ReleaseOnCancel` the binary must not keep
+writing after the manager stops. `mgr.Start` is the last statement in `main` and returns only once the
+controllers have stopped, so when the Lease is released no reconcilers are running. What remains is the
+deferred telemetry flush, which writes to OTLP and never to the Kubernetes API — **and it is now bounded at
+5 s instead of `context.Background()`, because releasing the Lease makes "alive but not writing" a
+load-bearing claim and it should not rest on a remote collector's responsiveness.**
+
+Measured by a consumer rolling 0.81.0 to itself; they inferred the cause from the timing and said so, which
+is why it was read in the code before being fixed.
+
+### A 401 means nothing was created, so the resource retries instead of stranding (issue 783)
+
+A 401 held the resource at `CreateOutcomeUnknown`. **For a kind whose existence cannot be answered that is
+permanent AND undeletable**, so every create issued during a token expiry became a stuck resource needing a
+human — on an ordinary operational event that clears by itself.
+
+```
+before   401 unclassified -> the existence-confirm gate -> never answers for a no-findby kind
+after    401 -> CreateNotCommitted -> the runtime re-sends; the pass after the rotation files it
+```
+
+**`IsAuthorizationDenied` stays 403-only, deliberately.** `createAuthorizationDeniedResult` returns
+`Requested: false`, no error, and a condition telling an operator to fix the credential — right for a 403,
+which retrying will not change. **A 401 is the opposite: it clears when the secret manager rotates**, so it
+needs a retry, which is what `CreateNotCommitted` gives.
+
+> `Correction (2026-11-17)` — **0.81.0's entry claims more than 0.81.0 did.** The dispatch block added there
+> says the missing branch meant *"a **401 or 403** landed there and held the CR at CreateOutcomeUnknown"* —
+> and the branch it added keys on `IsAuthorizationDenied`, which is **403-only**. So a sentence asserting
+> both halves sat above a fix for one, **and the 401 half stayed broken behind a comment saying it was
+> fixed.** That is why it survived review: the reasoning had already been written down, so nobody checked
+> whether the code matched it.
+>
+> **The existing test's own rationale demanded the change it forbade.** It listed 401 as must-not-classify
+> because *"a request failing against a token being replaced must be retried"* — but leaving a code
+> unclassified does not retry the create, it routes to an existence check that for a no-findby kind never
+> answers. **`CreateNotCommitted` is the mechanism that does retry.**
+>
+> **The residual risk, stated:** a gateway that authenticates *after* forwarding could answer 401 having
+> already written, which would now retry into a duplicate. Same risk class the list already accepts for 400
+> and 422, and not the shape any measured case takes.
+
+### The authz predicate is now tested for matching, not just for ordering
+
+#783's guards asserted the **order** of the dispatch caller's branches, by source offset. **They cannot fail
+when the predicate does not match the error the dispatch path produces** — the branch is simply never taken,
+and an ordering assertion is still true. That is the shape the 401 report arrived in.
+
+The new test builds the error the dispatch path produces, wrapped exactly as `dispatch.go` wraps it, and
+asserts what each predicate says about it. **The load-bearing row is 403:** it proves `fmt.Errorf` with two
+`%w` verbs keeps the `*StatusError` reachable by `errors.As`. Had that not held, #783 would have been dead
+code and every guard shipped with it would still have passed.
+
+It carries a negative control for the wrap itself — an error with no status must also return false —
+because the 403 row alone cannot distinguish *"the wrap preserves the status"* from *"the predicate says yes
+to everything"*.
+
+### main went red from two of my own green PRs, and the fix is in this release
+
+**#792 added a table row asserting `createRefusedWithoutCreating(401) == false`. #793 made it `true`.**
+Both were open at once, each passed CI against a main that did not contain the other, and merging both
+left main red on exactly that row. **A docs-only PR surfaced it minutes later**, which is luck rather than
+a procedure.
+
+**Neither review could have caught it.** #792 touches only a new test file; #793 touches the classification
+and its own tests. The diffs do not mention each other, and the conflict lives in a value one asserts and
+the other changes -- so no reviewer had both halves in front of them. **CI on a PR measures the PR against
+main as it stands, never against another open PR.**
+
+The row now carries why it changed, so the next reader does not restore the old value from the old
+reasoning. **The surviving behaviour is #793's**, which is why the test was corrected and not the code.
+
+> `Note (2026-11-17)` -- **the check belongs at the merge boundary**, not in either PR: after merging
+> anything that changes a predicate, a status list, a default or a classification, re-run CI on every
+> other open PR that asserts anything about it. And when main goes red, run the failing test against a
+> clean checkout of `origin/main` with your own change absent before assuming you caused it -- a runtime
+> bump in progress looked guilty here and was innocent.
+
+### Known issues opened against this release's area
+
+> `Known issue (2026-11-17, issue 444)` — **findby adopts the first item matching the declared identifiers
+> and never counts.** Measured on a cluster: a fresh CR adopted a pre-existing closed pull request within 5
+> seconds, 0 POSTs, and opened nothing; a CR whose own create never landed had the **existence check** adopt
+> a stranger's object and stamp `external-create-succeeded`. The controller then sent **12 PATCHes** to
+> those foreign objects — **all refused by the vendor, which is the vendor's protection and not ours.**
+> PR #789 counts matches and refuses on two or more; it is **held as a draft** because for one real kind the
+> refusal converts a silent wrong adoption into a permanent, undeletable block.
+>
+> `Known issue (2026-11-17, issue 790)` — #789's counting is **per page**, so for a paginated findby two
+> matches on different pages still adopt the first.
+>
+> `Known issue (2026-11-17, issue 794)` — **`Ready=True` over a known unreconciled difference.** The drift
+> comparison's input is normalised by whichever verb Observe used, and Observe switches from findby to get
+> once an identifier exists; the two transforms are declared per verb and need not agree, so a field can
+> stop being compared. Confirmed by a consumer's request-path correlation. **Narrower than first filed:** an
+> ordinary create never crosses that boundary, because a findby pass that finds nothing produces no
+> comparison at all — so this is downstream of issues 444 and 740.
+>
+> `Known issue (2026-11-17, issue 740)` — a kind that cannot answer "does it exist" blocks **deletion** as
+> well as reconciliation. `kubectl delete` hangs with the finalizer held, measured at 58 minutes.
+> `krateo.io/deletion-policy: orphan` is taken before the gate and deletes cleanly.
+
 ## 2026-11-17 — 0.81.0
 
 **The provider elects a leader**, a dispatch refused for a bad credential says so instead of waiting for a
