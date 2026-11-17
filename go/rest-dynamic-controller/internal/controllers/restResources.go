@@ -1584,7 +1584,26 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 	// A dispatch resource has no create verb -- the dispatch IS its create -- so this must come before the
 	// create builder, which would otherwise find nothing and report a missing action for a resource that
 	// correctly declares none (#199).
-	if handled, derr := h.createDispatch(ctx, mg, cli, &http.Client{}, clientInfo, log); handled {
+	if handled, derr := h.createDispatch(ctx, mg, cs, cli, &http.Client{}, clientInfo, log); handled {
+		// TESTED BEFORE THE AUDIT, and that order is the whole point (#718). A resolver whose referent does
+		// not exist yet means NOTHING WAS SENT: the resolvers run strictly before the request is built, so
+		// there is no vendor call to record. Auditing it would write a row asserting an external write that
+		// never happened -- into the audit trail this block exists to keep complete, which is worse than
+		// the gap it was added to close.
+		//
+		// A WAIT, NOT A FAILURE, so this mirrors the Create path exactly: the Ready condition is RETURNED
+		// for the runtime to upsert (#258) and no Synced is sent, which leaves the runtime's
+		// ReconcileSuccess in place. No error, so this is not a requeue-as-failure; the next reconcile
+		// retries once the referent appears. No Warning event either: a Warning here would page someone
+		// for an ordering race that resolves itself.
+		if derr != nil && isLookupReferentMissing(derr) {
+			log.Debug("A dispatch's dependent lookup has no referent yet; waiting", "kind", mg.GetKind(), "reason", derr.Error())
+			return controller.CreateResult{
+				Reason:     "PendingReferent",
+				Conditions: []metav1.Condition{customcondition.PendingReferent(derr.Error())},
+			}, nil
+		}
+
 		// A dispatch IS an external write -- the dispatch is this resource's create -- so it is audited
 		// like one. Leaving it out would make the audit trail silently incomplete for exactly the
 		// resources that have no create verb.
