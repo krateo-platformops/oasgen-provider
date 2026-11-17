@@ -26,6 +26,101 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-17 — 0.80.0
+
+**A dispatch that reached the vendor is no longer reported as "nothing was sent"**, the duplicate-retry-budget
+class is closed on both of its sites, and two checks that were methods in a message thread are now scripts
+in the repository.
+
+### A dispatch that reached the vendor is a REQUESTED create (issue 776)
+
+Every error return in the dispatch block returned the **zero** `CreateResult`, so `Requested` was false even
+when the request had gone out and the vendor had stored the object. The runtime's gate is
+`createCommittedNot(actionErr) || !created.Requested`, so it read *"nothing was sent"*, skipped the
+existence-confirm gate and re-entered Create.
+
+```
+MEASURED on a real cluster against 0.78.0, with a fake that stores the object then answers 500:
+  t+10s  posts=4   external-create-failed == external-create-pending == 09:52:49Z
+  t+20s  posts=9   ObserveFailed
+  t+50s  posts=12  "correlation is ambiguous: 6 items in the collection echo the token"
+  four dispatches in 7.5 s, before any observe
+```
+
+`external-create-failed` stamped at the same instant as `external-create-pending` on every attempt is the
+issue-746 signature.
+
+> `Note (2026-11-17)` — **a status-code check would not have fixed it**, which is why this needed a sentinel.
+> A pre-send failure and a connection dropped mid-flight both arrive with **no status code**, and
+> `externalStatusCode` returns 0 for each — so classifying by code reports a lost answer as "nothing was
+> sent", the defect itself. **The discriminator has to be whether the request went out**, which only
+> `createDispatch` knows, so it marks its two post-send returns and the caller tests `errors.Is`. The same
+> shape as #718's wait: the discriminator is the error's IDENTITY.
+>
+> **And #747's guard was blind to this by construction.** It anchors on `CreateWithResult`'s own `apiCall`
+> line and checks every zero-value return PAST it — but the dispatch block sits *before* that anchor, and
+> the dispatch's send happens inside `createDispatch`, in another function no positional check on
+> `CreateWithResult` can reach. **A positional guard needs its SCOPE stated as carefully as its assertion.**
+>
+> **The replacement guard failed on correct code on its first run**, reporting "1 of 2 marked": gofmt had
+> wrapped the long return and the sentinel sat on the **continuation line**, which a line-based scan cannot
+> see — the same defect class the guard exists to catch. It scans by statement now.
+
+**Creates resuming after an observe fails as ambiguous is a SEPARATE defect** and survives this fix. Filed
+with its measurement and three unverified candidates rather than a mechanism.
+
+### unstructured-runtime v1.24.0 → v1.27.0: both sites of a duplicate-retry-budget class (issue 769)
+
+A worker-side follow-up enqueue built a fresh event with `QueuedAt: time.Now()` and called `AddWithOpts`
+**with no `items.LoadOrStore`**, while the informer paths had four of them. The queue key is the Event with
+`QueuedAt` included, so a Create waiting out its backoff got a **second key with its own retry budget**.
+
+```
+MEASURED: 12 vendor requests where 1 + MAX_ERROR_RETRIES(5) = 6 is configured, as two keys of 6 --
+one climbing at ~2/3/5/9/17 s, one flat at ~1 s (the second key's first pass, RateLimited: false)
+```
+
+> `Note (2026-11-17)` — **FIVE mechanisms were proposed and excluded before anyone counted the queue keys**,
+> and the instrument that settled it used data already on disk: group the refused-create log lines by
+> `queuedAt`, with the clean per-resync bursts as its own control. **One grep answered what five rounds of
+> code-reading had not.**
+>
+> **The lesson is not "exclusions are durable".** When mechanisms keep dying, the question is not *what else
+> could cause this* but **what quantity are all these stories disagreeing about, and can I measure it
+> directly?** Here that was the number of queue keys, measurable from the first report.
+>
+> **The second site was found by asking the runtime's owner whether their TEST covered a precondition**, not
+> whether something was a bug. Their answer enumerated their own paths and turned up an unfixed enqueue in
+> the incomplete-create recovery — open for the whole two-minute grace, which is this provider's issue-758
+> territory, and reachable with no operator action at all.
+
+### Two checks are now scripts rather than methods (`hack/`)
+
+**`not-walk.py`** detects the 0.79.0 crdgen tightening: it walks parsed structure for a schema key named
+`not`, so it is immune to the three spellings a grep must enumerate, and **gates its own output on
+controls** — exit 2 means *the result means nothing*, distinct from exit 0 *clear*. An unparseable file in
+scope fails the controls; a Helm template is skipped as out of scope; an external `$ref` is reported as a
+caveat, because its target is not walked and a `not` can hide there.
+
+**`release-sweep.sh`** checks that a release's five artifacts are published, with **one instrument per path
+shape and a control pair for each**. A raw registry manifest probe returns 404 for `charts/*` at every
+version; `helm show chart oci://...` asks through the client that actually pulls.
+
+> `Note (2026-11-17)` — **three instrument failures on one sweep in one day**, and only two were caught by
+> controls. `crane` was not installed, so every row *and* both controls returned 0 — caught, because they
+> went to zero together. The registry API returned 403 for everything including the negative control, which
+> is not a control but a second copy of the same reading — also caught. **The chart-path blindness was not
+> caught**, because the controls were on image paths: a control validates the instrument **for the shape it
+> tests**, and a sweep mixing images and charts needs one pair of each.
+>
+> **It also checks the LINK the rows cannot see.** Both templates resolve through
+> `defaultTag .Chart.AppVersion` with `image.tag: ""` shipped, so appVersion is what a deployed pod actually
+> pulls — and a chart published at the new version whose appVersion is the previous one passes every row and
+> then deploys the old image. **That rule is NOT general**, so its precondition is asserted rather than
+> assumed: a consumer ran it over 20 pinned components and found 3 benign mismatches — two wrapper charts
+> whose appVersion is the upstream app's version, and one pinning `image.tag` explicitly with a digest.
+> **A check that flagged all three would be noise, and noise is how a gate gets ignored.**
+
 ## 2026-11-17 — 0.79.0
 
 **Two declarations that were accepted and silently ignored now do something**, a delete that could take away
