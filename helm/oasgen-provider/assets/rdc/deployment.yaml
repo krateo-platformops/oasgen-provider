@@ -84,6 +84,14 @@ spec:
             - -group={{ "{{" }} .apiGroup {{ "}}" }}
             - -version={{ "{{" }} .apiVersion {{ "}}" }}
             - -resource={{ "{{" }} .resource {{ "}}" }} 
+            # THE LEASE NAME IS GIVEN, NOT DERIVED (issue 771, half two).
+            #
+            # It is the generated Role's own name, which the provider builds from rbacVersion -- a FIXED
+            # v1alpha1, so a CRD version bump does not orphan the previous RBAC set. This Deployment is
+            # rendered with the OBSERVED version, so a controller deriving the name from its own -version
+            # flag computes a DIFFERENT string from the one its Role grants, cannot acquire, and EXITS.
+            # That was a shipped bug for one release, found by a consumer with 32 kinds at v2022-11-28.
+            - -lease-name={{ "{{" }} .leaseName {{ "}}" }}
             {{ "{{" }}- if .labelSelector {{ "}}" }}
             # Scopes this controller to the instances its version owns. Every served version runs its own
             # controller and every served endpoint returns every object, so the apiVersion cannot separate
