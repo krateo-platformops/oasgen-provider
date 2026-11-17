@@ -1,0 +1,47 @@
+# THE LEASE GRANT FOR LEADER ELECTION (#771).
+#
+# WHY THIS FILE EXISTS AT ALL. This chart had no namespaced Role -- only a ClusterRole -- because every
+# grant the provider needed was cluster-scoped. A coordination.k8s.io Lease is namespaced, so leader
+# election cannot work without one, and the manager EXITS when it cannot acquire its Lease. Enabling the
+# flag without this file is an outage, which is why they land together.
+#
+# WHY LEADER ELECTION MATTERS HERE and not only for availability: without it EVERY replica reconciles
+# EVERY RestDefinition, and a RestDefinition reconcile CREATES CRDs, Deployments, ClusterRoles and
+# ConfigMaps. Two writers means concurrent CRD applies on the same group-resource, against an ownership
+# annotation that assumes a single writer. A ROLLING UPDATE is two writers by construction -- the old pod
+# and the new one both reconcile until the old terminates -- so this is not an opt-in hazard.
+#
+# THE SUBJECT IS THE serviceAccountName HELPER, NOT fullname. They are equal with the shipped values, so
+# the difference is latent -- and it becomes live the moment an operator sets serviceAccount.name or
+# serviceAccount.create: false, where the helper resolves to "default". The ClusterRoleBinding next door
+# carries the same note after the same defect was found there (#717). Getting it wrong here is worse: the
+# symptom is not a 403 on one call but "the provider will not start".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "oasgen-provider.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "oasgen-provider.labels" . | nindent 4 }}
+rules:
+  # get/list/watch to read the current holder, create to take it the first time, update to renew it.
+  # No delete: controller-runtime releases a Lease by clearing its holder, not by deleting the object.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "oasgen-provider.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "oasgen-provider.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "oasgen-provider.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "oasgen-provider.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

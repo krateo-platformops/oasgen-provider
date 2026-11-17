@@ -321,6 +321,17 @@ rdc:
   env: {}
 env:
   OASGEN_PROVIDER_DEBUG: "false"
+  # ON BY DEFAULT (#771), and it is a correctness setting rather than an availability one. Without it
+  # EVERY replica reconciles EVERY RestDefinition -- and a RestDefinition reconcile creates CRDs,
+  # Deployments, ClusterRoles and ConfigMaps, so two writers means concurrent CRD applies on the same
+  # group-resource against an ownership annotation that assumes one writer.
+  #
+  # A ROLLING UPDATE IS TWO WRITERS BY CONSTRUCTION: the old pod and the new one both reconcile until the
+  # old terminates. So this is not an opt-in hazard and the default has to be true.
+  #
+  # It requires the namespaced Lease grant in templates/role.yaml. Turning this on without that file makes
+  # the manager EXIT when it cannot acquire its Lease -- which is why they shipped together.
+  OASGEN_PROVIDER_LEADER_ELECTION: "true"
   OASGEN_PROVIDER_MAX_RECONCILE_RATE: 1
 
 # oasgen-render: an in-cluster preview service. POST /render {restDefinitions, oas} returns the CRDs those
