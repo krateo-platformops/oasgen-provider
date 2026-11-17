@@ -26,6 +26,111 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-17 — 0.81.0
+
+**The provider elects a leader**, a dispatch refused for a bad credential says so instead of waiting for a
+human, the generated controllers' metrics can be scraped at all, and **0.77.0 is retracted.**
+
+### The provider manager elects a leader, and gets the Lease grant to do it (issue 771, half one)
+
+Without leader election every replica reconciles every RestDefinition — and a RestDefinition reconcile
+**creates CRDs, Deployments, ClusterRoles and ConfigMaps.** Two writers means concurrent CRD applies on the
+same group-resource, against an ownership annotation that assumes a single writer. **A rolling update is two
+writers by construction**, so the default has to be true.
+
+**The flag alone would have been an outage**, which is why the grant is in the same change. This chart had
+**no namespaced Role at all** — only a ClusterRole, because every grant the provider needed was
+cluster-scoped — and controller-runtime's manager **exits** when it cannot acquire its Lease.
+
+> `Note (2026-11-17)` — **this covers the PROVIDER only, and a consumer had to correct a claim that it
+> covered more.** I told them "every generated controller now acquires a Lease"; the generated controllers
+> start exactly as they did on 0.80.0. `builder.WithOwnership` on those is **issue 771's other half and is
+> not started.**
+>
+> **The issue's own text listed the two halves.** I built one and described it as both — the third time in a
+> day that a peer corrected a claim of mine about this repository, each time because I described what a
+> change MEANT at a level above what it DID.
+>
+> **It also corrupted the removal order for `rdc.autoscaling`.** Believing both halves had shipped, I had it
+> as "the installer narrows its schema, then the keys go". It is **half two, then the installer, then the
+> keys** — because `rdc.autoscaling` is the knob whose hazard half two fixes, and removing it first takes
+> away the setting while leaving the hazard.
+>
+> **The fix cannot protect its own rollout:** during the upgrade that introduces it the old pod has no
+> leader election and the new one does. The protection starts from the next rolling update.
+
+### A dispatch refused for a bad credential says so (issue 783)
+
+After 0.80.0 gave the dispatch block a `Requested: true` path, a **401 or 403 landed there** and held the CR
+at `CreateOutcomeUnknown` — waiting for a human on an ordinary operational event, a rotated or expired
+credential. **The ordinary create path has handled authorization denial ahead of any classification all
+along; the dispatch block had no such branch.**
+
+> `Note (2026-11-17)` — **the fix is not adding 401/403 to `createRefusedWithoutCreating`**, which a consumer
+> offered as a one-liner. That list is deliberately short and its own comment says 403 would be **dead code**
+> there, because the ordinary path never reaches it with one — precisely because the earlier branch catches
+> it. Adding the entry would have implied the opposite of what the code does **and still left 401 broken on
+> the dispatch path.** The gap was the missing earlier branch.
+>
+> **Found by a consumer reasoning about their own documentation**, not from a failure: for them this is the
+> expired end-user token case, and treating it as "the create may have landed" turns every token expiry into
+> a manual recovery per CR.
+
+### The generated controllers' metrics port is reachable (issue 772)
+
+The runtime **counts** `IncReconcileRequeueAfter` and `IncReconcileFailure` on every pass, and no deployment
+this chart produced could be scraped: the flag defaults to 0 and nothing set it. **The counters were
+incremented and discarded in every generated pod** — and those two are exactly what separates a pass that
+DEFERRED from one that FAILED, a distinction that took sub-second log arithmetic across four bursts to
+recover during a real investigation and would have been one scrape.
+
+**The default is still 0.** A port on every generated controller is a surface change, and on the one cluster
+where this was measured **nothing scrapes them** — the collector declares a `prometheus` receiver that sits
+in no pipeline, so it never starts. What changed is that it is reachable, as a dedicated key the schema
+validates rather than a free-form env entry where a typo is silent.
+
+### The release sweep stops reporting a false MISMATCH mid-publish
+
+`hack/release-sweep.sh` landed in 0.80.0 and produced a believable false alarm on its first real use, four
+minutes after that tag:
+
+```
+charts/oasgen-provider            appVersion=<none>  MISMATCH, want 0.80.0
+charts/controller-render-service  appVersion=<none>  MISMATCH, want 0.80.0
+VERDICT: a chart points at the WRONG image version
+```
+
+**Nothing was wrong.** The charts were not published yet, so `helm show chart` returned nothing and the
+appVersion came back empty — which the comparison read as a mismatch. **"Not published" and "published
+pointing at the wrong image" were reported identically**, and the second is an incident while the first is a
+normal four-minutes-after-tagging state. **Its own control held throughout**, which is what made the alarm
+believable rather than obviously broken.
+
+**Third time in that one file that an absence with a legitimate cause needed its own branch rather than a
+louder alarm:** an imageless chart has no appVersion to set, a chart pinning `image.tag` explicitly has no
+use for one, and an unpublished chart has nothing to read at all. **The check now VOIDS in all three and
+says which.**
+
+### 0.77.0 is retracted, with `use: 0.78.0`
+
+On a findby-addressed kind, a create whose outcome cannot be determined stays `Ready=False/Creating`
+indefinitely instead of reaching `CreateOutcomeUnknown` — and the CDC rollup reads `Creating` as
+**converging**, so a parent composition reports healthy over a resource that will never exist.
+
+> `Note (2026-11-17)` — **it sits under a different standard than the 0.67.0/0.68.0 decision in the same
+> file, and that file now says so.** Those were refused because the route was a **code reading with no
+> measurement.** This has the measurement — two vendors, two consumer sessions, independently — and what it
+> measured is **not damage**: no duplicates, no data loss, both recovery arms work.
+>
+> **The harm is that the signal is gone.** `CreateOutcomeUnknown` exists for no other purpose than to prompt
+> a human, and 0.77.0 removed that prompt for exactly the kinds where a lost create answer is unrecoverable
+> without one. **A failure nobody is told about is worse than a visible one.**
+>
+> **And it is not a push, which the rule warns against:** 0.77.0 was superseded within hours, two consumers
+> already refused it on their own measurements, and `exists.go` is byte-identical from 0.78.0 onward.
+> **All three charts are named**, because the version-line gate would otherwise confirm a bad set as "in
+> step".
+
 ## 2026-11-17 — 0.80.0
 
 **A dispatch that reached the vendor is no longer reported as "nothing was sent"**, the duplicate-retry-budget
