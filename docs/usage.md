@@ -59,15 +59,85 @@ The pins live in the installer's `component-pins.yaml` (`oasgen-provider` +
 Both charts are published to GHCR as OCI artifacts on every release tag:
 
 ```sh
+# Pick ONE version and use it for BOTH charts. 0.84.0 is an example; use the current release.
+VERSION=0.84.0
+
 # 1. The RestDefinition CRD:
 helm install oasgen-provider-crds \
-  oci://ghcr.io/krateo-platformops/charts/oasgen-provider-crds --version 0.21.0
+  oci://ghcr.io/krateo-platformops/charts/oasgen-provider-crds --version "$VERSION"
 
 # 2. The provider:
 helm install oasgen-provider \
   oci://ghcr.io/krateo-platformops/charts/oasgen-provider \
-  --version 0.21.0 --namespace krateo-system --create-namespace
+  --version "$VERSION" --namespace krateo-system --create-namespace
 ```
+
+**AND 0.21.0 IS BELOW THE ONE CREDENTIAL BOUNDARY THAT EXISTS** -- and a second, worse leak has no
+boundary at all, because it is **NOT FIXED IN ANY VERSION**. Both read off the server rather than from the
+log's prose:
+
+```
+0.26.1   FIXES the verbose dump leaking credentials. #214 is MERGED, and the docs already say
+         "the fix is in 0.26.1, NOT 0.26.0". It needs `krateo.io/connector-verbose`, which other
+         pages RECOMMEND -- so the flag a reader is told to turn on is the flag that leaked.
+
+0.57.0   REDACTS the vendor error-body snippet, at both construction sites. Measured per tag:
+         redactSnippet occurrences are 0 at 0.52.0/0.54.0/0.56.0 and 4 from 0.57.0 onward.
+         BELOW 0.57.0 the body reaches the log genuinely unredacted.
+
+#566     OPEN -- and still open for a reason that is NOT "no redaction".
+#567     OPEN -- same. The redaction is BY VALUE, and the value set holds secretRef-resolved
+         strings only (`builder.go:355`/`:409`, gated on `Resolver.Type == "secretRef"`).
+```
+
+**SO A CREDENTIAL THAT REACHED THE REQUEST ANY OTHER WAY IS NOT COVERED, AT ANY VERSION** -- an apiKey
+security-scheme header, for instance, is never resolved, so no string exists to match. The code concedes
+this itself in `clienttools.go`: *"No value-based redaction can reach them, because nothing ever resolved
+them (#566)."*
+
+**The emission path, since the snippet does still reach the log:** `logVendorBody`
+(`restResources.go:1211`) logs it at **Info**, from four call sites (`get`, `findby`, `create`, `update`),
+with no gate on verbosity, error class or content type beyond a 2 KiB cap -- and `main.go` sets
+`slog.LevelInfo` by default, with `-debug` only LOWERING it. **So Info is emitted on a default install**,
+and nothing redacts between `log.Info` and the platform's log store.
+
+**Which makes 0.57.0 a floor worth having and not a sufficient one.** For a secretRef-resolved credential
+it is the fix; for anything else the log store's retention is the bound.
+
+**NEVER DOWNGRADE `oasgen-provider-crds`, AND THIS BLOCK USED TO INSTRUCT IT.** It pinned `0.21.0` on
+both lines, which is far below the floor this repository documents and below every version any installer
+pins. Copying it onto an existing cluster would have attempted a downgrade of a **cluster-scoped
+singleton** that every KOG in that cluster shares.
+
+**What a downgrade costs, measured by `openstack-nova-operator-kog` between 0.52.0 and 0.74.0:**
+
+```
+0.52.0   224 field paths in the RestDefinition schema
+0.74.0   263
+present at 0.74.0 and absent at 0.52.0   39
+present at 0.52.0 and absent at 0.74.0    0    <- a clean superset, their negative control
+```
+
+**The 39 are not cosmetic.** The whole `verbsDescription[].correlation.observe.pagination` subtree (27
+paths, both strategies), `correlation.observe.responseTransform`, `fieldMapping[].resolver.when`, and four
+status fields including `status.schemaWarnings`. **A successful downgrade would silently prune every
+paginated observe declaration belonging to every other KOG on the cluster** -- a green `apply`, and then
+an observe that reads only the first page.
+
+**Whether such an apply SUCCEEDS is not established here.** On an installer-managed cluster the chart is
+installed by core-provider under its own Helm release, so a hand-run `helm upgrade --install
+oasgen-provider-crds` is a DIFFERENT release touching the same object, and Helm 3 refuses on ownership
+metadata rather than downgrading. **That is a reading of Helm's install path, not a measurement**, and the
+difference matters: a refusal is confusing but safe. **Do not rely on it.** Read the version you have
+before installing anything:
+
+```sh
+helm list -A | grep oasgen          # which release owns it, if any
+kubectl get crd restdefinitions.ogen.krateo.io \
+  -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}'
+```
+
+See [release.md](./release.md) for why the CRD release must never be renamed or replaced.
 
 For mirrored / air-gapped registries set `global.imageRegistry` (rewrites both the
 provider and RDC image registries — see [configuration.md](./configuration.md)).
