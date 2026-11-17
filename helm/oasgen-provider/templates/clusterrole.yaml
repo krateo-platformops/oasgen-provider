@@ -2,6 +2,8 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: {{ include "oasgen-provider.fullname" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "oasgen-provider.labels" . | nindent 4 }}
 rules:
 - apiGroups:
   - ogen.krateo.io
