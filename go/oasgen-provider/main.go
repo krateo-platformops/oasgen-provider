@@ -38,6 +38,11 @@ const (
 	defaultOtelExportInterval = 30 * time.Second
 )
 
+// telemetryShutdownTimeout bounds the OTLP flush that runs after the manager has stopped. It exists
+// because LeaderElectionReleaseOnCancel is set: the lease is gone by then, so a flush that blocked on an
+// unreachable collector would leave a process alive and unleased for as long as the exporter took.
+const telemetryShutdownTimeout = 5 * time.Second
+
 func main() {
 	envVarPrefix := fmt.Sprintf("%s_PROVIDER", strcase.UpperSnakeCase(providerName))
 
@@ -137,7 +142,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() {
-		if err := telemetryShutdown(context.Background()); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetryShutdownTimeout)
+		defer cancel()
+		if err := telemetryShutdown(shutdownCtx); err != nil {
 			logger.Error(err, "Cannot shutdown OpenTelemetry metrics")
 		}
 	}()
@@ -151,7 +158,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() {
-		if err := tracingShutdown(context.Background()); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetryShutdownTimeout)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
 			logger.Error(err, "Cannot shutdown OpenTelemetry tracing")
 		}
 	}()
@@ -165,6 +174,29 @@ func main() {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		LeaderElection:   *leaderElection,
 		LeaderElectionID: fmt.Sprintf("leader-election-%s-provider", strcase.KebabCase(providerName)),
+		// RELEASE THE LEASE ON A GRACEFUL STOP, so the next pod acquires immediately instead of waiting
+		// for the old lease to expire.
+		//
+		// Measured by github-provider-kog on a kind cluster, rolling 0.81.0 to 0.81.0: the new pod logged
+		// "Attempting to acquire leader lease" at 15:25:04.415 and "Successfully acquired" at 15:25:21.921
+		// -- 17.5 seconds, which is one LeaseDuration. Nothing was wrong: a single writer held the lease
+		// throughout. But EVERY rolling update spent ~15 seconds with no leader and therefore no
+		// reconciliation, and the fresh-install case acquires in 5 MILLISECONDS, so the gap is entirely
+		// the wait for an abandoned lease to time out.
+		//
+		// WHY THIS IS SAFE HERE, which is the precondition controller-runtime documents and the reason
+		// this is not simply a free win: with ReleaseOnCancel the binary must not keep writing after the
+		// manager stops, or a second writer can act while this one is still alive. `mgr.Start` is the last
+		// statement in main and it returns only once the manager has stopped its controllers, so by the
+		// time the lease is released this process has no reconcilers running. What remains is the
+		// telemetry flush in the deferred shutdowns below, which writes to an OTLP endpoint and never to
+		// the Kubernetes API.
+		//
+		// Those shutdowns are nevertheless BOUNDED (see telemetryShutdownTimeout) rather than left on
+		// context.Background(): an unbounded flush would keep the process alive for an unknown time after
+		// it had given up the lease, and "alive but not writing" is a claim that should not depend on a
+		// remote collector's responsiveness.
+		LeaderElectionReleaseOnCancel: true,
 		Cache: cache.Options{
 			SyncPeriod: syncPeriod,
 		},
