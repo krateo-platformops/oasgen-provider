@@ -80,7 +80,18 @@ func TestTheAuthzPredicateMatchesThroughTheDispatchWrapping(t *testing.T) {
 	}{
 		{http.StatusBadRequest, true, "400 is a malformed request: the vendor stored nothing"},
 		{http.StatusUnprocessableEntity, true, "422 is a semantic refusal: nothing stored"},
-		{http.StatusUnauthorized, false, "401 may be a rotation in flight, so the outcome is UNKNOWN"},
+		// 401 WAS false IN THIS TABLE WHEN IT WAS WRITTEN, AND TWO GREEN PRs MADE IT WRONG. This test
+		// (#792) and the 401 classification change (#793) were open at the same time; each passed CI
+		// against a main that did not contain the other, and merging both left main red on exactly this
+		// row. Neither review could have seen it, because neither diff mentions the other's file.
+		//
+		// The current behaviour is #793's and it is the right one: a 401 is refused at AUTHENTICATION,
+		// before any handler that could create, so nothing was stored and CreateNotCommitted lets the
+		// runtime retry directly. Leaving it unclassified sent it to an existence check that, for a kind
+		// which cannot answer existence, never answers -- stranding the resource and blocking its
+		// deletion.
+		{http.StatusUnauthorized, true, "401 is refused at authentication: nothing was created, so the " +
+			"runtime may retry the create directly rather than confirming a negative it cannot confirm"},
 		{http.StatusForbidden, false, "403 is handled earlier as a denial, so it must not be listed here"},
 		{http.StatusInternalServerError, false, "a 500 may have stored the resource before failing"},
 	} {
