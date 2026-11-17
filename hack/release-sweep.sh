@@ -61,6 +61,23 @@ echo "SWEEP $V: $n/5"
 #
 # Raised by the installer session, from the other direction: their chart probes verify that a chart
 # resolves and say nothing about the image it will pull.
+#
+# ====================================================================================================
+# THE PRECONDITION, AND IT IS NOT GENERAL. "appVersion must equal version" holds ONLY for a chart that
+# ships `image.tag: ""` and therefore falls back to appVersion. It is WRONG for:
+#   - a WRAPPER chart whose appVersion is deliberately the UPSTREAM app's version (the installer
+#     measured 2 of 20: kagent at 0.10.1, krateo-observability at 3.5.0 -- conventions, not defects);
+#   - a chart that pins `image.tag` EXPLICITLY, digest included, which is pinned harder than
+#     appVersion could ever be (their krateo-slo-rollup: `26.8-alpine@sha256:...`).
+# A check that flagged all three would be noise, and noise is how a gate gets ignored.
+#
+# So the precondition is ASSERTED below rather than assumed: `image.tag` must be empty in the
+# published chart. If it ever stops being empty, this check reports that instead of a mismatch.
+#
+# AND "no appVersion" DOES NOT IMPLY "no image". Their slo-rollup has a CronJob and no appVersion.
+# The imageless list below is therefore a list of THIS repo's charts, verified by file content
+# (0 templates containing `image:`, 0 Deployments), not an inference from a missing appVersion.
+# ====================================================================================================
 echo "CHART -> IMAGE LINK:"
 link_ok=1
 for c in "${CHARTS[@]}"; do
@@ -71,8 +88,14 @@ for c in "${CHARTS[@]}"; do
     # this list is stale -- which is a finding, not a pass.
     if [ -z "$av" ]; then printf "  %-38s no image, no appVersion (expected)\n" "$c"
     else printf "  %-38s appVersion=%s but this chart is listed as IMAGELESS -- the list is stale\n" "$c" "$av"; link_ok=0; fi
-  elif [ "$av" = "$V" ]; then printf "  %-38s appVersion=%s\n" "$c" "$av"
+  else
+  # Assert the precondition: this check is only meaningful while the chart falls back to appVersion.
+  tag=$(helm show values "oci://$REG/$c" --version "$V" 2>/dev/null | grep -E "^[[:space:]]*tag:" | head -1 | awk '{print $2}' | tr -d '"')
+  if [ -n "$tag" ]; then
+    printf "  %-38s image.tag=%s is EXPLICIT -- appVersion is not the image source, check void here\n" "$c" "$tag"
+  elif [ "$av" = "$V" ]; then printf "  %-38s appVersion=%s  (image.tag empty, so this is the image)\n" "$c" "$av"
   else printf "  %-38s appVersion=%s  MISMATCH, want %s\n" "$c" "${av:-<none>}" "$V"; link_ok=0; fi
+  fi
 done
 # The control: the OUTGOING chart must link to the OUTGOING version, or this check cannot fail.
 pav=$(helm show chart "oci://$REG/${CHARTS[0]}" --version "$PREV" 2>/dev/null | grep -E "^appVersion:" | awk '{print $2}')
