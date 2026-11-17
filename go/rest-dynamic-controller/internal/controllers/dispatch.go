@@ -14,6 +14,7 @@ package restResources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -360,6 +361,21 @@ func (h *handler) observeDispatch(ctx context.Context, mg *unstructured.Unstruct
 // up in the collection, and that is the only evidence that the invocation happened. A dispatch that
 // returns 204 with an empty body gives this call nothing else to verify against, which is the entire
 // premise of the verb.
+// errDispatchReachedTheVendor marks a createDispatch error that happened AFTER the request went out, so
+// the caller can report the create as REQUESTED. Every other error from that function is pre-send and
+// nothing was dispatched.
+//
+// THE CALLER CANNOT WORK THIS OUT FROM THE ERROR'S CONTENT. A pre-send failure and a connection dropped
+// mid-flight both arrive with no status code, and `externalStatusCode` returns 0 for each -- so
+// classifying by code would report a lost answer as "nothing was sent", which is exactly the defect this
+// fixes (issue 776, measured by the acmp session: a fake that stores the object and then answers 500
+// produced SIX dispatches of one CR).
+//
+// It is a sentinel rather than an extra return value for the same reason the pending-referent wait is
+// (issue 718): the discriminator is the error's IDENTITY, and `errors.Is` carries it through any wrapping
+// the message needs.
+var errDispatchReachedTheVendor = errors.New("the dispatch request was sent to the vendor")
+
 func (h *handler) createDispatch(ctx context.Context, mg *unstructured.Unstructured, cs *clientSet, cli restclient.UnstructuredClientInterface, httpCli *http.Client, clientInfo *getter.Info, log logging.Logger) (bool, error) {
 	verb := dispatchVerb(clientInfo)
 	if verb == nil {
@@ -423,7 +439,9 @@ func (h *handler) createDispatch(ctx context.Context, mg *unstructured.Unstructu
 
 	log.Debug("Dispatching", "method", callInfo.Method, "path", callInfo.Path, "token", token)
 	if _, err := apiCall(ctx, httpCli, callInfo.Path, conf); err != nil {
-		return true, err
+		// POST-SEND: the request went out. Whatever came back -- a 500, a 4xx, a dropped socket -- the
+		// vendor may hold the object, so this must not be reported as "nothing was requested".
+		return true, fmt.Errorf("%w: %w", errDispatchReachedTheVendor, err)
 	}
 	// Record the token ONLY now, after the POST succeeded. This is what Observe reads to refuse a second
 	// dispatch for the same token; writing it before the call would strand a resource whose dispatch never
@@ -432,7 +450,10 @@ func (h *handler) createDispatch(ctx context.Context, mg *unstructured.Unstructu
 		annotationDispatchedToken:       token,
 		annotationDispatchObserveMisses: nil,
 	}); err != nil {
-		return true, fmt.Errorf("recording the dispatched correlation token (the dispatch itself succeeded): %w", err)
+		// POST-SEND, and its own message already says so: the dispatch succeeded and only the token
+		// record failed. Reporting this as not-requested would re-dispatch a vendor call that landed.
+		return true, fmt.Errorf("%w: recording the dispatched correlation token (the dispatch itself succeeded): %w",
+			errDispatchReachedTheVendor, err)
 	}
 	h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Dispatch", fmt.Sprintf("Dispatched %s %s for: %s (correlation token %s)", callInfo.Method, callInfo.Path, mg.GetName(), token)))
 	return true, nil

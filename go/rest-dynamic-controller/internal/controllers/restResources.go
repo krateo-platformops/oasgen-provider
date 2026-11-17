@@ -1628,6 +1628,28 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		if derr != nil {
 			log.Error(derr, "Dispatching")
 			h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Dispatch", derr))
+
+			// A DISPATCH THAT REACHED THE VENDOR IS A REQUESTED CREATE (#776). This block used to return
+			// the ZERO CreateResult for every dispatch error, so Requested was false even when the
+			// request had gone out and the vendor had stored the object. The runtime then read
+			// "nothing was sent", skipped the existence-confirm gate, and re-entered Create: the acmp
+			// session measured SIX dispatches of one CR against a fake that stores and then answers 500,
+			// with external-create-failed stamped at the same instant as external-create-pending on
+			// every attempt.
+			//
+			// MIRRORS THE ORDINARY CREATE PATH rather than inventing a second policy: post-send is
+			// always Requested: true, and createRefusedWithoutCreating only decides whether the runtime
+			// may retry DIRECTLY instead of confirming the negative with an existence check first.
+			if errors.Is(derr, errDispatchReachedTheVendor) {
+				if code := externalStatusCode(nil, derr); createRefusedWithoutCreating(code) {
+					log.Debug("Classifying the dispatch error as definitely-not-committed, so the runtime "+
+						"retries directly instead of confirming the negative first", "status", code)
+					return controller.CreateResult{Requested: true}, controller.CreateNotCommitted(derr)
+				}
+				return controller.CreateResult{Requested: true}, derr
+			}
+			// PRE-SEND: no dispatch verb usable, a resolver that could not resolve, a call configuration
+			// that would not build. Nothing went out, so Requested stays false.
 			return controller.CreateResult{}, derr
 		}
 		// Creating, not Available: the invocation is not confirmed until the next Observe finds the token
