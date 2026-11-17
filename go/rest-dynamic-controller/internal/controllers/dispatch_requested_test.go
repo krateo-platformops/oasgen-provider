@@ -140,6 +140,22 @@ func TestTheDispatchCallerClassifiesBeforeClaimingNothingWasSent(t *testing.T) {
 			"(issue 776)", zero, sent)
 	}
 
+	// AUTHORIZATION DENIED MUST BE TESTED FIRST (#783). After #776 gave this block a Requested: true
+	// path, a 401/403 landed there and held the CR at CreateOutcomeUnknown -- waiting for a human on a
+	// rotated credential, which is an ordinary operational event with a real recovery. The ordinary
+	// create path has handled it ahead of classification all along.
+	authz := strings.Index(block, "restclient.IsAuthorizationDenied(derr)")
+	if authz < 0 {
+		t.Fatal("the dispatch block does not test restclient.IsAuthorizationDenied. A 401 or 403 is then " +
+			"classified as a create that may have landed, and the CR waits for a human instead of for a " +
+			"credential rotation (issue 783)")
+	}
+	if authz > sent {
+		t.Errorf("the dispatch block classifies the send (offset %d) BEFORE it tests authorization denial "+
+			"(offset %d). A 401/403 reaches the Requested: true path and holds at CreateOutcomeUnknown",
+			sent, authz)
+	}
+
 	// Post-send must mirror the ordinary create path rather than invent a second policy.
 	if !strings.Contains(block, "controller.CreateResult{Requested: true}") {
 		t.Error("the dispatch block never returns Requested: true. A dispatch that reached the vendor is a " +

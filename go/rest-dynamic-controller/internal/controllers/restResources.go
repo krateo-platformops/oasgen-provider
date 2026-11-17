@@ -1640,6 +1640,26 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			// MIRRORS THE ORDINARY CREATE PATH rather than inventing a second policy: post-send is
 			// always Requested: true, and createRefusedWithoutCreating only decides whether the runtime
 			// may retry DIRECTLY instead of confirming the negative with an existence check first.
+			// AUTHORIZATION DENIED IS HANDLED FIRST, exactly as the ordinary create path handles it
+			// before any classification (#783). The dispatch block had no such branch, so after #776
+			// gave it a Requested: true path a 401 or 403 landed there and held the CR at
+			// CreateOutcomeUnknown -- waiting for a human on what is an ordinary operational event, a
+			// rotated or expired credential.
+			//
+			// AND THE FIX IS NOT ADDING 401/403 TO createRefusedWithoutCreating, which is deliberately a
+			// short list: that function's own comment says 403 would be dead code there, because the
+			// ordinary path never reaches it with one. The gap was the MISSING EARLIER BRANCH, not the
+			// list.
+			//
+			// createAuthorizationDeniedResult returns Requested: false with BOTH condition halves and NO
+			// error, so the runtime retries nothing and the CR says what is wrong. Rotating the
+			// credential makes the next pass file the request -- which is the recovery an operator
+			// actually has. Identity rotation is a secret manager's job, so this controller only has to
+			// tolerate it.
+			if restclient.IsAuthorizationDenied(derr) {
+				return h.createAuthorizationDeniedResult(mg, "dispatch", derr, log), nil
+			}
+
 			if errors.Is(derr, errDispatchReachedTheVendor) {
 				if code := externalStatusCode(nil, derr); createRefusedWithoutCreating(code) {
 					log.Debug("Classifying the dispatch error as definitely-not-committed, so the runtime "+
