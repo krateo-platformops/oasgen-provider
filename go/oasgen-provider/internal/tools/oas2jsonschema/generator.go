@@ -102,6 +102,11 @@ func (g *OASSchemaGenerator) Generate() (*GenerationResult, error) {
 	// per action rather than the fact.
 	generationWarnings = append(generationWarnings, g.warnConfigurationFieldsUnresolved()...)
 
+	// A parameter declared `required: true` whose only value source is an OAS `default`. Accepted at
+	// generation today and then fails EVERY call, because rest-dynamic-controller enforces `required` at
+	// request construction and never consults `default` (#305).
+	generationWarnings = append(generationWarnings, g.warnRequiredParameterWithUnreachableDefault()...)
+
 	// An identifier the findby response does not carry. Unlike the policy warning above this one is
 	// emitted for EVERY kind declaring findby, because matching is not conditional on the absence of a
 	// create verb -- which is exactly the guard that made the existing resolvability warning unreachable

@@ -1,0 +1,40 @@
+openapi: 3.0.3
+info: { title: nova-keypairs-cut-down, version: "1.0" }
+paths:
+  /os-keypairs:
+    parameters:
+      - name: X-OpenStack-Nova-API-Version
+        in: header
+        required: true
+        schema:
+          type: string
+          default: "2.2"
+    post:
+      operationId: createKeypair
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                public_key: { type: string }
+      responses:
+        "200": { description: created }
+  /os-keypairs/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+      - name: X-OpenStack-Nova-API-Version
+        in: header
+        required: true
+        schema:
+          type: string
+          default: "2.2"
+    get:
+      operationId: getKeypair
+      responses:
+        "200": { description: ok }
