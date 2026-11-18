@@ -10,16 +10,44 @@ rules:
   # permission a generated controller needed was cluster-scoped and lived in the ClusterRole. This is what
   # the empty shell was for.
   #
-  # resourceNames PINS IT TO THIS CONTROLLER'S OWN LEASE, which is the point: a blanket leases grant would
-  # let any generated controller take any other's Lease, and the whole mechanism is about one writer per
-  # Kind x version. The name is this Role's own name, which is also what main.go computes -- one agreement,
-  # two sides, asserted by TestTheLeaseNameMatchesTheGeneratedRole.
+  # THE PINNING LIVES IN THE SECOND RULE, not in both. resourceNames on get/update is what stops a
+  # generated controller taking another's Lease, and that is the whole mechanism: one writer per
+  # Kind x version. The create rule below cannot carry it (see the next block), so the grant is
+  # "may create a Lease nobody holds, in its own namespace" -- which cannot take anything over, because
+  # taking over needs get + update on an existing name and those stay pinned.
+  #
+  # THE LEASE NAME IS THIS ROLE'S OWN NAME, and since #806 the provider PASSES it to the controller as
+  # `-lease-name` rather than the controller deriving it. There is one derivation, in
+  # deploy.generatedRBACName, and this template renders from the same three values -- so the earlier
+  # failure mode (two derivations agreeing in wording and disagreeing in value) cannot recur.
   #
   # NO `delete`: controller-runtime releases a Lease by clearing its holder, not by deleting the object, so
-  # delete would be a permission nothing uses. `create` is needed for first acquisition, `get`/`update` for
-  # renewal, and `watch` is what the lease lock uses to notice a change rather than polling.
+  # delete would be a permission nothing uses. `create` is first acquisition and `get`/`update` are renewal.
+  # TWO RULES, BECAUSE RBAC CANNOT AUTHORIZE `create` BY resourceNames.
+  #
+  # The object's name for a create is in the REQUEST BODY, not in the authorization attributes, so the
+  # authorizer has nothing to match a resourceNames list against. A rule carrying both `create` and
+  # `resourceNames` grants NO create at all -- silently, because the rule is valid and admission accepts it.
+  #
+  # That was shipped: one rule with resourceNames and verbs [get, watch, create, update], whose own comment
+  # said "`create` is needed for first acquisition". Both true, and together they do not work. On a fresh
+  # install the Lease does not exist, so controller-runtime's LeaseLock does Get-then-CREATE
+  # (client-go tools/leaderelection/resourcelock/leaselock.go:42 and :57), the create is denied, and
+  # controller-runtime EXITS -- every generated controller in a crash loop.
+  #
+  # PREDICTED BY github-provider-kog FROM READING THE SHIPPED ASSET, before any cluster ran it.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  # THE PINNING THAT MATTERS SURVIVES, and it is this rule rather than the one above. A controller may
+  # create a Lease under any name in its own namespace, but it CANNOT TAKE OVER another controller's: that
+  # needs get + update on that name, and those stay pinned. So the widening is bounded to "can create a
+  # Lease nobody is holding", in a namespace it already runs in.
+  #
+  # `watch` is dropped rather than moved. With resourceNames it only works alongside a metadata.name field
+  # selector, and LeaseLock does get/create/update only -- so it granted nothing and implied something.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     resourceNames:
       - {{`{{ .resource }}`}}-{{`{{ .apiGroup }}`}}-{{`{{ .apiVersion }}`}}
-    verbs: ["get", "watch", "create", "update"]
+    verbs: ["get", "update"]
