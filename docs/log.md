@@ -26,6 +26,70 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-18 — 0.83.1
+
+**0.83.0 was tagged and published nothing, so this is that release with the defect that swallowed it
+fixed.** No image, no chart, behind a run whose conclusion was `SUCCESS`.
+
+**Everything in the 0.83.0 section below is in this release**, unchanged and validated on
+`0.83.0-rc2` — whose code is this code. This section adds only what made 0.83.0 empty.
+
+### A guard with a job-level `if` skipped the release it was added to protect
+
+```
+release-tag  conclusion: SUCCESS
+  success  test / ... (5 jobs)
+  skipped  guard-prerelease-tag    <- if: github.event_name == 'workflow_dispatch'
+  skipped  build                   <- needs: [test, guard-prerelease-tag]
+release-oci  SKIPPED               <- same shape, so no chart either
+```
+
+**A skipped `needs` dependency skips the dependent job.** No error, no failed check, a tick on both
+summaries. **The run is green because every job that ran passed, and the one that publishes did not run.**
+
+**The guard is #807's**, added so a `workflow_dispatch` cannot mint a plain `X.Y.Z` behind the tag's back.
+Its `if` restricted it to dispatches — which is correct for the guard and fatal for everything that needs
+it.
+
+Fixed by removing the job-level `if` from both guards and moving the condition **inside the step**: the job
+always runs and exits 0 on anything other than a dispatch, so the dependent job has a dependency that
+always resolves.
+
+> `Why not the obvious fix` — `if: always() && (needs.guard.result == 'success' || == 'skipped')` on each
+> dependent works, and **moves the trap one level out**: every future `needs` on these guards must carry
+> the same incantation, and forgetting it reproduces this failure silently, in a release. **Removing the
+> skip is the version that cannot be forgotten.**
+
+> `How it shipped` — **I proved the guard REFUSES on the dispatch path, in situ, with a deliberate red
+> run. I proved the dispatch path PUBLISHES, twice, with rc1 and rc2 and registry probes. I never ran the
+> TAG path with the `needs` in place.** Both halves tested and the combination not. **And #807's own PR
+> records that this very `needs:` edit had failed silently once** and that I caught it by parsing the
+> result rather than reading the diff — so I fixed its presence and never asked what it did on the path I
+> had not exercised.
+
+> `The only reading that could see it` — **a registry probe.** Run conclusion, check count and failure
+> count all said the release succeeded. **"Tagged" is not "released"**, and this is the artifact-level form
+> of the lesson the 0.83.0 section records about health signals: a consumer independently added a
+> pull-it-back-out probe to their own release workflow on the strength of this, having previously done that
+> check by hand.
+
+### 0.83.0 is retracted rather than re-pushed
+
+**A tag-push run uses the workflow file at the tag's own commit**, so re-pushing `0.83.0` at its original
+SHA would skip again — the tag would have to move past the fix. **A moved tag is what breaks caches,
+mirrors and anyone who already fetched**, and a published GitHub Release existed for it. So nothing is
+rewritten: `0.83.0` stays as it is, names no artifacts, and is listed in `retracted-versions.yaml` with
+`use: 0.83.1`.
+
+**That entry lands AFTER this release is published**, because the file's own rule is that `use:` must
+already exist — *"an entry whose replacement is unpublished tells a pinning session to stop without telling
+it where to go."*
+
+**The entry is unusual and says so: `retracted-versions.yaml` is about PUBLISHED versions that must not be
+pinned, and 0.83.0 cannot be pulled at all.** A pin to it fails loudly rather than silently. It is listed
+because a human or a version-line check reading `git tag` sees `0.83.0` as the latest release, and the
+resulting pull failure looks like a registry fault rather than a version that never existed.
+
 ## 2026-11-18 — 0.83.0
 
 **Ownership for every generated controller, and three attempts to get its RBAC right.** The first shipped a
@@ -35,17 +99,143 @@ it breaks reports healthy on every signal an operator has.
 
 ### Every generated controller holds a Lease for its Kind × version (issue 771, half two)
 
-Without it **every replica of a generated controller reconciles every CR of its Kind**, and two writers
-against one vendor is a duplicate create. The provider's own manager has had leader election since 0.81.0;
-this is the other half.
+Without it **every replica of a generated controller reconciles every CR of its Kind.** The provider's own
+manager has had leader election since 0.81.0; this is the other half.
+
+> `Correction to this entry's justification (2026-11-18)` — **it said "two writers against one vendor is a
+> duplicate create". For a single CR on the CREATE path that appears to be false, and the reason is a guard
+> that was already there.** `external-create-pending` is stamped and **persisted** before the create
+> (`worker.go:1361`, a `tools.Update` that sends the object whole and so carries its `resourceVersion`), and
+> `worker.go:688` gates the create path on `ExternalCreateIncomplete`. So:
+>
+> ```
+> A and B both read the CR at rv=N, neither sees pending
+> A stamps pending, Updates at rv=N   -> succeeds, rv becomes N+1
+> A calls the vendor create
+> B stamps pending, Updates at rv=N   -> 409 Conflict (stale resourceVersion)
+> B logs errUpdateManaged, patches conditions, and RETURNS -- it never creates
+> ```
+>
+> **Optimistic concurrency is the serialisation point, and it is not ONE write.** The create path performs
+> several Updates to the CR before it ever calls the vendor, so a second writer loses at the FIRST of them
+> and which one fires is incidental:
+>
+> ```
+> worker.go:901    the finalizer add        <- what a consumer actually measured
+> worker.go:1361   the pending stamp        <- what this trace predicted
+> ```
+>
+> **Their losing pod failed at the finalizer add and never reached the pending stamp at all:**
+>
+> ```
+> ERROR "Cannot add finalizer" name=i1
+>   Operation cannot be fulfilled on issues.github.krateo.io "i1": the object has been modified;
+>   please apply your changes to the latest version and try again
+> ```
+>
+> **So the prediction held and the point I named was one step too late**, which is the better answer: the
+> guard is not a particular line, it is that **every write to the CR before the vendor call is
+> resourceVersion-checked.** Informer staleness widens the read window and makes the conflict MORE likely,
+> not less.
+>
+> **AND THERE IS A SECOND GUARD, AFTER the create, WHICH IS CODE I WROTE AND DID NOT MENTION.** When the
+> create succeeds and the STATUS WRITE then conflicts, `handler.createReachedTheVendor`
+> (`internal/controllers/restResources.go:1502`) returns `CreateResult{Requested: true}, nil`:
+>
+> ```go
+> log.Error(werr, "The create reached the vendor but its status write failed; reporting the create as "+
+>     "requested so it is not retried. Status will be repopulated by the next observe", ...)
+> return controller.CreateResult{Requested: true}, nil
+> ```
+>
+> **`Requested: true` with a nil error makes `worker.go:1446`'s `createCommittedNot(actionErr) ||
+> !created.Requested` false**, so the create is not marked failed and is not retried. **A conflict after
+> the create does not re-create.**
+>
+> **So the create path is guarded twice, at different points, for different reasons:**
+>
+> ```
+> BEFORE   every Update to the CR is resourceVersion-checked -- the finalizer add (:901), the
+>          pending stamp (:1361) -- so a second writer loses at the FIRST of them
+> AFTER    createReachedTheVendor reports the create as requested, so a lost status write does
+>          not look like a create that never happened
+> ```
+>
+> **Status of the claim: 10 measured CRs with complete logs, plus the code.** A consumer ran two permanent
+> replicas against **10 CRs applied in one go**, with log capture fixed so neither stream truncated:
+>
+> ```
+> 10 CRs -> 10 vendor objects, 0 titles with 2 or more.  POSTs by pod: 5 and 5.
+> conflicts, by pod and CR:  "Cannot add finalizer"  i1-1 i1-2 i1-3 i1-5 i1-6 i1-7
+>                            status-write conflict    i1-4 i1-6
+> i1-6 shows BOTH in one CR: one replica lost at the finalizer, the other created and then lost
+> its status write, and the vendor still shows one issue.
+> ```
+>
+> **They reported the arm as INCONCLUSIVE by its own rule** — it was built as a #800 control and cannot
+> fire as one — **and as corroboration of the concurrency guard, which is the question it can answer.**
+> **A title with two issues would have falsified this outright**, which is what makes 10/10 worth more than
+> the first run's 1/1.
+>
+> **What two writers DO still cause, and what the Lease is for:** duplicated vendor reads on every CR and
+> every resync, competing status writes, wasted vendor traffic proportional to replica count, and **the
+> paths that do not stamp pending first — update and delete.** That last one is where a multi-writer test
+> can still fail, and it is a different experiment from this entry's original claim.
 
 The Lease is namespaced, named for the Kind × version, and held by the pod. **The pod's identity comes from
 the downward API** (`fieldRef metadata.name` / `metadata.namespace`) rather than from a template, because
 the pod's actual namespace cannot drift from where the pod runs and a templated guess can.
 
-> `What is verified, and what is not (2026-11-18)` — **the duplicate-create prevention itself is argued
-> from the mechanism, not measured**, and the supporting evidence is thinner than a first count of it
-> suggests. Per install, on the fixed version:
+> `MEASURED, and the original claim was wrong (2026-11-18)` — **this entry first said "two writers against
+> one vendor is a duplicate create". That is false, and the Lease's real effect is something else that is
+> now measured directly.** A consumer ran the same 10 CRs through two permanent replicas twice, changing
+> only whether ownership was on:
+>
+> ```
+>                     NO LEASE            WITH LEASE
+> POSTs by replica    5 / 5               10 / 0        <- single writer
+> vendor objects      10 for 10           10 for 10     <- identical, 0 doubled in BOTH arms
+> conflicts           8 "object modified" 0             <- the waiter never reconciled
+> ```
+>
+> **So "no duplicates" is not what the Lease buys** — the concurrency guards below deliver that with or
+> without it. **What the Lease buys is single-writer behaviour and the absence of conflict churn: 10/0
+> against 5/5, measured.** Without it both replicas reconcile every CR, compete, and burn conflicts and
+> retries until one wins each.
+>
+> **And it holds across a roll:** `kubectl rollout restart` of a generated controller moved the holder
+> from the old pod to the new one with **one holder throughout** (1 s, then 179 s), the Deployment went up
+> **exactly one revision** — so the `restartedAt` preservation hook did its job and there was no second
+> roll — and a CR applied afterwards was POSTed by the **new holder**, with zero POSTs from the non-holder.
+>
+> **Why the original claim was wrong is worth as much as the correction.** The create path is guarded
+> twice, independently of ownership, and both guards were already there:
+>
+> ```
+> BEFORE the create   every Update to the CR is resourceVersion-checked -- the finalizer add
+>                     (worker.go:901), the pending stamp (:1361) -- so a second writer loses at
+>                     the FIRST of them and never reaches the vendor. 8 such conflicts measured.
+> AFTER the create    handler.createReachedTheVendor (restResources.go:1502) returns
+>                     CreateResult{Requested: true}, nil when the create succeeded and the STATUS
+>                     write then conflicted, which makes worker.go:1446's
+>                     `createCommittedNot(actionErr) || !created.Requested` false. So a lost status
+>                     write is not mistaken for a create that never happened. 2 of 10 CRs hit this.
+> ```
+>
+> **One CR, `i1-6`, shows both in a single reconcile:** one replica lost at the finalizer, the other
+> created and then lost its status write, and the vendor still shows one object. **That row is what rules
+> out "the two guards are the same guard seen twice"**, which the aggregate cannot.
+>
+> **The second guard is code I wrote, named after what it does, and I omitted it from my own first trace of
+> the mechanism.** The first trace also named the pending stamp as the serialisation point; the measured
+> conflicts landed on the finalizer add, one step earlier. **Three corrections to this note, each from a
+> measurement rather than a re-reading.**
+>
+> **What a title with two issues would have meant:** the guards refuted outright. That is what makes 10/10
+> in both arms a result and not a demonstration — and it is why the first run's 1/1 was reported as
+> INCONCLUSIVE by its own author rather than as a pass.
+>
+> **Per-install readings on the fixed version**, for the rest of the feature:
 >
 > ```
 > Role shape, two rules        3 installs, read from the live object
