@@ -1141,7 +1141,28 @@ type Resource struct {
 	// +optional
 	CompareScope string `json:"compareScope,omitempty"`
 	// ConfigurationFields: the list of fields to use as configuration fields
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="ConfigurationFields are immutable, you cannot change them once the CRD has been generated"
+	// MUTABLE since this change, on the principle #666 settled: gate on DATA LOSS, not on symmetry.
+	//
+	//	ADD     a spec property is pruned; whatever live CRs hold there goes with it, irreversibly
+	//	        -> DESTRUCTIVE, and warned about by name before the apply
+	//	REMOVE  the property comes back -> ADDITIVE; nothing is ever lost -> no gate
+	//
+	// This field had the SAME shape as excludedSpecFields and was named in #666's own symptom list with
+	// the identical error message -- that issue documented two frozen fields and unfroze one. Adding an
+	// entry calls removeConfiguredFields from the SPEC builder, so the property is pruned exactly as an
+	// exclusion prunes it; removing one lets it return.
+	//
+	// NOT append-only, for the same reason excludedSpecFields is not: removals lose nothing, so there is
+	// nothing for a gate to protect. And it is the REMOVAL that a consumer needs in the case that
+	// motivated #666 -- a credential sitting in a CR spec, where the remedy is to move it into the
+	// Configuration CR and the author has to be able to change their mind afterwards.
+	//
+	// WHY identifiers IS STILL IMMUTABLE and this is not, since they sit two fields apart: both of that
+	// field's directions lose something. Adding an identifier under `AND` makes matching STRICTER, so a
+	// CR that matched its external object can stop matching and be orphaned or re-created; removing one
+	// makes it LOOSER, which is #444's measured case -- a CR adopted a different object on a shared
+	// non-unique field, reported Synced=True, and then deleted it. The principle keeps that field frozen
+	// and frees this one; it is not an inconsistency.
 	// +optional
 	ConfigurationFields []ConfigurationField `json:"configurationFields,omitempty"`
 	// ExcludedSpecFields: the list of fields to exclude from the spec of the generated CRD (for example
