@@ -677,7 +677,33 @@ type VerbsDescription struct {
 	// +optional
 	IdentifiersMatchPolicy string `json:"identifiersMatchPolicy,omitempty"`
 	// Pagination defines the pagination strategy for 'findby' actions. To be set only for 'findby' actions.
-	// If not set, no pagination will be used.
+	// ABSENT MEANS A SINGLE PAGE, AND THAT IS A CORRECTNESS SETTING RATHER THAN A SCALE ONE. The same
+	// statement is on correlation.observe.pagination and it was missing here, which is the asymmetry that
+	// cost a consumer an investigation: "no pagination will be used" reads as a performance note.
+	//
+	// What it actually means: findby issues ONE request and matches within that response
+	// (restclient.go refuses a nil paginator and calls CallFindBySingle). A resource that exists but falls
+	// beyond the vendor's default page is reported as NOT FOUND -- and on a findby that is worse than the
+	// dispatch case, because the listing succeeded. "Listed, nothing matched" is a SYNTHESISED not-found,
+	// the create then stamps krateo.io/external-create-pending, and recovery asks the same findby, which
+	// answers the same way. The CR latches at CreateOutcomeUnknown and needs a human (issue 818).
+	//
+	// MEASURED: a realm with 105 users, where the vendor's default page is 100. A managed user sorting
+	// after the page boundary was created at the vendor exactly once, reported absent, and stuck;
+	// the control sorting first was Ready. No duplicate -- the resource exists and the CR cannot see it.
+	//
+	// DECLARING PAGINATION IS NOT USUALLY THE RIGHT FIX. Narrowing the listing is: if the operation
+	// accepts a query parameter that identifies the resource, declare it and the response is 0 or 1 items
+	// regardless of collection size. Walking 100 items to find one is a worse answer than asking for one,
+	// and it stays correct when the collection reaches 10,000. Pagination is for collections that cannot
+	// be narrowed.
+	//
+	// AND A NARROWING PARAMETER MUST BE EXACT. A substring filter returns several items, which issue 444
+	// made a REFUSAL rather than an adoption of the first -- so a findby narrowed by a prefix match works
+	// until two resources share that prefix, and then stops working. Where the vendor offers an
+	// exact-match flag, send it as a constant through the Configuration CR's configurationFields rather
+	// than as a spec field: configurationFields wins over a spec field of the same name, so the behaviour
+	// cannot be switched off per resource.
 	// +optional
 	Pagination *Pagination `json:"pagination,omitempty"`
 	// ItemsPath names the property holding the collection, for a 'findby' whose response is an ENVELOPE
