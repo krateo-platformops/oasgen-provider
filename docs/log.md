@@ -116,14 +116,32 @@ manager has had leader election since 0.81.0; this is the other half.
 > B logs errUpdateManaged, patches conditions, and RETURNS -- it never creates
 > ```
 >
-> **Optimistic concurrency on the pending write is the serialisation point**, and informer staleness widens
-> the read window while making the conflict MORE likely, not less.
+> **Optimistic concurrency is the serialisation point, and it is not ONE write.** The create path performs
+> several Updates to the CR before it ever calls the vendor, so a second writer loses at the FIRST of them
+> and which one fires is incidental:
 >
-> **This is a code reading, not a measurement**, and it is held to the same standard as everything else
-> here. What produced it: a consumer built the multi-writer test with two permanent replicas, reported the
-> control as **INCONCLUSIVE** when one CR gave one vendor object, and declined to offer a mechanism. The
-> trace above is the mechanism, and it predicts the loser logs a conflict — checkable in the capture they
-> already hold.
+> ```
+> worker.go:901    the finalizer add        <- what a consumer actually measured
+> worker.go:1361   the pending stamp        <- what this trace predicted
+> ```
+>
+> **Their losing pod failed at the finalizer add and never reached the pending stamp at all:**
+>
+> ```
+> ERROR "Cannot add finalizer" name=i1
+>   Operation cannot be fulfilled on issues.github.krateo.io "i1": the object has been modified;
+>   please apply your changes to the latest version and try again
+> ```
+>
+> **So the prediction held and the point I named was one step too late**, which is the better answer: the
+> guard is not a particular line, it is that **every write to the CR before the vendor call is
+> resourceVersion-checked.** Informer staleness widens the read window and makes the conflict MORE likely,
+> not less.
+>
+> **Status of the claim: one measured sample plus a code reading.** What produced it: a consumer built the
+> multi-writer test with two permanent replicas, reported the control as **INCONCLUSIVE** when one CR gave
+> one vendor object, and declined to offer a mechanism. The trace predicted the loser would log a conflict;
+> they found it in a capture they already held, at a different line than predicted.
 >
 > **What two writers DO still cause, and what the Lease is for:** duplicated vendor reads on every CR and
 > every resync, competing status writes, wasted vendor traffic proportional to replica count, and **the
