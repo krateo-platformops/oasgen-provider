@@ -35,11 +35,11 @@ paths:
 // The original tests called ApplyVendorRequiredDefaults directly and then ValidateRequest, and both
 // passed. Neither went through Call, where the order turned out to be:
 //
-//	1. refuse if a path parameter is unresolved      <- returned first
-//	2. buildPath(..., opts.Parameters, opts.Query)    <- the URI, INCLUDING the query string
-//	   ...
-//	3. ApplyVendorRequiredDefaults                    <- too late for both
-//	4. ValidateRequest                                <- read the map and PASSED
+//  1. refuse if a path parameter is unresolved      <- returned first
+//  2. buildPath(..., opts.Parameters, opts.Query)    <- the URI, INCLUDING the query string
+//     ...
+//  3. ApplyVendorRequiredDefaults                    <- too late for both
+//  4. ValidateRequest                                <- read the map and PASSED
 //
 // So a query default was filled after the URI was built: the request went out without it while validation
 // reported it valid. That is worse than never filling it, because the loud refusal was replaced by a
