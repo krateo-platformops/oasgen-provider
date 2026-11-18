@@ -52,17 +52,28 @@ the pod's actual namespace cannot drift from where the pod runs and a templated 
 > -lease-name given == Role    3 installs, across THREE observed versions (v1, v2-1, v2022-11-28)
 >                              -- so the name is not a function of the version, and no derivation
 >                              from the version is safe
-> the LEASE OBJECT itself      1 install. Existing, named as the Role, holder a named RDC pod.
->                              A second read the Role and the one-shot acquisition line and never
->                              queried a Lease at all.
+> the LEASE OBJECT itself      3 installs, from the object: it exists, and its holder is the
+>                              controller's own pod. 6 of 6, 13 of 13, and one named pod.
 > exactly ONE vendor create    1 install, the count read from the VENDOR rather than from the
 >                              controller's own report
+> CR-level consequence         1 install: 0 of 6 chart CRs carried conditions on the broken
+>                              version, 6 of 6 on the fixed one, over IDENTICAL state -- the only
+>                              run that moved one variable on one cluster
 > ```
 >
-> **I wrote "four independent installs confirm ... held by the right pod" and that was wrong**: I had
-> asserted, as established, a capability of a consumer's harness that it did not have. They checked and
-> told me. **A count of installs is not a count of readings, and the same install can be solid at the Role
-> level and silent at the Lease level.**
+> **AND THE LEASE NAME FOLLOWS THE PLURAL RESOURCE, NOT THE CONTROLLER NAME.** A consumer's
+> `nova-server-controller` holds `instances-nova.openstack.krateo.io-v1alpha1`, because their `server`
+> document generates the `Instance` kind. **So a check written as "derive the Lease name from the
+> controller name" passes for five of their six kinds and finds nothing for the sixth** — which is the
+> version a reasonable person writes first, and the worst possible outcome for a check. **Together with the
+> three-version table that is two independent reasons the name must be read from the Deployment's own
+> `-lease-name` argument and never derived:** it is not a function of the API version, and not a function of
+> the controller name either.
+>
+> **I first wrote "four independent installs confirm ... held by the right pod" and that was wrong**: I had
+> asserted, as established, a capability of a consumer's harness that it did not have. They checked, told
+> me, and then re-ran to supply the reading. **A count of installs is not a count of readings, and the same
+> install can be solid at the Role level and silent at the Lease level.** The numbers above are readings.
 >
 > **What no run has exercised is a roll of a GENERATED controller**, which is the case the feature exists
 > for. One consumer's roll arm rolls the **provider manager** and deliberately asserts that the generated
