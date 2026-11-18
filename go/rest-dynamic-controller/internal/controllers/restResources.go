@@ -1,6 +1,7 @@
 package restResources
 
 import (
+	"time"
 	"context"
 	"errors"
 	"fmt"
@@ -106,6 +107,10 @@ func NewHandler(cfg *rest.Config, log logging.Logger, swg getter.Getter, plurali
 		// when an API-backed recorder is not wired in (e.g. in tests). main.go
 		// injects the real recorder via SetEventRecorder.
 		eventRecorder: event.NewNopRecorder(),
+		// Defaulted here rather than left zero, because zero DISABLES the report: a handler built by a
+		// test or by a caller that never calls the setter would otherwise have the feature silently off,
+		// and nothing -- not the build, not the unit tests -- would say so.
+		createRefusalReportAfter: DefaultCreateRefusalReportAfter,
 	}
 }
 
@@ -116,6 +121,11 @@ type handler struct {
 	discoveryClient   *discovery.DiscoveryClient
 	swaggerInfoGetter getter.Getter
 	prettyJSONDebug   bool
+
+	// createRefusalReportAfter is how long a refused create may go on before the controller says so in a
+	// condition. Zero disables the report entirely, which is why createRefusedLongerThan returns false
+	// for d <= 0 rather than treating zero as "immediately".
+	createRefusalReportAfter time.Duration
 	// hostPolicyCfg is the operator half of the #379 endpoint policy, threaded from main.go the same
 	// way prettyJSONDebug is. Required on BuildClient, so a missing one is a compile error.
 	hostPolicyCfg hostpolicy.Config
@@ -1671,6 +1681,7 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 				if code := externalStatusCode(nil, derr); createRefusedWithoutCreating(code) {
 					log.Debug("Classifying the dispatch error as definitely-not-committed, so the runtime "+
 						"retries directly instead of confirming the negative first", "status", code)
+					h.reportPersistentCreateRefusal(mg, code, derr.Error(), log)
 					return controller.CreateResult{Requested: true}, controller.CreateNotCommitted(derr)
 				}
 				return controller.CreateResult{Requested: true}, derr
@@ -1870,6 +1881,7 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		if code := externalStatusCode(&response, err); createRefusedWithoutCreating(code) {
 			log.Debug("Classifying the create error as definitely-not-committed, so the runtime retries "+
 				"directly instead of confirming the negative first", "status", code)
+			h.reportPersistentCreateRefusal(mg, code, err.Error(), log)
 			return controller.CreateResult{Requested: true}, controller.CreateNotCommitted(err)
 		}
 		// Requested:TRUE, AND IT WAS FALSE UNTIL ISSUE 746 -- which disabled v1.22.0's entire recovery.
