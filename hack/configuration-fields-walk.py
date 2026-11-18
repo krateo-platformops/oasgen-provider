@@ -30,9 +30,13 @@ to ["*"] applies to every action the resource declares, so a five-name hit on a 
 instance even though the word "findby" never appears in the RestDefinition.
 
 WHAT THIS SCRIPT CANNOT DO. It cannot resolve `configmap://` or `http://` oasPath values, which is why
---oas-dir is required and matched by basename. A document it cannot find is reported as UNRESOLVED and makes
-the run VOID rather than clean: "no #828 instances" over documents nobody read is the exact false-looking
-zero this repo keeps paying for.
+--oas-dir is required. Every document under it is indexed by its FULL PATH -- not its basename, because a
+corpus keeps one document per kind directory and they are routinely all called the same thing, and a
+basename key silently indexes one of them and then answers confidently over a fraction of the corpus. A
+verb path found in NO indexed document is reported as UNRESOLVED and makes the run VOID rather than clean:
+"no #828 instances" over documents nobody read is the exact false-looking zero this repo keeps paying for.
+
+Multi-document files are read document by document, so `helm template` output can be passed directly.
 
 EXIT STATUS
   0  the corpus trips neither refusal, AND every control held
