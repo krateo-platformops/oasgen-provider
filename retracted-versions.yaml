@@ -34,8 +34,26 @@
 # oversight. Both carry the lost-status-write route into the duplicate -- they have #347's retry branch
 # and lack 0.70.0's create-marker guard -- but that is a CODE READING. Nobody has measured a duplicate
 # on either: the consumer who predicted it had their 0.68.0 probe come back VOID for a reason unrelated
-# to the defect (the apiserver refused their own test CR), and a 0.67.0 run measured the SILENT LATCH
-# (one POST, a false Ready=True) rather than a re-create loop.
+# to the defect (the apiserver refused their own test CR).
+#
+# AND THE ROUTE IS FINDBY-SCOPED, which this note did not say and which decides WHO is exposed.
+# MEASURED in 0.67.0's own source: when IsResourceKnown is false -- no id recorded, which is exactly
+# the state a lost status write leaves -- the observe branch sets `observeAction = "findby"` and runs
+# it. So a findby-bearing kind RE-FINDS the object on the next observe, records the id, and never
+# issues a second create. The duplicate needs a kind with NO findby, the same precondition 0.70.0's
+# entry states for its own measured route.
+#
+# Consequence for a reader deciding whether to act: a consumer whose kinds all declare findby cannot
+# produce this duplicate at 0.67.0 or 0.68.0 no matter what they do. One asked before spending a
+# disposable cluster on it; the answer saved the cluster, and the question only arose because this note
+# described the route without its precondition.
+#
+# A CLAIM THIS NOTE USED TO CARRY AND NO LONGER DOES: "a 0.67.0 run measured the SILENT LATCH (one POST,
+# a false Ready=True) rather than a re-create loop." It named no source, and when a consumer running
+# 0.67.0 across 36 kinds asked whose run it was, nobody could say -- they confirmed it was not theirs,
+# and their 0.67.0 work was the write-loop comparison and the no-create condition pair instead. An
+# unsourced measurement in the file that gates every consumer's pin is worse than no measurement: it
+# cannot be checked, and it reads as evidence. Removed rather than re-attributed.
 #
 # The rule above says retract what is ACTIVELY HARMFUL and warns the list must not become a way to push
 # upgrades. A code-derived route with no measurement is exactly where that bites. If anyone measures a
