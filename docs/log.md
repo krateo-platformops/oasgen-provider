@@ -186,9 +186,56 @@ The Lease is namespaced, named for the Kind × version, and held by the pod. **T
 the downward API** (`fieldRef metadata.name` / `metadata.namespace`) rather than from a template, because
 the pod's actual namespace cannot drift from where the pod runs and a templated guess can.
 
-> `What is verified, and what is not (2026-11-18)` — **the duplicate-create prevention itself is argued
-> from the mechanism, not measured**, and the supporting evidence is thinner than a first count of it
-> suggests. Per install, on the fixed version:
+> `MEASURED, and the original claim was wrong (2026-11-18)` — **this entry first said "two writers against
+> one vendor is a duplicate create". That is false, and the Lease's real effect is something else that is
+> now measured directly.** A consumer ran the same 10 CRs through two permanent replicas twice, changing
+> only whether ownership was on:
+>
+> ```
+>                     NO LEASE            WITH LEASE
+> POSTs by replica    5 / 5               10 / 0        <- single writer
+> vendor objects      10 for 10           10 for 10     <- identical, 0 doubled in BOTH arms
+> conflicts           8 "object modified" 0             <- the waiter never reconciled
+> ```
+>
+> **So "no duplicates" is not what the Lease buys** — the concurrency guards below deliver that with or
+> without it. **What the Lease buys is single-writer behaviour and the absence of conflict churn: 10/0
+> against 5/5, measured.** Without it both replicas reconcile every CR, compete, and burn conflicts and
+> retries until one wins each.
+>
+> **And it holds across a roll:** `kubectl rollout restart` of a generated controller moved the holder
+> from the old pod to the new one with **one holder throughout** (1 s, then 179 s), the Deployment went up
+> **exactly one revision** — so the `restartedAt` preservation hook did its job and there was no second
+> roll — and a CR applied afterwards was POSTed by the **new holder**, with zero POSTs from the non-holder.
+>
+> **Why the original claim was wrong is worth as much as the correction.** The create path is guarded
+> twice, independently of ownership, and both guards were already there:
+>
+> ```
+> BEFORE the create   every Update to the CR is resourceVersion-checked -- the finalizer add
+>                     (worker.go:901), the pending stamp (:1361) -- so a second writer loses at
+>                     the FIRST of them and never reaches the vendor. 8 such conflicts measured.
+> AFTER the create    handler.createReachedTheVendor (restResources.go:1502) returns
+>                     CreateResult{Requested: true}, nil when the create succeeded and the STATUS
+>                     write then conflicted, which makes worker.go:1446's
+>                     `createCommittedNot(actionErr) || !created.Requested` false. So a lost status
+>                     write is not mistaken for a create that never happened. 2 of 10 CRs hit this.
+> ```
+>
+> **One CR, `i1-6`, shows both in a single reconcile:** one replica lost at the finalizer, the other
+> created and then lost its status write, and the vendor still shows one object. **That row is what rules
+> out "the two guards are the same guard seen twice"**, which the aggregate cannot.
+>
+> **The second guard is code I wrote, named after what it does, and I omitted it from my own first trace of
+> the mechanism.** The first trace also named the pending stamp as the serialisation point; the measured
+> conflicts landed on the finalizer add, one step earlier. **Three corrections to this note, each from a
+> measurement rather than a re-reading.**
+>
+> **What a title with two issues would have meant:** the guards refuted outright. That is what makes 10/10
+> in both arms a result and not a demonstration — and it is why the first run's 1/1 was reported as
+> INCONCLUSIVE by its own author rather than as a pass.
+>
+> **Per-install readings on the fixed version**, for the rest of the feature:
 >
 > ```
 > Role shape, two rules        3 installs, read from the live object
