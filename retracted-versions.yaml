@@ -322,6 +322,17 @@ retracted:
       safe because it "predates the collector entirely". That is false -- the collector is there and
       is equally gapped -- and anyone reasoning forward from it concludes that any version WITH a
       collector is unsafe, which is not what governs. The grant's removal governs.
+      AND `use: 0.54.1` IS MEASURED AT BOTH ENDS, not asserted from the single tag that fixed it.
+      Counted at seven tags with a byte-count control on every read, so a 0 cannot be an empty read
+      dressed as an absence:
+        0.53.0  apikey=0  16018 bytes      0.54.1  apikey=3  16867 bytes
+        0.54.0  apikey=0  16018 bytes      0.56.0  apikey=3  17272 bytes
+                                           0.60.0  apikey=3  17272 bytes
+                                           0.69.0  apikey=3  17284 bytes
+                                           0.74.0  apikey=3  17284 bytes
+      The same probe returns 0 at the broken tags and 3 at five later ones, all with healthy byte
+      counts -- so the instrument DISCRIMINATES rather than merely agreeing with itself. 0.74.0 is
+      the Krateo installer's own pin, which is why it is one of the points.
       AUTH-SCOPED, the way the lost-status-write duplicate is findby-scoped: it bites a kind whose
       document declares `apiKey` with a `tokenRef`, and not one that declares `http/bearer`. A
       consumer counted their own fleet by KIND, with a control -- 25 of 36 exposed, 11 not, 0
