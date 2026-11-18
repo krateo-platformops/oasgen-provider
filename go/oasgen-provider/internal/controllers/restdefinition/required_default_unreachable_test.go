@@ -15,8 +15,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// keypairRD is the shape #305 describes: an API whose document declares a version header as `required`
-// with a `default`, which is what an author reaches for to pin a constant.
+// versionHeader carries a SCALAR default. It is sent automatically at request construction, so the kind
+// works and this diagnostic must stay quiet about it -- the arm that proves these two changes agree.
+const versionHeader = "X-OpenStack-Nova-API-Version"
+
+// structuredHeader carries an OBJECT default, which cannot be placed in a header without inventing a
+// serialisation the vendor never specified. That is the only case still worth reporting.
+const structuredHeader = "X-Structured"
+
 func keypairRD(createHeaders, getHeaders []definitionv1alpha1.HeaderItem) *definitionv1alpha1.RestDefinition {
 	return &definitionv1alpha1.RestDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: "keypair", Namespace: "demo"},
@@ -57,74 +63,60 @@ func findingsNaming(warnings []string, name string) []string {
 	return out
 }
 
-const versionHeader = "X-OpenStack-Nova-API-Version"
-
-// TestARequiredParameterWhoseOnlyValueSourceIsADefaultIsReported covers the three arms that matter, and
-// the third one is the one that found a bug in the implementation.
+// TestARequiredDefaultIsReportedOnlyWhenItCannotBeSent is the line between this diagnostic and the
+// request-construction change that honours a vendor's default.
 //
-// WHY THIS IS WORTH A DIAGNOSTIC AT ALL, measured on this fixture before the check existed:
+// A `default` on a request parameter is usually read as "what the server assumes when the value is
+// absent". That reading is incoherent with `required: true`, because a required parameter is never
+// absent -- so the pair means "this must be present, and here is the value", and a SCALAR default is now
+// sent. What remains unsendable is a composite default, and reporting that is this check's whole job.
 //
-//	generation error   <nil>                  -- the RestDefinition goes Ready
-//	schema warnings    3, all about response schemas
-//	naming the header  NONE
-//
-// So an author pinning a constant the way OpenAPI invites got a kind that installed cleanly, reported
-// Ready, failed every verb with "missing header: X-OpenStack-Nova-API-Version", and emitted three
-// warnings pointing at something else entirely.
-func TestARequiredParameterWhoseOnlyValueSourceIsADefaultIsReported(t *testing.T) {
-	pinned := []definitionv1alpha1.HeaderItem{{Name: versionHeader, Value: "2.2"}}
-
-	t.Run("nothing supplies it: both verbs are reported", func(t *testing.T) {
+// WITHOUT THE FIRST ARM these two changes could ship contradicting each other: one warning that a kind
+// cannot work while the other makes it work.
+func TestARequiredDefaultIsReportedOnlyWhenItCannotBeSent(t *testing.T) {
+	t.Run("a SCALAR required default is NOT reported, because it is sent", func(t *testing.T) {
 		w := renderKeypair(t, keypairRD(nil, nil))
-		// SETUP CONTROL: the render produced diagnostics at all. Without this, a fixture that failed to
-		// parse would give an empty list and an assertion on content could read as a pass.
+		// SETUP CONTROL: the render produced diagnostics at all, so an empty findings list below means
+		// "nothing to report" rather than "the fixture never rendered".
 		require.NotEmpty(t, w, "the render emitted nothing -- the fixture is broken, not the subject")
-
-		hits := findingsNaming(w, versionHeader)
-		require.Len(t, hits, 2, "both verbs declare the parameter, so both must be reported: %v", w)
-		joined := strings.Join(hits, "\n")
-		require.Contains(t, joined, `on action "create"`)
-		require.Contains(t, joined, `on action "get"`)
-		// The message must carry the runtime failure and the working alternative, or it is a wall.
-		require.Contains(t, joined, "missing header: "+versionHeader,
-			"the message must name the error the author will actually see")
-		require.Contains(t, joined, "verbsDescription[].headers",
-			"the message must name the path that DOES work, which is the whole discoverability defect")
-	})
-
-	t.Run("both verbs wire it up: nothing is reported", func(t *testing.T) {
-		w := renderKeypair(t, keypairRD(pinned, pinned))
-		require.NotEmpty(t, w, "the baseline warnings must still be here, or this arm measures nothing")
 		require.Empty(t, findingsNaming(w, versionHeader),
-			"the parameter IS supplied on both verbs, and a diagnostic that fires anyway is noise: %v", w)
+			"a scalar default is honoured at request construction, so the kind works and a warning here "+
+				"would contradict it: %v", w)
 	})
 
-	// THE NEGATIVE CONTROL THE FIRST VERSION LACKED, found by a surviving mutant. Dropping the
-	// `Default != nil` guard passed every arm above, because they all count only findings that NAME THE
-	// VERSION HEADER -- so a flood of findings about `name`, a required PATH parameter with no default
-	// that the request path fills from the CR, was invisible to them.
-	//
-	// A required parameter with no default is not this defect: there is nothing unreachable about it, and
-	// reporting it would fire on almost every document in existence.
+	t.Run("a NON-SCALAR required default IS reported", func(t *testing.T) {
+		w := renderKeypair(t, keypairRD(nil, nil))
+		hits := findingsNaming(w, structuredHeader)
+		require.Len(t, hits, 1,
+			"the object default is declared on the create path only, and it cannot be sent: %v", w)
+		require.Contains(t, hits[0], `on action "create"`)
+		require.Contains(t, hits[0], "missing header: "+structuredHeader,
+			"the message must name the error the author will actually see")
+		require.Contains(t, hits[0], "verbsDescription[].headers",
+			"the message must name the path that DOES work, which is the whole discoverability defect")
+		require.Contains(t, hits[0], "not a scalar",
+			"the message must say WHY this one cannot be sent when a scalar can, or a reader who knows "+
+				"scalars are honoured will read this as a bug in that")
+	})
+
+	// THE NEGATIVE CONTROL, which a surviving mutant found: dropping the `Default != nil` guard passed
+	// every other arm, because they all count findings that NAME ONE PARAMETER -- a flood of findings
+	// about `name`, a required path parameter with no default, was invisible to them.
 	t.Run("a required parameter with NO default is not reported", func(t *testing.T) {
-		w := renderKeypair(t, keypairRD(pinned, pinned))
-		// `name` is declared required on /os-keypairs/{name} with no default. It must not appear.
+		w := renderKeypair(t, keypairRD(nil, nil))
 		require.Empty(t, findingsNaming(w, `parameter "name"`),
 			"a required parameter without a default is reported, which would fire on nearly every "+
 				"document and is not this defect at all: %v", w)
 	})
 
-	// THE ARM THAT FOUND THE BUG. StaticHeaders is a PER-VERB field, so declaring the header on `create`
-	// must leave `get` reported. The first implementation built one supplied-set across every verb and
-	// this arm measured ZERO findings where one was predicted -- a suppression that hid a real, every-call
-	// failure. Predicting the count before running is what made a wrong answer visible.
-	t.Run("only create wires it up: get is still reported", func(t *testing.T) {
-		w := renderKeypair(t, keypairRD(pinned, nil))
-		hits := findingsNaming(w, versionHeader)
-		require.Len(t, hits, 1,
-			"exactly the unwired verb must be reported -- 0 means the suppression is resource-wide when "+
-				"the declaration is per-verb, 2 means it is not suppressing at all: %v", w)
-		require.Contains(t, hits[0], `on action "get"`,
-			"the WRONG verb is reported, which would send the author to edit the one that is correct")
+	// PER-VERB SUPPRESSION, the arm that found a real bug: the supplied-set was first built across every
+	// verb, so declaring a header on one verb silently suppressed the finding on another. StaticHeaders
+	// is a per-verb field, so that suppression hid an every-call failure.
+	t.Run("declaring the value on the verb suppresses the finding", func(t *testing.T) {
+		w := renderKeypair(t, keypairRD(
+			[]definitionv1alpha1.HeaderItem{{Name: structuredHeader, Value: "{}"}}, nil))
+		require.NotEmpty(t, w, "the baseline warnings must still be here, or this arm measures nothing")
+		require.Empty(t, findingsNaming(w, structuredHeader),
+			"the author supplied the value explicitly, and a diagnostic that fires anyway is noise: %v", w)
 	})
 }

@@ -9,6 +9,12 @@ paths:
         schema:
           type: string
           default: "2.2"
+      - name: X-Structured
+        in: header
+        required: true
+        schema:
+          type: object
+          default: { a: 1 }
     post:
       operationId: createKeypair
       requestBody:

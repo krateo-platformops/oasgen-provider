@@ -64,6 +64,13 @@ func (g *OASSchemaGenerator) warnRequiredParameterWithUnreachableDefault() []err
 			if !param.Required || param.Schema == nil || param.Schema.Default == nil {
 				continue
 			}
+			// A SCALAR DEFAULT IS NOW HONOURED at request construction (#835), so the kind works and
+			// there is nothing to report. Only a default this controller CANNOT place in a path, query,
+			// header or cookie still fails every call -- an object or an array, which would need a
+			// serialisation the vendor never specified.
+			if isScalarDefault(param.Schema.Default) {
+				continue
+			}
 			if supplied[parameterKey(param.Name, param.In)] {
 				continue
 			}
@@ -89,11 +96,12 @@ func (g *OASSchemaGenerator) warnRequiredParameterWithUnreachableDefault() []err
 	for _, f := range found {
 		out = append(out, fmt.Errorf(
 			"parameter %q (in: %q) on action %q is declared required with an OAS default and nothing else "+
-				"supplies it: the default is NEVER consulted at request construction, so every %q call will "+
-				"fail with \"missing %s: %s\". Declare the value on the verb instead -- "+
-				"verbsDescription[].headers for a header, or a requestFieldMapping entry -- or remove "+
-				"`required` if the parameter is genuinely optional",
-			f.name, f.in, f.action, f.action, f.in, f.name))
+				"supplies it, and that default is not a scalar: it cannot be placed in a %s without inventing "+
+				"a serialisation the vendor never specified, so every %q call will fail with "+
+				"\"missing %s: %s\". A scalar default IS sent automatically; this one cannot be. Declare "+
+				"the value on the verb instead -- verbsDescription[].headers for a header, or a "+
+				"requestFieldMapping entry",
+			f.name, f.in, f.action, f.in, f.action, f.in, f.name))
 	}
 	return out
 }
@@ -134,4 +142,19 @@ func (g *OASSchemaGenerator) valueSourcesDeclaredFor(verb Verb) map[string]bool 
 		supplied[parameterKey(f.FromOpenAPI.Name, f.FromOpenAPI.In)] = true
 	}
 	return supplied
+}
+
+// isScalarDefault reports whether a default is a single value this controller can place in a path, query,
+// header or cookie -- which is exactly the set #835 sends automatically.
+//
+// Anything composite is not reportable as "sent"; it is reportable as a kind that cannot work.
+func isScalarDefault(def interface{}) bool {
+	switch def.(type) {
+	case nil:
+		return false
+	case map[string]interface{}, []interface{}, map[interface{}]interface{}:
+		return false
+	default:
+		return true
+	}
 }
