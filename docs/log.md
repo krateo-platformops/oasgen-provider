@@ -99,6 +99,25 @@ standard helper, so the gap was in the older cluster-scoped templates only.
 > and then waited for retry ticks, not for the 15 s LeaseDuration. **That is an inference from the
 > timestamps rather than a log read of the old pod**, which is how the reporter put it.
 >
+> `Second sample (2026-11-18)` -- **AND MY OWN CORRECTION ABOVE WAS ITSELF TOO STRONG. The gap is not
+> 3.9 seconds; it is 0.009-3.9 seconds across two samples, and the mechanism I gave predicts exactly
+> that spread.** The same roll on 0.83.0-rc1, same code for the provider's own Lease:
+>
+> ```
+> new pod  "Attempting to acquire"  00:34:21.747
+>          "Successfully acquired"  00:34:21.756     -> 0.009 s
+> ```
+>
+> **So "3.9 SECONDS rather than the milliseconds this entry implies" presented one sample as the
+> characteristic value, when the quantity is bimodal.** If the new pod's first attempt lands AFTER the old
+> pod's release there are no retry ticks and the gap is microseconds; if it lands before, it waits for
+> ticks. **My own stated mechanism -- "found the lease still held and then waited for retry ticks" --
+> already implied the spread, and I drew a single number from it anyway.**
+>
+> **What a reader should take:** the roll no longer costs ~15 s, which is the entry's actual claim and is
+> confirmed by both samples. **The remaining gap is a race, not a constant**, so neither 3.9 s nor 9 ms
+> should be quoted as the figure.
+>
 > **17.5 s -> 3.9 s, not 17.5 s -> 0.005 s.** The 5-millisecond number above is a FRESH INSTALL, where no
 > lease exists to contend for, and reading it as the post-fix roll figure is the mistake this annotation
 > exists to stop. A shorter `RetryPeriod` is the lever if 3.9 s ever matters; it is not being pulled,
