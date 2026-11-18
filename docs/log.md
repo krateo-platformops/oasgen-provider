@@ -44,9 +44,25 @@ the downward API** (`fieldRef metadata.name` / `metadata.namespace`) rather than
 the pod's actual namespace cannot drift from where the pod runs and a templated guess can.
 
 > `What is verified, and what is not (2026-11-18)` — **the duplicate-create prevention itself is argued
-> from the mechanism, not measured.** Four independent installs confirm that the Lease is created, named as
-> its Role, held by the right pod, and that a healthy controller performs **exactly one** vendor create —
-> that last count read from the **vendor**, not from the controller's own report.
+> from the mechanism, not measured**, and the supporting evidence is thinner than a first count of it
+> suggests. Per install, on the fixed version:
+>
+> ```
+> Role shape, two rules        3 installs, read from the live object
+> -lease-name given == Role    3 installs, across THREE observed versions (v1, v2-1, v2022-11-28)
+>                              -- so the name is not a function of the version, and no derivation
+>                              from the version is safe
+> the LEASE OBJECT itself      1 install. Existing, named as the Role, holder a named RDC pod.
+>                              A second read the Role and the one-shot acquisition line and never
+>                              queried a Lease at all.
+> exactly ONE vendor create    1 install, the count read from the VENDOR rather than from the
+>                              controller's own report
+> ```
+>
+> **I wrote "four independent installs confirm ... held by the right pod" and that was wrong**: I had
+> asserted, as established, a capability of a consumer's harness that it did not have. They checked and
+> told me. **A count of installs is not a count of readings, and the same install can be solid at the Role
+> level and silent at the Lease level.**
 >
 > **What no run has exercised is a roll of a GENERATED controller**, which is the case the feature exists
 > for. One consumer's roll arm rolls the **provider manager** and deliberately asserts that the generated
