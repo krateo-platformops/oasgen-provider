@@ -46,12 +46,30 @@ jobs:
   # would satisfy a consumer's version-line check, and would be invisible to retracted-versions.yaml --
   # which keys on plain semver and is the only control between a cluster and a bad version. A refusal
   # rather than a convention: a convention is a comment nobody reads at the moment they dispatch.
+  # NO JOB-LEVEL `if`, DELIBERATELY, AND THIS IS THE WHOLE POINT OF THIS JOB'S SHAPE.
+  #
+  # It used to carry `if: github.event_name == 'workflow_dispatch'`. On a TAG PUSH that made this job
+  # SKIPPED -- and `build` needs it, so GitHub skipped `build` too, and the run reported SUCCESS having
+  # published nothing. 0.83.0 was tagged and produced no image and no chart behind a green run.
+  #
+  # A skipped `needs` dependency skips the dependent job. There is no error, no failed check, and the
+  # workflow summary is a tick. The only thing that showed it was a registry probe.
+  #
+  # So the condition moves INSIDE the step: this job always runs, and on anything other than a dispatch it
+  # exits 0 having checked nothing. `build` then has a real dependency that always resolves.
+  #
+  # The alternative -- `if: always() && (needs.guard.result == 'success' || == 'skipped')` on build -- was
+  # rejected: it makes every future `needs` on this job carry the same incantation, and forgetting it
+  # reproduces exactly this failure, silently, in a release.
   guard-prerelease-tag:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: The image tag must be a pre-release
         run: |
+          if [ '${{ github.event_name }}' != 'workflow_dispatch' ]; then
+            echo "Not a dispatch (event: ${{ github.event_name }}) -- nothing to guard."
+            exit 0
+          fi
           tag='${{ github.event.inputs.image_tag }}'
           if printf '%s' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'; then
             echo "OK: $tag is a pre-release tag"
