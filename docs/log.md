@@ -87,7 +87,20 @@ controller can create its own Lease and **still cannot take another's**, which i
 >
 > **Three consumer sessions measured controller health on that install and all three read healthy.** One had
 > just shipped an arm arguing that *"came up"* and *"stayed up"* must not share an answer; on this install
-> both of its signals are true over a controller doing nothing. **The chart ships
+> both of its signals are true over a controller doing nothing.
+>
+> **The same instrument, the same chart, the same six kinds, on the broken version and the fixed one:**
+>
+> ```
+> rc1   avail 1, ready 1, restarts 0, waiting -   ->  "ALIVE AND RECONCILING NOTHING"
+> rc2   avail 1, ready 1, restarts 0, waiting -   ->  "HOLDING its ownership lease"
+> ```
+>
+> **Four pod-level signals, identical values, opposite truths.** That pair is also the positive control for
+> the arm that tells them apart: it failed while the system was broken and passes now, which is the one
+> thing a health check built against these four signals alone can never demonstrate about itself.
+>
+> **The chart ships
 > `rdc.readinessProbe: null`, and the runtime's `ReadyzCheck` — which already fails on exactly this
 > condition, and already treats "waiting for a peer's Lease" as Ready — is mounted by nothing.** Tracked as
 > its own defect; the probe wiring and a RestDefinition condition that reports *working* rather than
