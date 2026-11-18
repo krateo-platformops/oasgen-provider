@@ -277,6 +277,40 @@
 # event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
+  - version: "0.54.0"
+    charts:
+      - oasgen-provider
+      - oasgen-provider-crds
+      - controller-render-service
+    use: "0.54.1"
+    reason: >-
+      NO MANAGED RESOURCE CAN READ ITS AUTH SECRET when the Configuration uses apiKey. The RBAC
+      collector missed `apiKey.tokenRef`, so the generated controller's Role never grants read on
+      the Secret the Configuration points at, and nothing of that shape reconciles. Filed as #500,
+      still open.
+      AUTH-SCOPED, the way the lost-status-write duplicate is findby-scoped: it bites a kind whose
+      document declares `apiKey` with a `tokenRef`, and not one that declares `http/bearer`. A
+      consumer counted their own fleet by KIND, with a control -- 25 of 36 exposed, 11 not, 0
+      unresolved -- so a consumer whose documents are uniformly http/bearer would never see it, and
+      one with a mixed corpus sees it on part of their fleet.
+      WHAT A CONSUMER SEES, and why it earns an entry rather than a release note: the generated
+      controller comes up and stays up, and the CRs never go Ready. The symptom is an RBAC denial on
+      Secrets from the controller's OWN ServiceAccount -- `secrets is forbidden` / `cannot get
+      resource "secrets"` -- naming a Secret that plainly exists and that a human can read with
+      kubectl. It reads as a bad credential or a missing Secret. The thing at fault is the Role.
+      0.54.1 derives the RBAC paths from the auth shapes rather than from a hand-written list.
+      Measured live on the reporting consumer's fleet: 4 of 4 created and observed, 4 of 4 drift
+      corrected, residue clean. And 0.54.1 is published -- verified by chart probe, not assumed.
+      WHY 0.53.0 IS NOT LISTED BESIDE THIS ONE, recorded because the two arrived together and a
+      reader will wonder. 0.53.0's plumbing bump stamps `default: {}` on optional object paths; the
+      same consumer measured 240 stamped paths on their corpus and exactly ONE consequential -- a
+      stamped optional parent let a Vpc submitted with a partial spec claim the region-unique
+      default role, with the vendor's error then surfacing on a LATER, innocent Vpc. 238 of the 240
+      are inert. The harm needs a corpus carrying a semantically loaded default under an optional
+      object, so listing it would tell every consumer without one to move off a version that cannot
+      hurt them -- the push this file's own rule warns against. It stays a documented local skip in
+      that consumer's pin script, separated from this producer gate so a repo-local reason does not
+      read as upstream policy. If a second corpus measures the same shape, it belongs here.
   - version: "0.83.0"
     charts:
       - oasgen-provider
