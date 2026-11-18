@@ -99,9 +99,36 @@ it breaks reports healthy on every signal an operator has.
 
 ### Every generated controller holds a Lease for its Kind × version (issue 771, half two)
 
-Without it **every replica of a generated controller reconciles every CR of its Kind**, and two writers
-against one vendor is a duplicate create. The provider's own manager has had leader election since 0.81.0;
-this is the other half.
+Without it **every replica of a generated controller reconciles every CR of its Kind.** The provider's own
+manager has had leader election since 0.81.0; this is the other half.
+
+> `Correction to this entry's justification (2026-11-18)` — **it said "two writers against one vendor is a
+> duplicate create". For a single CR on the CREATE path that appears to be false, and the reason is a guard
+> that was already there.** `external-create-pending` is stamped and **persisted** before the create
+> (`worker.go:1361`, a `tools.Update` that sends the object whole and so carries its `resourceVersion`), and
+> `worker.go:688` gates the create path on `ExternalCreateIncomplete`. So:
+>
+> ```
+> A and B both read the CR at rv=N, neither sees pending
+> A stamps pending, Updates at rv=N   -> succeeds, rv becomes N+1
+> A calls the vendor create
+> B stamps pending, Updates at rv=N   -> 409 Conflict (stale resourceVersion)
+> B logs errUpdateManaged, patches conditions, and RETURNS -- it never creates
+> ```
+>
+> **Optimistic concurrency on the pending write is the serialisation point**, and informer staleness widens
+> the read window while making the conflict MORE likely, not less.
+>
+> **This is a code reading, not a measurement**, and it is held to the same standard as everything else
+> here. What produced it: a consumer built the multi-writer test with two permanent replicas, reported the
+> control as **INCONCLUSIVE** when one CR gave one vendor object, and declined to offer a mechanism. The
+> trace above is the mechanism, and it predicts the loser logs a conflict — checkable in the capture they
+> already hold.
+>
+> **What two writers DO still cause, and what the Lease is for:** duplicated vendor reads on every CR and
+> every resync, competing status writes, wasted vendor traffic proportional to replica count, and **the
+> paths that do not stamp pending first — update and delete.** That last one is where a multi-writer test
+> can still fail, and it is a different experiment from this entry's original claim.
 
 The Lease is namespaced, named for the Kind × version, and held by the pod. **The pod's identity comes from
 the downward API** (`fieldRef metadata.name` / `metadata.namespace`) rather than from a template, because
