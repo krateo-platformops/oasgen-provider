@@ -504,13 +504,19 @@ func main() {
 
 	// OWNERSHIP: hold a Lease while reconciling, so one Kind x version has one writer (issue 771).
 	//
-	// THE LEASE NAME IS THE GENERATED ROLE'S NAME, deliberately and not coincidentally.
-	// assets/rdc/rbac/role.yaml is named `{{ .resource }}-{{ .apiGroup }}-{{ .apiVersion }}` and grants
-	// this Lease by that same resourceName, so the string computed here and the string the RBAC permits
-	// are derived from the same three values. If they ever diverge the controller cannot acquire and
-	// EXITS -- a failure with N generated controllers rather than one provider -- which is why
-	// TestTheLeaseNameMatchesTheGeneratedRole asserts the Go format against the template's own text
-	// rather than against a copy of it.
+	// THE LEASE NAME IS GIVEN, NOT DERIVED HERE. It arrives as -lease-name from the provider, which has
+	// the only derivation (deploy.generatedRBACName) and renders the Role's name from the same call.
+	//
+	// IT USED TO BE DERIVED HERE AND THAT SHIPPED A CRASH LOOP. This file computed the name from the
+	// OBSERVED CRD version while the Role is named with a FIXED rbacVersion, so every Kind not at
+	// v1alpha1 computed a name its Role does not grant, could not acquire, and EXITED -- N generated
+	// controllers down rather than one provider. The check that was supposed to catch it compared this
+	// file's format string against the template's TEXT: both read `<resource>-<apiGroup>-<apiVersion>`,
+	// the same words bound to different values, so it agreed. #806 deleted the derivation and the check.
+	//
+	// SO THERE IS NOTHING TO AGREE WITH ANY MORE, which is the point: one derivation cannot disagree
+	// with itself. If -lease-name is empty while ownership is on, this binary refuses to start rather
+	// than inventing a name.
 	//
 	// THE NAMESPACE IS THE POD'S OWN, from the downward API, and NOT the -namespace flag: that one is the
 	// WATCHED namespace and is empty for a cluster-wide watch, which would put the Lease in the empty

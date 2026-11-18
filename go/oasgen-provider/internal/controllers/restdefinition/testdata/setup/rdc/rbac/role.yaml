@@ -6,6 +6,9 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
     resourceNames:
       - {{ .resource }}-{{ .apiGroup }}-{{ .apiVersion }}
-    verbs: ["get", "watch", "create", "update"]
+    verbs: ["get", "update"]
