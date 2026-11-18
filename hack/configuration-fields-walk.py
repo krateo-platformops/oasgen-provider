@@ -78,7 +78,15 @@ def oas_index(oas_dir):
                 idx[key] = ("UNREADABLE", type(exc).__name__)
                 continue
             try:
-                doc = json.loads(text) if f.lower().endswith(".json") else yaml.safe_load(text)
+                # MULTI-DOCUMENT, because a charted consumer's natural input is `helm template` output
+                # and splitting it first is a step every one of them would have to discover. A single
+                # safe_load on a multi-doc stream raises ComposerError, which this walk correctly reported
+                # as a VOID -- correct and unhelpful: the first consumer to run it hit exactly that, and
+                # so would every other chart-based corpus.
+                if f.lower().endswith(".json"):
+                    docs_in_file = [json.loads(text)]
+                else:
+                    docs_in_file = [d for d in yaml.safe_load_all(text) if d is not None]
             except Exception as exc:
                 # A file that will not parse is a CONTROL FAILURE only if it CLAIMS to be an OAS
                 # document. --oas-dir is a directory a consumer points at, and it will contain
@@ -89,31 +97,34 @@ def oas_index(oas_dir):
                 claims = any(k in text[:4096] for k in ('openapi', 'swagger', '"paths"', 'paths:'))
                 idx[key] = ("UNPARSED", type(exc).__name__) if claims else ("NOT-OAS", "does not claim to be one")
                 continue
-            if isinstance(doc, dict) and ("openapi" in doc or "swagger" in doc or "paths" in doc):
-                idx[key] = ("OK", doc)
-                continue
+            multi = len(docs_in_file) > 1
+            indexed_any = False
+            for di, doc in enumerate(docs_in_file):
+                dkey = f"{key}#{di}" if multi else key
+                if isinstance(doc, dict) and ("openapi" in doc or "swagger" in doc or "paths" in doc):
+                    idx[dkey] = ("OK", doc)
+                    indexed_any = True
+                    continue
             # AND A CONFIGMAP COUNTS, because that is how an oasPath of `configmap://` is served and so
             # it is the shape a real corpus has. This repo's own examples embed every document in a
             # ConfigMap `data` value; a walk that reads only bare .json/.yaml documents indexes zero of
             # them and then reports "no #828 instances" over nothing -- the false zero this script
             # exists to refuse. Each data value is parsed on its own and keyed `<file>:<data-key>`.
-            if isinstance(doc, dict) and doc.get("kind") == "ConfigMap":
-                hits = 0
-                for dk, dv in (doc.get("data") or {}).items():
-                    if not isinstance(dv, str):
-                        continue
-                    try:
-                        inner = json.loads(dv) if dv.lstrip().startswith("{") else yaml.safe_load(dv)
-                    except Exception as exc:
-                        idx[key + ":" + dk] = ("UNPARSED", type(exc).__name__)
-                        hits += 1
-                        continue
-                    if isinstance(inner, dict) and ("openapi" in inner or "swagger" in inner or "paths" in inner):
-                        idx[key + ":" + dk] = ("OK", inner)
-                        hits += 1
-                if hits:
-                    continue
-            idx[key] = ("NOT-OAS", "parsed, but declares no openapi/swagger/paths")
+                if isinstance(doc, dict) and doc.get("kind") == "ConfigMap":
+                    for dk, dv in (doc.get("data") or {}).items():
+                        if not isinstance(dv, str):
+                            continue
+                        try:
+                            inner = json.loads(dv) if dv.lstrip().startswith("{") else yaml.safe_load(dv)
+                        except Exception as exc:
+                            idx[dkey + ":" + dk] = ("UNPARSED", type(exc).__name__)
+                            indexed_any = True
+                            continue
+                        if isinstance(inner, dict) and ("openapi" in inner or "swagger" in inner or "paths" in inner):
+                            idx[dkey + ":" + dk] = ("OK", inner)
+                            indexed_any = True
+            if not indexed_any:
+                idx[key] = ("NOT-OAS", "parsed, but declares no openapi/swagger/paths")
     return idx
 
 
@@ -161,6 +172,7 @@ def main(argv):
 
     rds = 0
     entries_seen = 0
+    findbys = 0
     i512, i828, unresolved, unparsed_rd = [], [], [], []
 
     for f in sorted(set(files)):
@@ -176,6 +188,7 @@ def main(argv):
             res = (d.get("spec") or {}).get("resource") or {}
             verbs = res.get("verbsDescription") or []
             all_actions = [v.get("action") for v in verbs if isinstance(v, dict) and v.get("action")]
+            findbys += sum(1 for a in all_actions if a == FINDBY)
             by_action = {v.get("action"): v for v in verbs if isinstance(v, dict)}
             name = d.get("metadata", {}).get("name", "?")
 
@@ -216,6 +229,16 @@ def main(argv):
     skipped = sum(1 for v in idx.values() if v[0] == "NOT-OAS")
     if skipped:
         print(f"files skipped, not OAS   {skipped}  (no openapi/swagger/paths key)")
+    print()
+    # WHAT THE WALK COULD HAVE FOUND, not only what it did. A corpus with no findby cannot trip #512
+    # and a corpus with no configurationFields cannot trip #828, so a clean verdict over such a corpus
+    # is UNTESTABLE rather than safe. A consumer refused a run of this walk for exactly that reason --
+    # "an arm that cannot fail is worse than no arm, because it licenses the words 'tested on a second
+    # corpus'" -- and a reader seeing `0  0` beside a clean verdict will not make the distinction unless
+    # it is printed.
+    print(f"#512 TESTABLE HERE: {'yes' if findbys else 'NO -- no findby verb in this corpus'}"
+          f"   ({findbys} findby verb(s))")
+    print(f"#828 TESTABLE HERE: {'yes' if entries_seen else 'NO -- no configurationFields entry'}")
     print()
     print(f"#512 instances (view-narrowing on a findby)  {len(i512)}")
     for f, n, ci, p, pin, how in i512:
