@@ -11,9 +11,20 @@ metadata:
     app.kubernetes.io/part-of: krateo
     app.kubernetes.io/managed-by: krateo
 spec:
-  {{- if not .Values.rdc.autoscaling.enabled }}
+  # UNCONDITIONAL, and it used to be guarded by `if not .Values.rdc.autoscaling.enabled` (issue 821).
+  # That guard DROPPED this line when autoscaling was enabled -- and nothing under assets/rdc/ renders
+  # a HorizontalPodAutoscaler, so a Deployment with no `replicas` silently defaulted to ONE pod and
+  # rdc.replicaCount became dead. Enabling autoscaling bought neither autoscaling nor a replica count.
+  #
+  # The values were removed rather than implemented: since issue 771 a generated controller holds a
+  # single-writer Lease, so replicas beyond the holder WAIT rather than work -- a CPU-target autoscaler
+  # would add pods that cannot do anything and would never scale below the holder's own load. The
+  # metric does not describe the work. A queue-depth autoscaler would be coherent and is a different
+  # feature with no plumbing today.
+  #
+  # The chart's OWN autoscaling (top-level `autoscaling`, templates/hpa.yaml) is untouched: it renders
+  # a real HPA for the provider manager, which has no such Lease per reconciled Kind.
   replicas: {{ .Values.rdc.replicaCount }}
-  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ "{{" }} trunc 63 .name {{ "}}" }}
