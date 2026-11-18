@@ -531,8 +531,18 @@ func TestGenerateSpecSchema(t *testing.T) {
 			t.Fatalf("Expected no error, but got: %v", err)
 		}
 
-		if len(result.GenerationWarnings) != 2 {
-			t.Fatalf("Expected 2 generation warning for missing field, but got %d", len(result.GenerationWarnings))
+		// THREE, not two, and the third is the point. This fixture's `non_existent_field` fails BOTH
+		// checks that look at configurationFields -- it is absent from the generated spec schema, so
+		// removeConfiguredFields warns, AND it is not a declared parameter, so the Configuration builder
+		// omits it. That second omission used to be silent (#828).
+		//
+		// The two warnings are not redundant: one says the name is not in the spec schema, the other says
+		// no property for it reaches the generated Configuration CRD. A field present in the schema but
+		// not declared as a parameter produces only the second, which is the case
+		// TestASpecSchemaFieldThatIsNotADeclaredParameterIsNoLongerSilent covers and the reason this
+		// count moved rather than being left alone.
+		if len(result.GenerationWarnings) != 3 {
+			t.Fatalf("Expected 3 generation warnings for missing field, but got %d", len(result.GenerationWarnings))
 		}
 		if !strings.Contains(result.GenerationWarnings[0].Error(), "non_existent_field") {
 			t.Errorf("Warning message should mention 'non_existent_field'")
