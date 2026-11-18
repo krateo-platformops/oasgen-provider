@@ -109,17 +109,33 @@ func TestAnExplicitValueBeatsTheDocument(t *testing.T) {
 	require.Empty(t, applied, "nothing was filled, so nothing may be reported as filled")
 }
 
-// TestAllFourLocationsAreReflected covers path and query as well as header, because the validator this
-// feeds enforces `required` in all four and a fix for one is a fix for none.
-func TestAllFourLocationsAreReflected(t *testing.T) {
+// TestAPathParameterIsNEVERFilledFromTheDocument is the one place this feature does not follow the
+// document, and the reason is measured rather than theoretical.
+//
+// A path parameter decides WHICH RESOURCE is addressed, so a value nobody supplied is not a detail of the
+// request -- it is a different request. Two of one vendor's documents declare
+//
+//	projectId   required: true   default: '*'
+//
+// so filling it would address /projects/*/providers/... -- a read across every project the credential can
+// see -- and the same default sits on an alertRules POST and DELETE. The consumer who found it is safe
+// only because their own CRs supply projectId, which is a property of their corpus and not of this code.
+func TestAPathParameterIsNEVERFilledFromTheDocument(t *testing.T) {
 	u := clientForDocument(t, keypairDoc)
 	params, query := map[string]string{}, map[string]string{}
 	applied := u.ApplyVendorRequiredDefaults("get", "/os-keypairs/{name}",
 		params, query, map[string]string{}, map[string]string{})
 
-	require.Equal(t, "from-the-document", params["name"], "a required PATH default is the vendor's too")
-	require.Equal(t, "1", query["page"], "a required QUERY default is the vendor's too")
-	require.Len(t, applied, 2)
+	// SETUP CONTROL: the same call DOES fill the query parameter on this path, so an empty `params`
+	// below means "path is excluded" rather than "the call did nothing".
+	require.Equal(t, "1", query["page"],
+		"the query default was not applied, so the path assertion below proves nothing")
+
+	require.Empty(t, params,
+		"a path parameter was filled from the document: the vendor default for `name` here is "+
+			"\"from-the-document\", and in a real corpus it is '*'")
+	require.Len(t, applied, 1, "only the query fill may be reported: %v", applied)
+	require.Equal(t, "query", applied[0].In)
 }
 
 // TestTheRequestIsValidAfterwards is the end-to-end point: the defaults are applied so that the
