@@ -357,6 +357,24 @@ rdc:
   # NOT DEFAULTED HERE, DELIBERATELY. The service names and namespace are not knowable from this chart,
   # and a wrong default would point delegation at something that resolves. The Krateo installer supplies
   # them declaratively (installer#578); set them here only for a chart-only install.
+  # STRING VALUES ONLY, AND --set WILL NOT DO. values.schema.json declares this map as
+  # additionalProperties: {"type": "string"}, and helm's `--set` coerces an unquoted `false`, `true` or a
+  # number to its JSON type -- so
+  #
+  #     --set rdc.env.REST_CONTROLLER_OWNERSHIP=false
+  #
+  # is REFUSED at install: "at '/rdc/env/REST_CONTROLLER_OWNERSHIP': got boolean, want string". Use
+  # `--set-string`, or quote it in a values file.
+  #
+  # ALREADY IN docs/usage.md -- this is a pointer at the point of use, not a new fact. That page has said
+  # "rdc.env values must be set as strings" with both examples since #812, and a consumer still hit it,
+  # because the thing that sends you here is not the usage page: rest-dynamic-controller's OWN error
+  # messages tell an operator to "disable ownership with REST_CONTROLLER_OWNERSHIP=false", twice, and that
+  # advice is right for the binary and incomplete for this chart. Someone acting on a runtime error reads
+  # the error, not the install guide.
+  #
+  # The refusal is the correct behaviour, not a defect: a ConfigMap's `data` values must be strings, so a
+  # boolean that got through here would fail later and further away.
   env: {}
 env:
   OASGEN_PROVIDER_DEBUG: "false"
