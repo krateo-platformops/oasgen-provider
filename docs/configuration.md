@@ -66,7 +66,7 @@ parameterize every instance:
 | `rdc.image.registry` / `rdc.image.repository` | `ghcr.io` / `krateo-platformops/rest-dynamic-controller` | The RDC image. |
 | `rdc.image.tag` | `""` → the chart `appVersion` | **Derived, not pinned.** Empty means the RDC template resolves the tag from `.Chart.AppVersion` (`assets/rdc/deployment.yaml`), so RDC tracks the chart's own version line automatically. This replaced a hand-maintained pin that had to be bumped by hand every release and silently shipped a chart referencing a never-published image ([#62](https://github.com/krateo-platformops/oasgen-provider/issues/62)). It is load-bearing that oasgen-provider and rest-dynamic-controller release in **lockstep at identical versions** — they ship from one tag, so the derived tag always exists. Set an explicit value only to pin an RDC out of lockstep (it must be ≥ `0.12.0`, when the SA-identity env contract landed). |
 | `rdc.env.*` | `{}` | Extra env rendered into **every** generated RDC ConfigMap (any `REST_CONTROLLER_*` / `OTEL_*` var below). |
-| `rdc.replicaCount`, `rdc.serviceAccount.*`, `rdc.podSecurityContext`, `rdc.securityContext`, `rdc.service.port`, `rdc.resources`, `rdc.autoscaling.*`, … | chart scaffolding | Applied to every generated RDC Deployment. |
+| `rdc.replicaCount`, `rdc.serviceAccount.*`, `rdc.podSecurityContext`, `rdc.securityContext`, `rdc.service.port`, `rdc.resources`, … | chart scaffolding | Applied to every generated RDC Deployment. |
 
 Each generated ConfigMap also fixes `HOME: /tmp` (helm needs a writable home) and injects
 the RDC's own identity — `REST_CONTROLLER_SERVICEACCOUNT_NAME` /
