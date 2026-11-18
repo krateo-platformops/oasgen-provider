@@ -32,7 +32,29 @@ annotation about the release.
 fixed.** No image, no chart, behind a run whose conclusion was `SUCCESS`.
 
 **Everything in the 0.83.0 section below is in this release**, unchanged and validated on
-`0.83.0-rc2` — whose code is this code. This section adds only what made 0.83.0 empty.
+`0.83.0-rc2`. This section adds only what made 0.83.0 empty.
+
+> `How "rc2's code is this code" is known, and where it stops (2026-11-18)` — **two different claims, and
+> only one of them is verified at the artifact level.**
+>
+> ```
+> CHARTS and rendered CRDs   VERIFIED from the published artifacts by a consumer:
+>                            rc2 -> 0.83.1 renders 32+32 CRDs identical, 0 whole-object
+>                            differences, 5/5 warnings, the maxLength control present in both;
+>                            and oasgen-provider-crds' templates are BYTE-IDENTICAL
+>                            (`diff -r` empty), so rc2's 32/32 RestDefinition admission carries
+>                            over.
+> RUNTIME IMAGES             ASSERTED from the commit range -- the only commits between rc2's
+>                            SHA and this tag are documentation, and `main.go` changed 0
+>                            non-comment lines between rc1 and rc2. NOT verified at the image
+>                            level by anyone.
+> ```
+>
+> **The second is weaker than the first and is stated separately for that reason.** A build is not a pure
+> function of its source in practice, so "the SHAs differ only in docs" is an argument and "the templates
+> are byte-identical" is a measurement. **The consumer who produced the measurement is also the one who
+> flagged that they had not done the image half**, which is why this note exists rather than a single
+> sentence claiming both.
 
 ### A guard with a job-level `if` skipped the release it was added to protect
 
@@ -332,6 +354,30 @@ controller can create its own Lease and **still cannot take another's**, which i
 > **Four pod-level signals, identical values, opposite truths.** That pair is also the positive control for
 > the arm that tells them apart: it failed while the system was broken and passes now, which is the one
 > thing a health check built against these four signals alone can never demonstrate about itself.
+>
+> `WHO WAS EVER EXPOSED: nobody on a published release (2026-11-18)` — **#814's broken state requires #800,
+> and #800 is new in this release line.** Measured across tags:
+>
+> ```
+> 0.74.0 / 0.80.0 / 0.82.0   assets/rdc/deployment.yaml has NO -lease-name, and
+>                            deploy.go renders no ownership at all -> no Lease is ever
+>                            attempted, so the RBAC denial costs nothing
+> 0.83.0-rc1                 ownership on, Role unable to grant create -> the broken state
+> 0.83.0                     same code, but PUBLISHED NOTHING
+> 0.83.0-rc2 / 0.83.1        fixed
+> ```
+>
+> **So no consumer on a published version was ever exposed**, and my own warning to a pinning session —
+> that this matters "if anything on your clusters runs generated controllers" — was wrong in scope. **They
+> refuted it by measuring their own cluster**: 34 generated controllers on 0.74.0, zero holding a Lease,
+> the ServiceAccount denied leases outright, **and the controllers reconciling with current timestamps.**
+>
+> **Their near-miss is worth as much as the result.** Their first reading was the CRs' conditions — 17 of
+> them `Ready=True`, newest `lastTransitionTime` nearly six days old — which *looks* exactly like
+> "reconciled nothing". **It is not evidence of it: `condition.Upsert` keeps `lastTransitionTime` on a
+> same-status write, so a controller reconciling healthily every two seconds and one reconciling never
+> produce the identical field.** A current timestamp on an `observe` log line is positive evidence of
+> work; a stale condition is evidence of nothing.
 >
 > **The detector matters as much as the defect.** The first falsifier circulated for this was a pair of
 > log lines: *"Waiting for the ownership lease before reconciling"* present and *"Holding the ownership
