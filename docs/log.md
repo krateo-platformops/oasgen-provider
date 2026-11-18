@@ -81,6 +81,10 @@ controller can create its own Lease and **still cannot take another's**, which i
 > pod                 Running, 0 restarts, waiting=<none>, avail 1, ready 1
 > RestDefinition      Ready
 > the CR              no status, no vendor request sent, nothing created
+>                     -- and on the fixed version, from the same harness: Ready with a vendor id,
+>                        EXACTLY 1 pull request and 1 POST. The count comes from the VENDOR, not
+>                        from the controller's own report, which is the only place this distinction
+>                        can be settled.
 > the log             "Waiting for the ownership lease before reconciling"   present
 >                     "Holding the ownership lease; starting workers"        ABSENT
 > ```
