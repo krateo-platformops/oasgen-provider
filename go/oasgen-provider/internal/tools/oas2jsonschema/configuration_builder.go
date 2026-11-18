@@ -27,10 +27,19 @@ func (g *OASSchemaGenerator) BuildConfigurationSchema() ([]byte, error) {
 	for _, field := range g.resourceConfig.ConfigurationFields {
 		fieldParam, err := g.findParameterInOAS(field)
 		if err != nil {
-			// TODO: Consider logging a warning here.
+			// The entry is omitted, and WHY is reported by warnConfigurationFieldsUnresolved below
+			// rather than being swallowed here. This used to be a bare `continue` with a
+			// `// TODO: Consider logging a warning here.` (#828): no property reached the generated
+			// Configuration CRD, nothing said so, and the author found out three layers away when the
+			// apiserver rejected an unknown field in a Configuration CR -- an error that names the CR,
+			// which is correct and useless, because the CR is right and the CRD is missing a property
+			// it should have had.
+			//
+			// The omission stays non-fatal here: the refusal decided for #828 is a separate change,
+			// and it may only fire where EVERY action failed with CauseParameterUndeclared, which is
+			// what UnresolvedFieldSet.AllUndeclared answers.
 			continue
 		}
-
 		// Ensure the top-level schema for the parameter's location (e.g., "query") already exists.
 		paramIn := fieldParam.In
 		if _, ok := paramTypeSchemas[paramIn]; !ok {
@@ -276,4 +285,34 @@ func applyAPIKeyHeaderDefault(sch *Schema, defaultHeader string, info SecuritySc
 		}
 		return
 	}
+}
+
+// warnConfigurationFieldsUnresolved reports every configurationFields entry that resolved against NONE of
+// its actions, naming the CAUSE per action.
+//
+// WHY A WARNING AND NOT SILENCE (#828): the builder omits such an entry from the generated Configuration
+// CRD. Nothing failed, the RestDefinition still reaches Ready, and the author discovers it only when the
+// apiserver rejects their Configuration CR for an unknown field -- three layers from the cause, naming the
+// CR rather than the CRD that is missing a property.
+//
+// WHY THE CAUSE AND NOT JUST THE FACT: four different things used to produce one message, and only one of
+// them is the author's parameter being undeclared. Telling an author to check a spelling that is correct,
+// when their document is stale or they bound the entry to an action the resource does not declare, sends
+// them to fix the wrong thing.
+//
+// RETURNED rather than logged, so it reaches the render `errors` channel at severity `warning` and appears
+// in RestDefinition status -- the same route the identifier warnings take. A provider log line would not
+// reach the author, who is reading a CR.
+func (g *OASSchemaGenerator) warnConfigurationFieldsUnresolved() []error {
+	var out []error
+	for _, field := range g.resourceConfig.ConfigurationFields {
+		if _, err := g.findParameterInOAS(field); err != nil {
+			out = append(out, fmt.Errorf(
+				"configurationFields entry %q (in: %q) is omitted from the generated Configuration CRD "+
+					"because it resolved against none of its actions, so setting it in a Configuration CR "+
+					"will be rejected as an unknown field: %w",
+				field.FromOpenAPI.Name, field.FromOpenAPI.In, err))
+		}
+	}
+	return out
 }

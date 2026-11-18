@@ -96,6 +96,12 @@ func (g *OASSchemaGenerator) Generate() (*GenerationResult, error) {
 		generationWarnings = append(generationWarnings, w)
 	}
 
+	// A configurationFields entry that resolves against none of its actions is omitted from the
+	// generated Configuration CRD, and used to be omitted silently (#828). Non-fatal here because the
+	// refusal is a separate decision; this is the diagnostic that was missing, and it names the cause
+	// per action rather than the fact.
+	generationWarnings = append(generationWarnings, g.warnConfigurationFieldsUnresolved()...)
+
 	// An identifier the findby response does not carry. Unlike the policy warning above this one is
 	// emitted for EVERY kind declaring findby, because matching is not conditional on the absence of a
 	// create verb -- which is exactly the guard that made the existing resolvability warning unreachable
