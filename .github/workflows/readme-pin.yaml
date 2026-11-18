@@ -1,0 +1,35 @@
+# The README's install pin must equal docs/log.md's newest release heading.
+#
+# WHY THESE TWO VALUES AND NOT THE PUBLISHED TAG. The pin had drifted to 0.20.0 while the newest release
+# was 0.83.1 -- sixty-three minors, and BELOW the 0.26.1 boundary where docs/log.md records that the
+# verbose dump leaked credentials. The README recommended a version our own log says not to run, and
+# nothing reported it because nobody compares an install snippet against the tag list.
+#
+# A check against the tag cannot run here: a pull_request precedes its own tag. But both values compared
+# below are written in the SAME commit -- the pin moves in the `docs(log): cut the X.Y.Z section` PR,
+# which is already the last one merged before every tag -- so the gate asks only that they agree, and it
+# blocks at review time instead of after publishing.
+#
+# NOT on the tag-push run, deliberately: that run publishes the five artifacts, and a documentation check
+# able to block it is a second way for a guard to swallow a release. 0.83.0 published nothing because a
+# guard job skipped the build.
+name: readme-pin
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  readme-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No setup-python: the script is standard library only, and the runner image ships python3.
+      # Exit 2 is VOID -- a value could not be read -- and fails the job like a mismatch, because "no
+      # pin found" must never read as "the pin is correct".
+      - run: python3 -I hack/readme-pin-matches-log.py
