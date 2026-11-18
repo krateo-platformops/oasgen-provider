@@ -138,10 +138,44 @@ manager has had leader election since 0.81.0; this is the other half.
 > resourceVersion-checked.** Informer staleness widens the read window and makes the conflict MORE likely,
 > not less.
 >
-> **Status of the claim: one measured sample plus a code reading.** What produced it: a consumer built the
-> multi-writer test with two permanent replicas, reported the control as **INCONCLUSIVE** when one CR gave
-> one vendor object, and declined to offer a mechanism. The trace predicted the loser would log a conflict;
-> they found it in a capture they already held, at a different line than predicted.
+> **AND THERE IS A SECOND GUARD, AFTER the create, WHICH IS CODE I WROTE AND DID NOT MENTION.** When the
+> create succeeds and the STATUS WRITE then conflicts, `handler.createReachedTheVendor`
+> (`internal/controllers/restResources.go:1502`) returns `CreateResult{Requested: true}, nil`:
+>
+> ```go
+> log.Error(werr, "The create reached the vendor but its status write failed; reporting the create as "+
+>     "requested so it is not retried. Status will be repopulated by the next observe", ...)
+> return controller.CreateResult{Requested: true}, nil
+> ```
+>
+> **`Requested: true` with a nil error makes `worker.go:1446`'s `createCommittedNot(actionErr) ||
+> !created.Requested` false**, so the create is not marked failed and is not retried. **A conflict after
+> the create does not re-create.**
+>
+> **So the create path is guarded twice, at different points, for different reasons:**
+>
+> ```
+> BEFORE   every Update to the CR is resourceVersion-checked -- the finalizer add (:901), the
+>          pending stamp (:1361) -- so a second writer loses at the FIRST of them
+> AFTER    createReachedTheVendor reports the create as requested, so a lost status write does
+>          not look like a create that never happened
+> ```
+>
+> **Status of the claim: 10 measured CRs with complete logs, plus the code.** A consumer ran two permanent
+> replicas against **10 CRs applied in one go**, with log capture fixed so neither stream truncated:
+>
+> ```
+> 10 CRs -> 10 vendor objects, 0 titles with 2 or more.  POSTs by pod: 5 and 5.
+> conflicts, by pod and CR:  "Cannot add finalizer"  i1-1 i1-2 i1-3 i1-5 i1-6 i1-7
+>                            status-write conflict    i1-4 i1-6
+> i1-6 shows BOTH in one CR: one replica lost at the finalizer, the other created and then lost
+> its status write, and the vendor still shows one issue.
+> ```
+>
+> **They reported the arm as INCONCLUSIVE by its own rule** — it was built as a #800 control and cannot
+> fire as one — **and as corroboration of the concurrency guard, which is the question it can answer.**
+> **A title with two issues would have falsified this outright**, which is what makes 10/10 worth more than
+> the first run's 1/1.
 >
 > **What two writers DO still cause, and what the Lease is for:** duplicated vendor reads on every CR and
 > every resync, competing status writes, wasted vendor traffic proportional to replica count, and **the
