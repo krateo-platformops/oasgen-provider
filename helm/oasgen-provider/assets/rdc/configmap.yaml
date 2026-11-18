@@ -33,6 +33,11 @@ data:
   # typo is silent, so an operator would believe metrics were on. Note the precedence: rdc.env is rendered
   # AFTER these keys, so an operator setting this through rdc.env still wins. Documented, not prevented.
   REST_CONTROLLER_METRICS_SERVER_PORT: {{ .Values.rdc.metrics.port | quote }}
+  # The readiness endpoint's port, and it MUST agree with rdc.readinessProbe.httpGet.port. The chart
+  # defaults both to 8081 and a test asserts they match, because a probe pointed at a port nothing
+  # listens on marks EVERY pod NotReady -- an outage produced by a diagnostic, which is the one outcome
+  # worse than the defect it reports (#815).
+  REST_CONTROLLER_HEALTH_PROBE_PORT: {{ .Values.rdc.healthProbePort | quote }}
   # home should be set to /tmp or any other writable directory to avoid permission issues with helm https://github.com/helm/helm/issues/8038
   HOME: /tmp
   {{- range $key, $value := .Values.rdc.env }}
