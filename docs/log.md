@@ -26,6 +26,70 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-18 — 0.83.1
+
+**0.83.0 was tagged and published nothing, so this is that release with the defect that swallowed it
+fixed.** No image, no chart, behind a run whose conclusion was `SUCCESS`.
+
+**Everything in the 0.83.0 section below is in this release**, unchanged and validated on
+`0.83.0-rc2` — whose code is this code. This section adds only what made 0.83.0 empty.
+
+### A guard with a job-level `if` skipped the release it was added to protect
+
+```
+release-tag  conclusion: SUCCESS
+  success  test / ... (5 jobs)
+  skipped  guard-prerelease-tag    <- if: github.event_name == 'workflow_dispatch'
+  skipped  build                   <- needs: [test, guard-prerelease-tag]
+release-oci  SKIPPED               <- same shape, so no chart either
+```
+
+**A skipped `needs` dependency skips the dependent job.** No error, no failed check, a tick on both
+summaries. **The run is green because every job that ran passed, and the one that publishes did not run.**
+
+**The guard is #807's**, added so a `workflow_dispatch` cannot mint a plain `X.Y.Z` behind the tag's back.
+Its `if` restricted it to dispatches — which is correct for the guard and fatal for everything that needs
+it.
+
+Fixed by removing the job-level `if` from both guards and moving the condition **inside the step**: the job
+always runs and exits 0 on anything other than a dispatch, so the dependent job has a dependency that
+always resolves.
+
+> `Why not the obvious fix` — `if: always() && (needs.guard.result == 'success' || == 'skipped')` on each
+> dependent works, and **moves the trap one level out**: every future `needs` on these guards must carry
+> the same incantation, and forgetting it reproduces this failure silently, in a release. **Removing the
+> skip is the version that cannot be forgotten.**
+
+> `How it shipped` — **I proved the guard REFUSES on the dispatch path, in situ, with a deliberate red
+> run. I proved the dispatch path PUBLISHES, twice, with rc1 and rc2 and registry probes. I never ran the
+> TAG path with the `needs` in place.** Both halves tested and the combination not. **And #807's own PR
+> records that this very `needs:` edit had failed silently once** and that I caught it by parsing the
+> result rather than reading the diff — so I fixed its presence and never asked what it did on the path I
+> had not exercised.
+
+> `The only reading that could see it` — **a registry probe.** Run conclusion, check count and failure
+> count all said the release succeeded. **"Tagged" is not "released"**, and this is the artifact-level form
+> of the lesson the 0.83.0 section records about health signals: a consumer independently added a
+> pull-it-back-out probe to their own release workflow on the strength of this, having previously done that
+> check by hand.
+
+### 0.83.0 is retracted rather than re-pushed
+
+**A tag-push run uses the workflow file at the tag's own commit**, so re-pushing `0.83.0` at its original
+SHA would skip again — the tag would have to move past the fix. **A moved tag is what breaks caches,
+mirrors and anyone who already fetched**, and a published GitHub Release existed for it. So nothing is
+rewritten: `0.83.0` stays as it is, names no artifacts, and is listed in `retracted-versions.yaml` with
+`use: 0.83.1`.
+
+**That entry lands AFTER this release is published**, because the file's own rule is that `use:` must
+already exist — *"an entry whose replacement is unpublished tells a pinning session to stop without telling
+it where to go."*
+
+**The entry is unusual and says so: `retracted-versions.yaml` is about PUBLISHED versions that must not be
+pinned, and 0.83.0 cannot be pulled at all.** A pin to it fails loudly rather than silently. It is listed
+because a human or a version-line check reading `git tag` sees `0.83.0` as the latest release, and the
+resulting pull failure looks like a registry fault rather than a version that never existed.
+
 ## 2026-11-18 — 0.83.0
 
 **Ownership for every generated controller, and three attempts to get its RBAC right.** The first shipped a
