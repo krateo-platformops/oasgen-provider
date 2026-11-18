@@ -277,6 +277,30 @@
 # event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
+  - version: "0.53.0"
+    charts:
+      - oasgen-provider
+      - oasgen-provider-crds
+      - controller-render-service
+    use: "0.54.1"
+    reason: >-
+      THE SAME BREAK AS 0.54.0, and for the same measured reason: no managed resource can read its
+      auth Secret when the Configuration uses apiKey. See that entry below for the full mechanism --
+      it is a CONJUNCTION of a collector gap that exists from 0.52.0 and a blanket cluster-wide
+      `secrets` grant that #473/#475 removed HERE, in 0.53.0. The removal is what turned a latent
+      gap into a failure, so this is the first broken version and 0.54.1 is the fix.
+      ADDED AFTER 0.54.0 WAS ALREADY LISTED, by a second consumer who measured both facts at every
+      tag rather than accepting the boundary on file. Listing 0.54.0 while leaving this version off
+      for the identical defect would have been the dangerous direction: a consumer pinned here reads
+      the file, does not find their version, and concludes they are fine.
+      SCOPE, since this is not a corpus-dependent hazard: it bites any consumer whose documents
+      declare apiKey with a tokenRef. Counted on two fleets -- 25 of 36 kinds on one, 6 of 6 on the
+      other, whose six documents are all apiKey.
+      NOT THE REASON 0.53.0 WAS DECLINED EARLIER. That decision was about the plumbing bump's
+      `default: {}` stamping, where 238 of 240 measured paths are inert and the harm needs a corpus
+      carrying a semantically loaded default under an optional object. That remains a documented
+      local skip rather than an entry here. This is a different defect with a different shape, and
+      it is the one that stops every apiKey kind from reconciling.
   - version: "0.54.0"
     charts:
       - oasgen-provider
@@ -284,10 +308,20 @@ retracted:
       - controller-render-service
     use: "0.54.1"
     reason: >-
-      NO MANAGED RESOURCE CAN READ ITS AUTH SECRET when the Configuration uses apiKey. The RBAC
-      collector missed `apiKey.tokenRef`, so the generated controller's Role never grants read on
-      the Secret the Configuration points at, and nothing of that shape reconciles. Filed as #500,
+      NO MANAGED RESOURCE CAN READ ITS AUTH SECRET when the Configuration uses apiKey. Filed as #500,
       still open.
+      THE BREAK IS A CONJUNCTION, and stating only half of it leads a reader to the wrong rule. The
+      RBAC collector has never covered `apiKey.tokenRef` -- measured, 0 occurrences of "apikey" in
+      `authsecretrbac.go` at 0.52.0, 0.53.0 and 0.54.0, and 3 from 0.54.1. So the gap is present at
+      0.52.0 too. What made 0.52.0 work is the SECOND fact: a blanket cluster-wide `secrets` grant
+      in the ClusterRole asset, which the ServiceAccount held as a superset, so the gap cost nothing.
+      #473/#475 REMOVED that grant in 0.53.0 -- measured, one uncommented `secrets` occurrence in
+      `clusterrole.yaml` at 0.52.0 and none at 0.53.0 or 0.54.0. That removal is the moment a latent
+      gap became a failure.
+      WHY THE MECHANISM MATTERS AND NOT JUST THE RANGE: a consumer's own page had said 0.52.0 was
+      safe because it "predates the collector entirely". That is false -- the collector is there and
+      is equally gapped -- and anyone reasoning forward from it concludes that any version WITH a
+      collector is unsafe, which is not what governs. The grant's removal governs.
       AUTH-SCOPED, the way the lost-status-write duplicate is findby-scoped: it bites a kind whose
       document declares `apiKey` with a `tokenRef`, and not one that declares `http/bearer`. A
       consumer counted their own fleet by KIND, with a control -- 25 of 36 exposed, 11 not, 0
