@@ -43,6 +43,17 @@ The Lease is namespaced, named for the Kind × version, and held by the pod. **T
 the downward API** (`fieldRef metadata.name` / `metadata.namespace`) rather than from a template, because
 the pod's actual namespace cannot drift from where the pod runs and a templated guess can.
 
+> `What is verified, and what is not (2026-11-18)` — **the duplicate-create prevention itself is argued
+> from the mechanism, not measured.** Four independent installs confirm that the Lease is created, named as
+> its Role, held by the right pod, and that a healthy controller performs **exactly one** vendor create —
+> that last count read from the **vendor**, not from the controller's own report.
+>
+> **What no run has exercised is a roll of a GENERATED controller**, which is the case the feature exists
+> for. One consumer's roll arm rolls the **provider manager** and deliberately asserts that the generated
+> Deployment does *not* move, so it tests the provider's own hand-over and the absence of spurious
+> rewrites — **not two generated replicas racing.** Treat the duplicate-prevention claim as reasoned
+> rather than demonstrated until an RDC-roll arm reports.
+
 ### The Lease name is GIVEN by the provider, not derived by the controller (issue 771)
 
 **The first shipping attempt had two derivations of one name, and they disagreed.** The controller computed
