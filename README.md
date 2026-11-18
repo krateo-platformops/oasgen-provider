@@ -22,10 +22,18 @@ default), which pins both charts. Standalone:
 ```sh
 # The RestDefinition CRD first, then the provider:
 helm install oasgen-provider-crds oci://ghcr.io/krateo-platformops/charts/oasgen-provider-crds \
-  --version 0.20.0
+  --version 0.84.0
 helm install oasgen-provider oci://ghcr.io/krateo-platformops/charts/oasgen-provider \
-  --version 0.20.0 --namespace krateo-system --create-namespace
+  --version 0.84.0 --namespace krateo-system --create-namespace
 ```
+
+<!-- THE PIN ABOVE IS BUMPED IN THE `docs(log): cut the X.Y.Z section` PR, which is the last one merged
+     before every tag. It had been left at 0.20.0 -- sixty-three minors behind, and BELOW the 0.26.1
+     boundary where docs/log.md records that the verbose dump leaked credentials (#214). So the README
+     recommended a version our own log says not to run.
+     Found only because a consumer reported the same shape in their repo: their README documented
+     installing 0.74.0 while their evidence table stopped at 0.56.0. Nobody compares an install snippet
+     against the tag list, and a drift of sixty-three minors is what that looks like. -->
 
 Details and the local-render recipe: [docs/usage.md](docs/usage.md).
 
