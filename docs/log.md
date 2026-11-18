@@ -122,11 +122,18 @@ answering `202` had no findable response schema and the comparison warned. The g
 **union** of its own `200`/`201` and the verb's declared codes — a declared `202` must not cost you `200`.
 
 > `Confirmed by experiment (2026-11-18)` — a consumer staged `successCodes: [202]` on their create verb at
-> `0.83.0-rc1`: **7 schema warnings → 6, with the other five kinds unchanged as the control.** And the
+> `0.83.0-rc1`: **7 schema warnings → 6, with the other five kinds unchanged as the control**, and
+> reproduced on `rc2`. **The 202 was the only entry in their seven that represented a defect** -- the other
+> six are five by-design parameter omissions and one dormant warning, so six is that chart's floor. And the
 > generated CRD shape is **untouched** for a create-verb declaration — `getBaseSchemaForSpec` reads the
 > request body and `getBaseSchemaForStatus` reads `get`/`findby` responses only, so a create response feeds
 > the comparison and nothing else. **On a `get` or `findby` verb the same field CAN change the status
 > schema**, which is worth knowing before reading a legitimate diff as a regression.
+>
+> **And the two fixes are orthogonal rather than merely both-green:** the same run that cleared the 202 also
+> had all six controllers holding their ownership Lease, so the declaration does not disturb the Lease
+> machinery. **That claim was unavailable from the rc1 experiment**, where the ownership arm was already
+> failing for an unrelated reason and so could not have reported a third.
 
 ### A 403 is not transient, and a 401 says a credential was rejected
 
