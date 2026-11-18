@@ -96,8 +96,9 @@ controller can create its own Lease and **still cannot take another's**, which i
 >                        EXACTLY 1 pull request and 1 POST. The count comes from the VENDOR, not
 >                        from the controller's own report, which is the only place this distinction
 >                        can be settled.
-> the log             "Waiting for the ownership lease before reconciling"   present
->                     "Holding the ownership lease; starting workers"        ABSENT
+> the log             a REPEATING error, "Cannot read or write the ownership lease; this controller
+>                     does not reconcile until it can", carrying the authorizer's own refusal
+> the Leases          none exists for the Kind x version
 > ```
 >
 > **Three consumer sessions measured controller health on that install and all three read healthy.** One had
@@ -114,6 +115,15 @@ controller can create its own Lease and **still cannot take another's**, which i
 > **Four pod-level signals, identical values, opposite truths.** That pair is also the positive control for
 > the arm that tells them apart: it failed while the system was broken and passes now, which is the one
 > thing a health check built against these four signals alone can never demonstrate about itself.
+>
+> **The detector matters as much as the defect.** The first falsifier circulated for this was a pair of
+> log lines: *"Waiting for the ownership lease before reconciling"* present and *"Holding the ownership
+> lease; starting workers"* absent. **Both are emitted ONCE, from `acquireOwnership`** — so a capture that
+> starts after pod start reads `0/0` and a missing *"Holding"* reads as a failure that did not happen. One
+> consumer caught the *"Waiting"* line only because their capture began at startup; another read two
+> minutes later and saw neither. **The robust readings are the REPEATING error from `observeOwnership`,
+> which fires per lease operation and carries the apiserver's refusal verbatim, and the Lease object's own
+> existence and holder.** A one-shot line is not a detector.
 >
 > **The chart ships
 > `rdc.readinessProbe: null`, and the runtime's `ReadyzCheck` — which already fails on exactly this
