@@ -259,6 +259,28 @@
 # event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
+  - version: "0.83.0"
+    charts:
+      - oasgen-provider
+      - oasgen-provider-crds
+      - controller-render-service
+    use: "0.83.1"
+    reason: >-
+      TAGGED AND NEVER PUBLISHED. No image and no chart exists for this version, so it is not
+      installable at all -- which makes this entry unusual for this file, and the reason it is here
+      anyway is below. A guard job added in #807 carried a job-level `if` restricting it to
+      workflow_dispatch, so on a tag push it was SKIPPED; `build` needs it, and a skipped needs
+      dependency skips the dependent job, so no image was built. release-oci skipped the same way, so
+      no chart. Both runs reported SUCCESS. Fixed in #819 by removing the job-level `if` from both
+      guards and deciding inside the step. WHY IT IS LISTED THOUGH A PIN WOULD FAIL LOUDLY -- this
+      file is about published versions that must not be pinned, and a pull of 0.83.0 cannot succeed.
+      But `git tag` shows 0.83.0 as the newest release and a version-line check has no opinion about
+      whether a version EXISTS, so the pin gets attempted and the resulting pull failure reads as a
+      registry fault rather than as a version that was never published. This entry turns that into an
+      explicit answer. NOT RE-PUSHED -- a tag-push run uses the workflow file at the tag's own commit,
+      so recovering 0.83.0 in place would have required moving the tag past #819, and a moved tag
+      breaks caches, mirrors and anyone who already fetched. 0.83.1 carries everything 0.83.0 would
+      have, plus #819.
   - version: 0.77.0
     charts: [oasgen-provider, oasgen-provider-crds, controller-render-service]
     use: 0.78.0
