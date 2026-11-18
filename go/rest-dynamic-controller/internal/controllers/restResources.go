@@ -1,13 +1,13 @@
 package restResources
 
 import (
-	"time"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/krateo-platformops/audit"
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
