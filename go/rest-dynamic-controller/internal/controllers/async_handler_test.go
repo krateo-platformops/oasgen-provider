@@ -38,6 +38,13 @@ func (m *mockAsyncClient) Call(ctx context.Context, cli *http.Client, path strin
 	return restclient.Response{ResponseBody: b}, nil
 }
 
+// ApplyVendorRequiredDefaults is a no-op on this mock: a fixture's maps already hold exactly the values
+// the test means to send, so applying a document default here would change what the test asserts about.
+// The behaviour itself is covered against a real document in vendor_required_defaults_test.go.
+func (m *mockAsyncClient) ApplyVendorRequiredDefaults(httpMethod, path string, parameters, query, headers, cookies map[string]string) []restclient.AppliedDefault {
+	return nil
+}
+
 func (m *mockAsyncClient) ValidateRequest(httpMethod, path string, parameters, query, headers, cookies map[string]string) error {
 	return nil
 }

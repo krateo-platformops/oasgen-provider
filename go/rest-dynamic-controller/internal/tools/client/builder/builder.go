@@ -530,6 +530,11 @@ func IsResourceKnown(ctx context.Context, cli restclient.UnstructuredClientInter
 		return false, reqConfiguration.BuildErr
 	}
 
+	// The vendor's required defaults are applied here too, or this dry run answers a different question
+	// from the one the real request will ask -- it would report "not addressable" for a parameter the
+	// document itself supplies.
+	cli.ApplyVendorRequiredDefaults(callInfo.Method, callInfo.Path, reqConfiguration.Parameters, reqConfiguration.Query, reqConfiguration.Headers, reqConfiguration.Cookies)
+
 	return cli.ValidateRequest(callInfo.Method, callInfo.Path, reqConfiguration.Parameters, reqConfiguration.Query, reqConfiguration.Headers, reqConfiguration.Cookies) == nil, nil
 }
 

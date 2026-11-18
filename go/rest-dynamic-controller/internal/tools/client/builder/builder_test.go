@@ -56,6 +56,13 @@ func (m *mockUnstructuredClient) RequestedBody(method, path string) (text.String
 	return m.requestedBody[path], nil
 }
 
+// ApplyVendorRequiredDefaults is a no-op on this mock: a fixture's maps already hold exactly the values
+// the test means to send, so applying a document default here would change what the test asserts about.
+// The behaviour itself is covered against a real document in vendor_required_defaults_test.go.
+func (m *mockUnstructuredClient) ApplyVendorRequiredDefaults(httpMethod, path string, parameters, query, headers, cookies map[string]string) []restclient.AppliedDefault {
+	return nil
+}
+
 func (m *mockUnstructuredClient) ValidateRequest(method, path string, params, query, headers, cookies map[string]string) error {
 	return m.validateError
 }

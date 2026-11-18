@@ -68,6 +68,13 @@ func (m *mockGetClient) Call(ctx context.Context, cli *http.Client, path string,
 // that the request configuration does not supply is rejected before any HTTP happens
 // (clienttools.go:200). Approximated by scanning the path template rather than the OAS document, which
 // is equivalent for these fixtures and keeps the mock readable.
+// ApplyVendorRequiredDefaults is a no-op on this mock: a fixture's maps already hold exactly the values
+// the test means to send, so applying a document default here would change what the test asserts about.
+// The behaviour itself is covered against a real document in vendor_required_defaults_test.go.
+func (m *mockGetClient) ApplyVendorRequiredDefaults(httpMethod, path string, parameters, query, headers, cookies map[string]string) []restclient.AppliedDefault {
+	return nil
+}
+
 func (m *mockGetClient) ValidateRequest(httpMethod, path string, parameters, query, headers, cookies map[string]string) error {
 	for _, name := range pathparsing.UnresolvedPathParams(path, parameters) {
 		return fmt.Errorf("missing path parameter: %s", name)
