@@ -145,8 +145,21 @@ It rendered no HPA and silently pinned one replica. **The top-level `autoscaling
   `.github/workflows`; these sat under `go/rest-dynamic-controller/` from before the monorepo. 206 lines
   of plausible, never-executed release logic that a reader finds before the real one.
 
-- `0.54.0` and `0.83.0` are in `retracted-versions.yaml`. 0.54.0's RBAC collector missed `apiKey.tokenRef`,
-  so nothing declaring apiKey with a tokenRef could read its own auth Secret — use **0.54.1**.
+- **`0.53.0`, `0.54.0` and `0.83.0` are in `retracted-versions.yaml`** — use **0.54.1** for the first two.
+  Nothing declaring apiKey with a tokenRef can read its own auth Secret there, and **the break is a
+  conjunction rather than a single defect**: the RBAC collector has never covered `apiKey.tokenRef`
+  (measured, 0 occurrences of "apikey" in `authsecretrbac.go` at 0.52.0, 0.53.0 and 0.54.0, and 3 from
+  0.54.1), and what made 0.52.0 safe is a blanket cluster-wide `secrets` grant that the ServiceAccount
+  held as a superset. **#473/#475 removed that grant in 0.53.0** — measured, one uncommented `secrets`
+  occurrence in `clusterrole.yaml` at 0.52.0 and none at 0.53.0 — and that removal is the moment a latent
+  gap became a failure.
+
+  > Note (2026-11-18). The entry first carried 0.54.0 alone, with the collector named as the defect. A
+  > second consumer measured both facts at every tag rather than accepting the boundary on file, and
+  > corrected the mirror-image error on their own page — which had said 0.52.0 was safe because it
+  > *predates the collector entirely*. The collector is there and is equally gapped. **Either statement
+  > leads a reader to conclude that a version's safety follows from whether a collector exists, and it
+  > does not; the grant's removal governs.** The mechanism was worth more than the extra version.
 
 ## 2026-11-18 — 0.83.1
 
