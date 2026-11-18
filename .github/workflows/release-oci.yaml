@@ -30,15 +30,29 @@ jobs:
   # Only fires on a dispatch: on the tag path the version IS the git tag, which is a release by
   # definition and already plain semver.
   guard-prerelease-chart:
-    # EVERY dispatch, including one that leaves chart_version empty. The input's description says the
-    # default is "the git tag" -- but a dispatch runs from a BRANCH, where there is no tag to default to,
-    # so an empty value on this path is not "use the release version", it is undefined. The regex refuses
-    # empty, so letting the guard run is what catches it.
-    if: github.event_name == 'workflow_dispatch'
+    # NO JOB-LEVEL `if`, DELIBERATELY. It used to carry
+    # `if: github.event_name == 'workflow_dispatch'`, which on a TAG PUSH made this job SKIPPED -- and
+    # `release-oci` needs it, so that was skipped too and NO CHART WAS PUBLISHED, behind a run that
+    # reported success. 0.83.0 was tagged and produced nothing at all.
+    #
+    # A skipped `needs` dependency skips the dependent job. No error, no failed check, a tick on the
+    # summary. Only a registry probe showed it.
+    #
+    # So the condition lives INSIDE the step: this job always runs, and on anything but a dispatch it
+    # exits 0 having checked nothing.
+    #
+    # It still runs for EVERY dispatch, including one that leaves chart_version empty. The input's
+    # description says the default is "the git tag" -- but a dispatch runs from a BRANCH, where there is
+    # no tag to default to, so an empty value on this path is not "use the release version", it is
+    # undefined. The regex refuses empty, so letting the guard run is what catches it.
     runs-on: ubuntu-latest
     steps:
       - name: A dispatched chart version must be a pre-release
         run: |
+          if [ '${{ github.event_name }}' != 'workflow_dispatch' ]; then
+            echo "Not a dispatch (event: ${{ github.event_name }}) -- nothing to guard."
+            exit 0
+          fi
           v='${{ github.event.inputs.chart_version }}'
           if printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'; then
             echo "OK: $v is a pre-release chart version"
