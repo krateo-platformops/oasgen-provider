@@ -231,6 +231,11 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 		}
 	}
 
+	// THE VENDOR'S OWN DEFAULTS FIRST, for a parameter it declared `required` with a `default` and that
+	// nothing else supplied. Applied before validation rather than inside it, and at every site, so a
+	// request is validated as it will actually be sent.
+	u.ApplyVendorRequiredDefaults(httpMethod, path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
+
 	err := u.ValidateRequest(httpMethod, path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
 	if err != nil {
 		return Response{}, err
@@ -836,6 +841,11 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 			}
 		}
 	}
+
+	// THE VENDOR'S OWN DEFAULTS FIRST, for a parameter it declared `required` with a `default` and that
+	// nothing else supplied. Applied before validation rather than inside it, and at every site, so a
+	// request is validated as it will actually be sent.
+	u.ApplyVendorRequiredDefaults(httpMethod, path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
 
 	err := u.ValidateRequest(httpMethod, path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
 	if err != nil {

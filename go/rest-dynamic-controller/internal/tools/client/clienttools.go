@@ -89,6 +89,11 @@ func getValidResponseCode(codes *orderedmap.Map[string, *v3.Response]) ([]int, e
 
 type UnstructuredClientInterface interface {
 	ValidateRequest(httpMethod string, path string, parameters map[string]string, query map[string]string, headers map[string]string, cookies map[string]string) error
+	// ApplyVendorRequiredDefaults fills a parameter the vendor declared `required` WITH a `default` that
+	// nothing else supplied. On the contract rather than the concrete type because the dry-run
+	// addressability check holds this interface, and a dry run that skipped the defaults would answer a
+	// different question from the request it is predicting.
+	ApplyVendorRequiredDefaults(httpMethod, path string, parameters, query, headers, cookies map[string]string) []AppliedDefault
 	RequestedBody(httpMethod string, path string) (bodys stringset.StringSet, err error)
 	RequestedParams(httpMethod string, path string) (parameters, query, headers, cookies stringset.StringSet, err error)
 	// UpdatableBodyPaths belongs here with its siblings above: it is document introspection, and a caller

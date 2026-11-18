@@ -110,6 +110,13 @@ func (r *recordingClient) Rejected() int {
 
 // ValidateRequest reproduces the one real validation these tests depend on: a required path parameter the
 // configuration does not supply is refused before any HTTP (clienttools.go:200).
+// ApplyVendorRequiredDefaults is a no-op on this mock: a fixture's maps already hold exactly the values
+// the test means to send, so applying a document default here would change what the test asserts about.
+// The behaviour itself is covered against a real document in vendor_required_defaults_test.go.
+func (r *recordingClient) ApplyVendorRequiredDefaults(httpMethod, path string, parameters, query, headers, cookies map[string]string) []restclient.AppliedDefault {
+	return nil
+}
+
 func (r *recordingClient) ValidateRequest(httpMethod, path string, parameters, query, headers, cookies map[string]string) error {
 	for _, name := range pathparsing.UnresolvedPathParams(path, parameters) {
 		return fmt.Errorf("missing path parameter: %s", name)
