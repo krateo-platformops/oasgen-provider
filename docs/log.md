@@ -26,6 +26,139 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-18 — 0.83.0
+
+**Ownership for every generated controller, and three attempts to get its RBAC right.** The first shipped a
+name no Role grants; the second a `create` RBAC cannot authorize. Both were found by a consumer **reading
+the shipped asset**, before any cluster ran it — and the second is the more instructive, because the install
+it breaks reports healthy on every signal an operator has.
+
+### Every generated controller holds a Lease for its Kind × version (issue 771, half two)
+
+Without it **every replica of a generated controller reconciles every CR of its Kind**, and two writers
+against one vendor is a duplicate create. The provider's own manager has had leader election since 0.81.0;
+this is the other half.
+
+The Lease is namespaced, named for the Kind × version, and held by the pod. **The pod's identity comes from
+the downward API** (`fieldRef metadata.name` / `metadata.namespace`) rather than from a template, because
+the pod's actual namespace cannot drift from where the pod runs and a templated guess can.
+
+### The Lease name is GIVEN by the provider, not derived by the controller (issue 771)
+
+**The first shipping attempt had two derivations of one name, and they disagreed.** The controller computed
+it from the **observed** CRD version; the Role is named with a **fixed** `rbacVersion`. So every Kind not
+served at `v1alpha1` computed a name its Role does not grant, could not acquire, and **exited** — N
+generated controllers down rather than one provider.
+
+**The check that was supposed to catch it agreed with the broken pair.** It compared the Go format string
+against the template's *text*: both read `<resource>-<apiGroup>-<apiVersion>`, **the same words bound to
+different values.** Deleted along with the derivation, because one derivation cannot disagree with itself.
+
+> `Found by github-provider-kog` — **by reading the asset, not by running it.** I had stated that exact
+> limitation of my own agreement script to them an hour earlier and did not draw the conclusion.
+
+### A leases `create` cannot be scoped by `resourceNames` (issue 771)
+
+**The second attempt granted no `create` at all.** The rule listed `create` among its verbs *and* carried
+`resourceNames`; the name of an object being created is in the **request body**, not in the authorization
+attributes, so the authorizer never matches the list. **The rule stays valid, admission accepts it, and the
+create is denied at request time.** Its own comment said *"`create` is needed for first acquisition"* —
+true, and precisely the verb that cannot be granted that way.
+
+**The working version was in this chart the whole time.** `templates/role.yaml` grants the provider's own
+leader-election Lease `create` **unscoped**, with a comment making the same argument in nearly the same
+words. **Two Roles, one chart, same purpose, two directories apart, never compared.**
+
+Fixed by splitting the rule: `create` unscoped, `get`/`update` still pinned to the one Lease name — so a
+controller can create its own Lease and **still cannot take another's**, which is what the scoping was for.
+`watch` dropped rather than moved: with `resourceNames` it needs a `metadata.name` field selector, and
+`LeaseLock` issues only `Get`, `Create` and `Update`.
+
+> `Why this one matters beyond its own fix` — **it does not crash. It blocks, and reports healthy.**
+> `acquireOwnership`'s select has no timeout and no exit, so a denied create retries forever:
+>
+> ```
+> pod                 Running, 0 restarts, waiting=<none>, avail 1, ready 1
+> RestDefinition      Ready
+> the CR              no status, no vendor request sent, nothing created
+> the log             "Waiting for the ownership lease before reconciling"   present
+>                     "Holding the ownership lease; starting workers"        ABSENT
+> ```
+>
+> **Three consumer sessions measured controller health on that install and all three read healthy.** One had
+> just shipped an arm arguing that *"came up"* and *"stayed up"* must not share an answer; on this install
+> both of its signals are true over a controller doing nothing. **The chart ships
+> `rdc.readinessProbe: null`, and the runtime's `ReadyzCheck` — which already fails on exactly this
+> condition, and already treats "waiting for a peer's Lease" as Ready — is mounted by nothing.** Tracked as
+> its own defect; the probe wiring and a RestDefinition condition that reports *working* rather than
+> *deployed* are **not in this release**.
+
+### `findby` refuses when more than one item matches (issue 444)
+
+It returned the **first** match and never counted. A findby whose predicate is not unique therefore adopted
+an arbitrary object — and on the next reconcile possibly a different one. **Now it refuses**, because
+silently managing someone else's resource is worse than failing to start.
+
+Counting is **per page**: `WalkPaginated` returns on the first page containing a match, so a second match on
+a later page is not seen. Tracked separately rather than papered over.
+
+### A verb's `successCodes` now reach the generator (issue 804)
+
+The field was in the CRD and honoured at runtime while **the generator ignored it**, so an async create
+answering `202` had no findable response schema and the comparison warned. The generator now reads the
+**union** of its own `200`/`201` and the verb's declared codes — a declared `202` must not cost you `200`.
+
+> `Confirmed by experiment (2026-11-18)` — a consumer staged `successCodes: [202]` on their create verb at
+> `0.83.0-rc1`: **7 schema warnings → 6, with the other five kinds unchanged as the control.** And the
+> generated CRD shape is **untouched** for a create-verb declaration — `getBaseSchemaForSpec` reads the
+> request body and `getBaseSchemaForStatus` reads `get`/`findby` responses only, so a create response feeds
+> the comparison and nothing else. **On a `get` or `findby` verb the same field CAN change the status
+> schema**, which is worth knowing before reading a legitimate diff as a regression.
+
+### A 403 is not transient, and a 401 says a credential was rejected
+
+A `403` on the existence check was treated as a retryable error, so a resource whose credential lacks the
+permission retried forever with nothing to read. **It is now terminal and names `authenticationRefs`.** A
+`401` is marked existence-undetermined with a message saying it clears on rotation — **not** terminal,
+because credential rotation is delegated to a secret manager and a rotated credential should recover
+without intervention.
+
+### A pre-release image and chart from a dispatch (CI)
+
+The 0.83.0 hold was **circular**: the gate was a cluster run, and a cluster run needs a published artifact,
+and publishing needed the tag the gate was holding. `release-tag.yaml` and `release-oci.yaml` now accept a
+`workflow_dispatch` with an explicit version, guarded by a job that **refuses anything without a
+pre-release suffix** — so the dispatch path cannot mint a plain `X.Y.Z` behind the tag's back.
+
+The guard was proved to refuse **in situ**, by dispatching a plain `0.83.0` and watching it fail. That run
+is annotated on its PR so a red `release-tag` is not read as a broken pipeline.
+
+> `And the first dispatch failed with zero jobs` — the org reusable's input is **`version`**, not
+> `image_tag`. An invalid `with:` key is a workflow-level error, so it broke **the tag path too**, not just
+> the new trigger. I read my own workflow instead of the reusable's contract, and the natural reading — *"I
+> added a trigger, the new trigger failed"* — would have been wrong.
+
+### Corrections to earlier entries
+
+**0.77.0's retraction was itself too weak** (#803): "reports healthy" understated it. A `Creating` child
+classifies as converging, so the parent reads `Ready=False/Creating` **with no deadline** — never green, and
+never failed either.
+
+**The 0.82.0 roll-gap note was too strong** (#810, then #816): "3.9 seconds rather than milliseconds" drew a
+characteristic value from one sample. A second sample measured **0.009 s**, and the mechanism stated in the
+same paragraph — the new pod's first attempt finding the Lease still held and waiting for retry ticks —
+already implied a race rather than a constant.
+
+### Also in this release
+
+- **`unstructured-runtime` v1.27.1**, whose unknown-outcome message now says deletion waits too.
+- **The standalone install guide** no longer tells readers to pin `0.21.0` of a cluster-scoped singleton, and
+  carries the credential-exposure boundary: the vendor error-body snippet is unredacted below **0.57.0** and
+  redacted **by value** at and above it — against `secretRef`-resolved strings only, so a credential that
+  reached the request another way is not covered at any version.
+- **`*ApiRef` delegation** documented, including the Service that fails as a wrong answer (issue 262).
+- **A structural inventory** of the if/then/else shapes crdgen #212 tightened (`hack/if-then-walk.py`).
+
 ## 2026-11-17 — 0.82.0
 
 **Five fixes that consumers found, four of them in code I had described as working.** A chart that bound
