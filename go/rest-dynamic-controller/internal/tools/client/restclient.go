@@ -198,6 +198,17 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 	// documents, all with `required: true` -- and was ignored for an unrelated reason, so a check that
 	// consults the parameter block would have passed here. A leftover `{...}` is wrong whatever the vendor
 	// declared.
+	// THE VENDOR'S OWN DEFAULTS BEFORE ANYTHING READS THE MAPS, which is a correctness requirement and
+	// not a style choice. This call used to sit just above ValidateRequest, and from there it could not
+	// work: the path check below returns first, and buildPath consumes BOTH Parameters and Query to
+	// construct the URI. A query default filled afterwards was worse than one never filled -- the URI was
+	// already built without it while ValidateRequest, reading the map, then PASSED. A request reported
+	// valid that does not carry the value is the one outcome worse than a loud refusal.
+	//
+	// Found by a consumer counting the affected parameters in their own corpus rather than taking my
+	// word that there were none.
+	u.ApplyVendorRequiredDefaults(string(opts.Method), path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
+
 	if missing := pathparsing.UnresolvedPathParams(path, opts.Parameters); len(missing) > 0 {
 		return Response{}, fmt.Errorf("refusing to request %s: unresolved path parameter(s) %v -- the value is absent, so this request would address the literal template rather than a resource", path, missing)
 	}
@@ -230,11 +241,6 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 			}
 		}
 	}
-
-	// THE VENDOR'S OWN DEFAULTS FIRST, for a parameter it declared `required` with a `default` and that
-	// nothing else supplied. Applied before validation rather than inside it, and at every site, so a
-	// request is validated as it will actually be sent.
-	u.ApplyVendorRequiredDefaults(httpMethod, path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
 
 	err := u.ValidateRequest(httpMethod, path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
 	if err != nil {
@@ -810,6 +816,17 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 	// documents, all with `required: true` -- and was ignored for an unrelated reason, so a check that
 	// consults the parameter block would have passed here. A leftover `{...}` is wrong whatever the vendor
 	// declared.
+	// THE VENDOR'S OWN DEFAULTS BEFORE ANYTHING READS THE MAPS, which is a correctness requirement and
+	// not a style choice. This call used to sit just above ValidateRequest, and from there it could not
+	// work: the path check below returns first, and buildPath consumes BOTH Parameters and Query to
+	// construct the URI. A query default filled afterwards was worse than one never filled -- the URI was
+	// already built without it while ValidateRequest, reading the map, then PASSED. A request reported
+	// valid that does not carry the value is the one outcome worse than a loud refusal.
+	//
+	// Found by a consumer counting the affected parameters in their own corpus rather than taking my
+	// word that there were none.
+	u.ApplyVendorRequiredDefaults(string(opts.Method), path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
+
 	if missing := pathparsing.UnresolvedPathParams(path, opts.Parameters); len(missing) > 0 {
 		return Response{}, nil, fmt.Errorf("refusing to request %s: unresolved path parameter(s) %v -- the value is absent, so this request would address the literal template rather than a resource", path, missing)
 	}
@@ -841,11 +858,6 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 			}
 		}
 	}
-
-	// THE VENDOR'S OWN DEFAULTS FIRST, for a parameter it declared `required` with a `default` and that
-	// nothing else supplied. Applied before validation rather than inside it, and at every site, so a
-	// request is validated as it will actually be sent.
-	u.ApplyVendorRequiredDefaults(httpMethod, path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
 
 	err := u.ValidateRequest(httpMethod, path, opts.Parameters, opts.Query, opts.Headers, opts.Cookies)
 	if err != nil {

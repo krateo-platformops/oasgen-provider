@@ -52,6 +52,7 @@ func (u *UnstructuredClient) ApplyVendorRequiredDefaults(httpMethod, path string
 	if u == nil || u.DocScheme == nil || u.DocScheme.Model.Paths == nil {
 		return nil
 	}
+	_ = parameters // retained in the signature: the `path` case is deliberately not filled; see below.
 	pathItem, ok := u.DocScheme.Model.Paths.PathItems.Get(path)
 	if !ok {
 		return nil
@@ -71,8 +72,25 @@ func (u *UnstructuredClient) ApplyVendorRequiredDefaults(httpMethod, path string
 		}
 		var target map[string]string
 		switch param.In {
-		case "path":
-			target = parameters
+		// `path` IS DELIBERATELY ABSENT, and this is the one place the document is not followed.
+		//
+		// A path parameter decides WHICH RESOURCE is addressed, so a value nobody supplied is not a
+		// detail of the request -- it is a different request. Measured instance: two of one vendor's
+		// documents declare
+		//
+		//	projectId   required: true   default: '*'
+		//
+		// so a consumer who does not supply it would address /projects/*/providers/... -- a read across
+		// every project the credential can see, and the same default sits on an alertRules POST and
+		// DELETE. That consumer is safe only because their own CRs supply projectId, which is a property
+		// of their corpus and not of this code.
+		//
+		// A `..` segment can go further still and relocate the request HOST, verified on three channels.
+		//
+		// So: reflect the vendor wherever the blast radius is the request, and refuse where it is someone
+		// else's tenant. The refusal is already loud and already correct --
+		// "refusing to request %s: unresolved path parameter(s) %v" -- and an author who wants the
+		// vendor's value can write it on the verb, where it is their decision rather than an inference.
 		case "query":
 			target = query
 		case "header":
