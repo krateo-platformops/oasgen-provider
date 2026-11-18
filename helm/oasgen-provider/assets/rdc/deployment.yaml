@@ -113,6 +113,15 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.rdc.service.port }}
+              {{- if ne (int .Values.rdc.healthProbePort) 0 }}
+              # The readiness listener, declared for the same reason as metrics below: a containerPort
+              # for a server the binary never starts is a declaration a reader or a NetworkPolicy takes
+              # at face value. REST_CONTROLLER_HEALTH_PROBE_PORT: "0" means nothing is listening -- and
+              # in that case rdc.readinessProbe must be empty too, or every pod is marked NotReady.
+              - name: health
+                containerPort: {{ .Values.rdc.healthProbePort }}
+                protocol: TCP
+              {{- end }}
               {{- if ne (int .Values.rdc.metrics.port) 0 }}
               # ONLY WHEN NON-ZERO (#772). A containerPort for a server the binary never starts is a
               # declaration a reader, a NetworkPolicy or a scrape config would take at face value -- and

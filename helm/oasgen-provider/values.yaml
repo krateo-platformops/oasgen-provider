@@ -160,6 +160,44 @@ rdc:
   metrics:
     port: 0
 
+  # The readiness endpoint, and it is ON by default -- which is a deliberate break from `metrics.port: 0`
+  # above.
+  #
+  # WHY ON WHEN THE SIBLING IS OFF. The defect this closes is invisible by construction. A generated
+  # controller that cannot acquire its ownership lease reports `avail=1 ready=1 restarts=0 waiting=-`
+  # and logs "Waiting for the ownership lease before reconciling" while never logging "Holding the
+  # ownership lease; starting workers". A consumer measured that on a real cluster, 6 of 6 controllers,
+  # with an in-cluster control -- four pod signals carrying identical values and opposite truths (#815).
+  # Nobody opts in to a check for a problem whose every signal reads green, and the consumer who found
+  # it did so by reading controller LOGS rather than pod status.
+  #
+  # SAFE AT THE DEFAULT because `replicaCount` is 1: the sole replica acquires the lease and reports
+  # Ready. A replica that STAYS NotReady is one that genuinely cannot reconcile, which is the entire
+  # point.
+  #
+  # READINESS ONLY. Waiting for a lease is HEALTHY -- exactly one replica holds it and the others are
+  # correct to wait -- so wiring a LIVENESS probe to this check would restart every waiting replica in a
+  # loop, turning a working design into a crash loop. `livenessProbe` is deliberately left empty.
+  healthProbePort: 8081
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: 8081
+    # The first list has to succeed before the check passes, so a few seconds of grace avoids one
+    # guaranteed failure at every start.
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    # ~5 minutes before the pod is marked NotReady. GENEROUS ON PURPOSE: a lease handover between
+    # replicas, or a slow first list on a large cluster, must not flap the pod. The signal is meant to
+    # catch a controller that is PERMANENTLY unable to serve, not one that is briefly behind.
+    failureThreshold: 30
+    timeoutSeconds: 3
+
+  # Deliberately empty -- see the readinessProbe comment above. A liveness probe pointed at /readyz
+  # would restart every replica that is correctly waiting for the ownership lease.
+  livenessProbe: {}
+
   # Disable endpoint matching entirely. The unconditional refusals above still apply.
   #
   # Its own key rather than a `*` entry in the list, so "permit any host" appears in a values diff

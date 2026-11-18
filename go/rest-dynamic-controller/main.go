@@ -24,6 +24,7 @@ import (
 	logglobal "go.opentelemetry.io/otel/log/global"
 
 	restResources "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers"
+	"github.com/krateo-platformops/rest-dynamic-controller/internal/health"
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/authn"
 	restclient "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/client"
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
@@ -197,6 +198,13 @@ func main() {
 	metricsServerPort := flag.Int("metrics-server-port",
 		env.Int("REST_CONTROLLER_METRICS_SERVER_PORT", 0),
 		"The address to bind the metrics server to. If empty, metrics server is disabled.")
+	healthProbePort := flag.Int("health-probe-port",
+		env.Int("REST_CONTROLLER_HEALTH_PROBE_PORT", 0),
+		"Port for the readiness endpoint at /readyz. 0 disables it. The check fails while the first "+
+			"list has not succeeded and while a peer holds the ownership lease -- so a replica waiting "+
+			"for the lease reports NotReady instead of Running-and-reconciling-nothing (#815). READINESS "+
+			"ONLY: waiting for a lease is healthy, so wiring a LIVENESS probe here would restart every "+
+			"waiting replica in a loop.")
 	otelEnabled := flag.Bool("otel-enabled",
 		env.Bool("OTEL_ENABLED", false),
 		"Enable OTLP metrics export for provider-runtime reconcile telemetry.")
@@ -593,6 +601,26 @@ func main() {
 		os.Exit(1)
 	}
 	controller.SetExternalClient(handler)
+
+	// THE READINESS ENDPOINT, started here because this is the first point where the controller's own
+	// ReadyzCheck exists to serve. It runs in a goroutine because Run blocks, and a bind failure is
+	// FATAL rather than logged: a readiness endpoint that silently failed to bind leaves the pod
+	// reporting Ready on the very shape this exists to expose, which is worse than not having one.
+	if *healthProbePort > 0 {
+		addr := fmt.Sprintf(":%d", *healthProbePort)
+		ln, lerr := health.Listen(addr)
+		if lerr != nil {
+			log.Error(lerr, "Binding the readiness endpoint.", "address", addr)
+			os.Exit(1)
+		}
+		go func() {
+			if herr := health.Serve(ctx, log, ln, controller.ReadyzCheck); herr != nil {
+				log.Error(herr, "Readiness endpoint stopped.")
+			}
+		}()
+	} else {
+		log.Info("Readiness endpoint disabled", "flag", "health-probe-port")
+	}
 
 	err = controller.Run(ctx, *workers)
 	if err != nil {
