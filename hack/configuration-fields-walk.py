@@ -125,11 +125,51 @@ def oas_index(oas_dir):
                             indexed_any = True
                             continue
                         if isinstance(inner, dict) and ("openapi" in inner or "swagger" in inner or "paths" in inner):
+                            inner["__cm_name__"] = (doc.get("metadata") or {}).get("name")
                             idx[dkey + ":" + dk] = ("OK", inner)
                             indexed_any = True
             if not indexed_any:
                 idx[key] = ("NOT-OAS", "parsed, but declares no openapi/swagger/paths")
     return idx
+
+
+def resolve_oas(oas_path, idx):
+    """The document an oasPath NAMES, not the first one that happens to contain the verb's path.
+
+    THIS WAS A FALSE-POSITIVE FACTORY. The walk used to search every indexed document for the verb's
+    path and take the FIRST match. On a corpus carrying two versions of one API -- which is the normal
+    shape, and exactly what #108 is about -- both documents declare the same path and only one declares
+    the parameter. Measured on a consumer's 36-definition corpus: the walk reported `api-version` as
+    undeclared on a findby, and the document the RestDefinition actually names declares it. Their
+    independent implementation said 0 and was right.
+
+    A FALSE POSITIVE ON A REFUSAL GATE IS THE WORST KIND. It would either block a refusal that should
+    ship, or get "fixed" by a consumer deleting a legitimate entry.
+
+    Two spellings are resolved:
+        configmap://<namespace>/<configmap-name>/<data-key>   -> that ConfigMap's data key
+        anything else                                          -> matched on basename
+    """
+    if not oas_path:
+        return None
+    if oas_path.startswith("configmap://"):
+        parts = oas_path[len("configmap://"):].split("/")
+        if len(parts) < 3:
+            return None
+        cm_name, data_key = parts[1], "/".join(parts[2:])
+        for k, v in idx.items():
+            if v[0] != "OK" or not k.endswith(":" + data_key):
+                continue
+            # the index key is "<file>#<i>:<data-key>" or "<file>:<data-key>"; confirm the ConfigMap NAME
+            if v[1].get("__cm_name__") == cm_name:
+                return (k, v[1])
+        # name did not match any indexed ConfigMap: fall back to the data key alone, but only if it is
+        # unambiguous -- two ConfigMaps with the same key is the collision this walk already refuses
+        cands = [(k, v[1]) for k, v in idx.items() if v[0] == "OK" and k.endswith(":" + data_key)]
+        return cands[0] if len(cands) == 1 else None
+    base = os.path.basename(oas_path)
+    cands = [(k, v[1]) for k, v in idx.items() if v[0] == "OK" and os.path.basename(k.split("#")[0]) == base]
+    return cands[0] if len(cands) == 1 else None
 
 
 def declared_query_params(doc, path, method):
@@ -189,6 +229,7 @@ def main(argv):
             if d.get("kind") != "RestDefinition":
                 continue
             rds += 1
+            spec_oas = (d.get("spec") or {}).get("oasPath")
             res = (d.get("spec") or {}).get("resource") or {}
             verbs = res.get("verbsDescription") or []
             all_actions = [v.get("action") for v in verbs if isinstance(v, dict) and v.get("action")]
@@ -213,19 +254,22 @@ def main(argv):
                     vpath, vmethod = v.get("path"), v.get("method")
                     if not vpath or not vmethod:
                         continue
-                    hit = None
-                    for base, entry in idx.items():
-                        if entry[0] != "OK":
-                            continue
-                        got = declared_query_params(entry[1], vpath, vmethod)
-                        if got is not None:
-                            hit = (base, got)
-                            break
-                    if hit is None:
-                        unresolved.append((f, name, a, vpath, vmethod))
+                    # THE DOCUMENT THIS ACTION IS SERVED BY -- the verb's own oasPath if it has one,
+                    # else the resource's. This is what the provider does per action (#108), and
+                    # guessing by first-path-match instead produced a measured false positive on a
+                    # corpus carrying two versions of one API.
+                    doc_hit = resolve_oas(v.get("oasPath") or spec_oas, idx)
+                    if doc_hit is None:
+                        unresolved.append((f, name, a, v.get("oasPath") or spec_oas or "<no oasPath>",
+                                           "oasPath did not resolve to exactly one indexed document"))
                         continue
-                    if pname not in hit[1]:
-                        i828.append((f, name, ci, pname, pin, a, hit[0]))
+                    got = declared_query_params(doc_hit[1], vpath, vmethod)
+                    if got is None:
+                        unresolved.append((f, name, a, vpath,
+                                           f"path absent from the document it names ({doc_hit[0]})"))
+                        continue
+                    if pname not in got:
+                        i828.append((f, name, ci, pname, pin, a, doc_hit[0]))
 
     print(f"restdefinitions read      {rds}")
     print(f"configurationFields seen  {entries_seen}")
@@ -267,7 +311,7 @@ def main(argv):
         bad = True
         print(f"CONTROL FAILED: {len(unresolved)} operation(s) whose path is in NO indexed document")
         for f, n, a, p, m in unresolved[:10]:
-            print(f"    {n}  action={a}  {m.upper()} {p}   {f}")
+            print(f"    {n}  action={a}  {p}   {m}   {f}")
         print("    -> a '#828 clean' verdict over unread documents is a false zero; fix --oas-dir")
     if entries_seen == 0:
         bad = True
