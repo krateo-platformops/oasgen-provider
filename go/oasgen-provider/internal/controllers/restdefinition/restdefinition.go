@@ -1401,11 +1401,29 @@ func (e *external) generateAndApplyCRDs(ctx context.Context, cr *definitionv1alp
 	if live, found, lerr := liveCRD(ctx, e.kube, rendered.CRD.GetName()); lerr != nil {
 		e.log.Debug("Could not read the live CRD to check for newly pruned fields; skipping", "error", lerr)
 	} else if found {
-		for _, f := range excludedFieldsStillServed(cr.Spec.Resource.ExcludedSpecFields, servedSpecProperties(live)) {
+		served := servedSpecProperties(live)
+		for _, f := range excludedFieldsStillServed(cr.Spec.Resource.ExcludedSpecFields, served) {
 			rendered.GenerationWarnings = append(rendered.GenerationWarnings, fmt.Errorf(
 				"excludedSpecFields entry %q prunes a field the CRD still serves: any instance that "+
 					"still sets it will be rejected on its next apply. Remove the entry if the field is "+
 					"wanted, or clear it from existing instances", f))
+		}
+
+		// THE SAME DESTRUCTIVE ACT FROM THE OTHER FIELD. configurationFields became mutable on the
+		// principle #666 settled, and its ADD prunes a served property exactly as an exclusion does --
+		// removeConfiguredFields is called from the SPEC builder. One predicate serves both so the two
+		// cannot drift: a reader who finds one guarded would otherwise assume the pattern is applied.
+		//
+		// The message differs in its REMEDY, and that difference is the point: an exclusion is simply
+		// gone, while a configuration field has MOVED, so the value has to be supplied in the
+		// Configuration CR or the request loses it silently. Telling an author to "clear it from
+		// existing instances" without that half would lose the value they were trying to relocate.
+		for _, f := range excludedFieldsStillServed(configurationFieldNames(cr), served) {
+			rendered.GenerationWarnings = append(rendered.GenerationWarnings, fmt.Errorf(
+				"configurationFields entry %q prunes a field the CRD still serves: any instance that "+
+					"still sets it will be rejected on its next apply, and the value must now be supplied "+
+					"in the Configuration CR this resource references or the request will not carry it. "+
+					"Remove the entry if the field should stay in the spec", f))
 		}
 	}
 
@@ -2623,6 +2641,24 @@ func renderWarnings(warnings []error) []string {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// configurationFieldNames is the spec paths a RestDefinition's configurationFields prune, in the shape
+// excludedFieldsStillServed reads.
+//
+// FromOpenAPI.Name is the path, and it is the same path excludedSpecFields entries use -- which is why one
+// predicate can serve both and why reusing it is correctness rather than tidiness.
+func configurationFieldNames(cr *definitionv1alpha1.RestDefinition) []string {
+	if len(cr.Spec.Resource.ConfigurationFields) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(cr.Spec.Resource.ConfigurationFields))
+	for _, f := range cr.Spec.Resource.ConfigurationFields {
+		if f.FromOpenAPI.Name != "" {
+			out = append(out, f.FromOpenAPI.Name)
+		}
 	}
 	return out
 }

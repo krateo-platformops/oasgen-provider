@@ -137,8 +137,33 @@ spec:
                     - updatable
                     type: string
                   configurationFields:
-                    description: 'ConfigurationFields: the list of fields to use as
-                      configuration fields'
+                    description: "ConfigurationFields: the list of fields to use as
+                      configuration fields\nMUTABLE since this change, on the principle
+                      #666 settled: gate on DATA LOSS, not on symmetry.\n\n\tADD     a
+                      spec property is pruned; whatever live CRs hold there goes with
+                      it, irreversibly\n\t        -> DESTRUCTIVE, and warned about
+                      by name before the apply\n\tREMOVE  the property comes back
+                      -> ADDITIVE; nothing is ever lost -> no gate\n\nThis field had
+                      the SAME shape as excludedSpecFields and was named in #666's
+                      own symptom list with\nthe identical error message -- that issue
+                      documented two frozen fields and unfroze one. Adding an\nentry
+                      calls removeConfiguredFields from the SPEC builder, so the property
+                      is pruned exactly as an\nexclusion prunes it; removing one lets
+                      it return.\n\nNOT append-only, for the same reason excludedSpecFields
+                      is not: removals lose nothing, so there is\nnothing for a gate
+                      to protect. And it is the REMOVAL that a consumer needs in the
+                      case that\nmotivated #666 -- a credential sitting in a CR spec,
+                      where the remedy is to move it into the\nConfiguration CR and
+                      the author has to be able to change their mind afterwards.\n\nWHY
+                      identifiers IS STILL IMMUTABLE and this is not, since they sit
+                      two fields apart: both of that\nfield's directions lose something.
+                      Adding an identifier under `AND` makes matching STRICTER, so
+                      a\nCR that matched its external object can stop matching and
+                      be orphaned or re-created; removing one\nmakes it LOOSER, which
+                      is #444's measured case -- a CR adopted a different object on
+                      a shared\nnon-unique field, reported Synced=True, and then deleted
+                      it. The principle keeps that field frozen\nand frees this one;
+                      it is not an inconsistency."
                     items:
                       properties:
                         fromOpenAPI:
@@ -168,10 +193,6 @@ spec:
                       - fromRestDefinition
                       type: object
                     type: array
-                    x-kubernetes-validations:
-                    - message: ConfigurationFields are immutable, you cannot change
-                        them once the CRD has been generated
-                      rule: self == oldSelf
                   createApiRef:
                     description: |-
                       CreateApiRef, when set, delegates CREATE of this resource to a Snowplow RESTAction instead of the

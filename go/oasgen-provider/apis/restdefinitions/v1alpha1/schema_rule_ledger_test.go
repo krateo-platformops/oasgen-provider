@@ -32,10 +32,13 @@ import (
 const (
 	// UPDATE THESE DELIBERATELY. A diff here is the test working.
 	//
-	// FIRST CAUGHT, on its own first run: 70/33 -> 78/37, the +8 from #710's embedding, before anyone
+	// FIRST CAUGHT, on its own first run: 70/33 -> 77/36, the +8 from #710's embedding, before anyone
 	// had to remember to look.
-	wantRuleTotal = 78
-	wantRuleNodes = 37
+	// 78/37 -> 77/36: one rule removed, on ONE node, by unfreezing configurationFields. A removal has to
+	// move this ledger too, or the next addition is measured against a stale baseline and the +1 that
+	// restores 78 reads as no change at all.
+	wantRuleTotal = 77
+	wantRuleNodes = 36
 )
 
 // countRules walks the whole document, so it counts rules wherever they are -- including at paths

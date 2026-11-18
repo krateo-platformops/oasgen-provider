@@ -50,15 +50,30 @@ someone work: it told readers they could not append a status field when appendin
 rule permits.
 
 Strictly immutable (`self == oldSelf`) — changing one means deleting and recreating the RestDefinition:
-`resourceGroup`, `kind`, `identifiers`, `configurationFields`.
+`resourceGroup`, `kind`, `identifiers`.
 
 **Append-only** (`size(self) >= size(oldSelf) && oldSelf.all(i, v, self[i] == v)`) — you may add entries
 at the end, but existing entries cannot be removed, renamed, reordered or changed:
 `additionalStatusFields`, `includedSpecFields`.
 
-So **four strict and two append-only**, six rules in total. (It was five strict until 0.72.0; #666 unfroze `excludedSpecFields`.) The authority is the marker on each field in
+So **three strict and two append-only**, five rules in total. (It was five strict until 0.72.0; #666
+unfroze `excludedSpecFields`, and `configurationFields` followed on the same principle — see below.) The
+authority is the marker on each field in
 `apis/restdefinitions/v1alpha1/types.go`; counting them by grepping the rendered CRD for `oldSelf`
 over-counts, because two of the matches are inside a `description` rather than a `rule`.
+
+**The rule these five follow, so the next field does not need a fresh argument.** #666 settled it: gate on
+**data loss**, not on symmetry.
+
+| field | adding an entry | removing one | so |
+|---|---|---|---|
+| `excludedSpecFields` | prunes a served property, irreversibly | the property returns | mutable, warned on add |
+| `configurationFields` | prunes a served property, irreversibly | the property returns | mutable, warned on add |
+| `identifiers` | matching gets STRICTER under `AND`: a CR can stop matching its object and be orphaned or re-created | matching gets LOOSER: #444's measured case, where a CR adopted a different object on a shared non-unique field, reported `Synced=True`, then deleted it | **both** directions lose, so still strict |
+| `additionalStatusFields` | a new status field appears | an existing one disappears from every CR | append-only |
+
+So the asymmetry between `configurationFields` and `identifiers` is the principle applied, not an
+oversight: one has a safe direction and the other has none.
 
 `includedSpecFields` is append-only rather than strictly immutable for a reason worth knowing before
 you plan a change: widening the allowlist only **adds** fields to the generated CRD, while narrowing it
