@@ -26,6 +26,128 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-18 — 0.84.0
+
+**A vendor's own `default` is now sent on a parameter it also declared `required`, and two fields that
+were frozen for no measured reason are freed.** Both came from a consumer disputing a recommendation of
+mine, and in both cases the dispute was right.
+
+### A `required` parameter's `default` is sent, because the document is the authority
+
+A parameter declared `required: true` with a `schema.default` was accepted at generation and then failed
+EVERY call with `missing <in>: <name>`. The vendor had written both the obligation and the value, and this
+controller ignored the second.
+
+**I recommended against fixing it this way and the recommendation was wrong on a specific point.** I
+argued that a `default` on a request parameter describes what the SERVER assumes when the value is absent,
+so sending it would make the controller assert a value the author never wrote. *That reading is incoherent
+with `required: true`*: a required parameter is never absent, so the server never gets to assume anything.
+The only coherent reading of the pair is the vendor saying **this must be present, and here is the value
+to send when you have no other.**
+
+> Note (2026-11-18). The precedent I argued from was the wrong KIND of act. 0.53.0's hazard was `crdgen`
+> **inventing** `default: {}` for an optional object parent, which the apiserver then wrote irreversibly
+> into every CR. Here the default IS the vendor's. Inventing a value is not reading one, and this file
+> had both filed as one lesson.
+
+**Scope, because every boundary is a decision:**
+
+| shape | behaviour |
+|---|---|
+| `required` + scalar default | **sent**, and reported so an operator sees what was supplied |
+| optional + default | omitted — there the usual reading holds and the server does supply it |
+| `required` + object/array default | **not sent**: no serialisation these locations have that the vendor specified |
+| explicit `null` default | omitted — a declaration that there is NO value |
+| a value already present | always wins; this only fills an absence |
+
+**Query, header and cookie — never a PATH parameter, and a request BODY property's default is untouched.**
+That distinction is what tells a consumer whether their corpus is affected: count parameters, not
+properties. Applied at all three sites that build or validate a request, including the dry-run
+addressability check, which otherwise predicts a different request from the one that goes out.
+
+> Note (2026-11-18). A path parameter decides WHICH RESOURCE is addressed, so a value nobody supplied is
+> not a detail of the request — it is a different request. A consumer counted their own corpus rather than
+> taking my word that the count was zero and found two of their vendor's documents declaring
+> `projectId  required: true  default: '*'`, which would address `/projects/*/providers/...` — a read
+> across every project the credential can see, with the same default on an alertRules POST and DELETE.
+> They are safe only because their own CRs supply it, which is a property of their corpus and not of this
+> code. So: reflect the vendor wherever the blast radius is the request, and refuse where it is someone
+> else's tenant. The existing refusal is already loud, and an author who wants the vendor's value can
+> write it on the verb, where it is their decision rather than our inference.
+
+> Correction (2026-11-18). The first implementation of this applied the defaults just above validation,
+> where they could not work: the path check returns first and `buildPath` consumes both the parameters and
+> the query to build the URI. A query default filled afterwards was **worse than one never filled** — the
+> URI was already built without it while validation, reading the map, passed. **A request reported valid
+> that does not carry the value is the one outcome worse than a loud refusal.** The tests could not see it
+> because none of them went through the real request path; there is now one that asks an `httptest` server
+> what it received, and it fails on the original order.
+
+`configurationFields` and `excludedSpecFields` entries whose default cannot be sent are reported at
+generation instead, naming the verb, the runtime error, and why a scalar is honoured when this is not.
+
+### `configurationFields` is mutable
+
+**#666 settled a principle and this release finishes applying it: gate on DATA LOSS, not on symmetry.**
+
+```
+ADD     a spec property is pruned; whatever live CRs hold there goes with it, irreversibly
+        -> DESTRUCTIVE, and warned about by name before the apply
+REMOVE  the property comes back -> ADDITIVE; nothing is ever lost -> no gate
+```
+
+**#666's own symptom list named this field**, with the identical error message — that issue documented two
+frozen fields and unfroze one. Adding an entry calls `removeConfiguredFields` from the SPEC builder, so
+the property is pruned exactly as an exclusion prunes it.
+
+**`identifiers` stays immutable, and that is the principle rather than an exception to it.** Both of its
+directions lose something: adding one under `AND` makes matching STRICTER, so a CR that matched its
+external object can stop matching and be orphaned or re-created; removing one makes it LOOSER, which is
+#444's measured case — a CR adopted a different object on a shared non-unique field, reported
+`Synced=True`, then deleted it. `excludedSpecFields` and `configurationFields` each have one safe
+direction. `identifiers` has none. **The asymmetry is now stated in `docs/api.md` as a table**, because a
+consumer looked at two siblings treated differently and reasonably asked whether it was an oversight.
+
+**So three strictly-immutable fields remain**, not four: `resourceGroup`, `kind`, `identifiers`.
+
+### A create answering 404 no longer latches
+
+`404` joins the statuses that mean the create never reached the vendor, so nothing was created and the
+pending stamp is not written. **The exposure is a FRESH install** — a route that does not resolve — which
+is exactly what a bump-verification cluster is, so this retires an obstacle for anyone moving a pin.
+
+### `rdc.autoscaling` is gone from the chart
+
+It rendered no HPA and silently pinned one replica. **The top-level `autoscaling` block and
+`templates/hpa.yaml` are untouched** — those render a real HPA for the provider manager.
+
+### Smaller, and one thing that is only a test
+
+- **An unresolvable `configurationFields` entry now names WHY.** Four different things produced one
+  message and only one of them is the author's parameter being undeclared; a refusal that fires on the
+  wrong one tells an author to check a spelling that is correct.
+
+  > Correction (2026-11-18, issue 828). That issue's premise was wrong and I filed it. "Skipped silently"
+  > is false in general: `removeConfiguredFields` has warned for the ordinary typo for as long as the
+  > behaviour existed, asserted by a test named for it. The real silence needs a name PRESENT in the spec
+  > schema and NOT declared as a parameter. Narrower than filed, and still the shape a consumer hits.
+
+- **A vendor's response body is now pinned off the resource by a test.** It was already excluded —
+  `StatusError.Error()` renders the status and the inner error, never `BodySnippet` — but nothing
+  enforced it, so the only statement of the property was a comment. One field added to that `Sprintf`
+  would publish attacker-influenced vendor text to every reader of the resource, and nothing would fail.
+
+- **`hack/configuration-fields-walk.py`** reports which `configurationFields` entries the refusals decided
+  for #512 and #828 would reject, before either refuses. Evidence so far is 0/0 from two corpora by two
+  implementations with firing controls, plus one corpus where the mechanism is unused.
+
+- **Four workflow files that had never run are gone.** GitHub Actions reads only the repository-root
+  `.github/workflows`; these sat under `go/rest-dynamic-controller/` from before the monorepo. 206 lines
+  of plausible, never-executed release logic that a reader finds before the real one.
+
+- `0.54.0` and `0.83.0` are in `retracted-versions.yaml`. 0.54.0's RBAC collector missed `apiKey.tokenRef`,
+  so nothing declaring apiKey with a tokenRef could read its own auth Secret — use **0.54.1**.
+
 ## 2026-11-18 — 0.83.1
 
 **0.83.0 was tagged and published nothing, so this is that release with the defect that swallowed it
