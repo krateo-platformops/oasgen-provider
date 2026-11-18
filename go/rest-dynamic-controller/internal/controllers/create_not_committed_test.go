@@ -44,9 +44,6 @@ func TestCreateRefusedWithoutCreating(t *testing.T) {
 	refused := map[int]string{
 		http.StatusConflict: "some vendors answer 409 BECAUSE the resource now exists, so 'not committed' " +
 			"is false for exactly the case that would duplicate",
-		http.StatusNotFound: "usually a missing parent, but a vendor answering 404 from a route that " +
-			"nevertheless wrote something would be unrecoverable; the price of leaving it out is one " +
-			"existence check",
 		http.StatusInternalServerError: "the vendor may have COMMITTED and lost the acknowledgement -- " +
 			"this is the case the recovery exists for",
 		http.StatusServiceUnavailable: "same as 500: a create must never blindly retry this",
@@ -58,6 +55,21 @@ func TestCreateRefusedWithoutCreating(t *testing.T) {
 		http.StatusCreated:         "not an error path at all; must not be classified if it ever arrives here",
 		http.StatusOK:              "likewise",
 	}
+	// 404 MOVED FROM `refused` TO HERE (issue 818), and its old entry's stated reason was "the price of
+	// leaving it out is one existence check" -- the cost model the 401 block in create_not_committed.go
+	// refutes. Measured consequence of the exclusion: on a fresh install the children of a parent resource
+	// POST before the parent exists, take a 404, and latch external-create-pending permanently, because
+	// recovery's findby produces a SYNTHESISED 404 that exists.go correctly refuses to read as absence.
+	committed := map[int]string{
+		http.StatusNotFound: "the ROUTE did not resolve -- a missing parent, a wrong path, a wrong " +
+			"identifier in the URL -- so no handler ran and nothing was created",
+	}
+	for code, why := range committed {
+		if !createRefusedWithoutCreating(code) {
+			t.Errorf("%d MUST be classified as not-committed: %s", code, why)
+		}
+	}
+
 	for code, why := range refused {
 		if createRefusedWithoutCreating(code) {
 			t.Errorf("%d must NOT be classified as not-committed: %s", code, why)
@@ -67,7 +79,7 @@ func TestCreateRefusedWithoutCreating(t *testing.T) {
 
 // TestCreateRefusedWithoutCreatingIsExhaustive is the guard against the list growing by accident.
 //
-// Every status code from 100 to 599 is asked, and exactly THREE may answer true. A new code added to the
+// Every status code from 100 to 599 is asked, and exactly FOUR may answer true. A new code added to the
 // switch without a decision fails here, which is the point: widening this list is how a duplicate gets
 // created, and it must not be possible to do it quietly.
 //
@@ -81,7 +93,7 @@ func TestCreateRefusedWithoutCreatingIsExhaustive(t *testing.T) {
 			got = append(got, code)
 		}
 	}
-	want := []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusUnprocessableEntity}
+	want := []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound, http.StatusUnprocessableEntity}
 	if len(got) != len(want) {
 		t.Fatalf("classified %v, want exactly %v.\nEvery addition to this set risks a duplicate external "+
 			"resource and needs its own argument in the doc comment.", got, want)

@@ -16,6 +16,10 @@ import "net/http"
 //	400 Bad Request          the request was malformed; nothing was created
 //	401 Unauthorized         the credential was rejected at AUTHENTICATION, before any handler that
 //	                         could create. See the block below: this was an omission, not a decision.
+//	404 Not Found            the ROUTE did not resolve -- a missing parent, a wrong path, a wrong
+//	                         identifier in the URL -- so no handler ran and nothing was created.
+//	                         See the block below: this was excluded on a cost model this file no
+//	                         longer holds.
 //	422 Unprocessable        the request was understood and refused on its content
 //
 // 401 WAS MISSING AND THE OMISSION HAD A COST THIS COMMENT'S OWN MODEL COULD NOT SEE. The asymmetry above
@@ -54,9 +58,29 @@ import "net/http"
 // NOT 409 Conflict, and this is the exclusion that matters: some vendors answer 409 BECAUSE the resource
 // now exists, so "not committed" is false for exactly the case that would duplicate.
 //
-// NOT 404. On a create it usually means a parent is missing, so nothing was created -- but a vendor that
-// answers 404 from a route which nevertheless wrote something would be unrecoverable, and the price of
-// leaving it out is one existence check.
+// 404 WAS EXCLUDED ON A PRICE THIS FILE REFUTES TWO PARAGRAPHS ABOVE. The exclusion read: "the price of
+// leaving it out is one existence check". The 401 block above says why that is wrong -- for a kind that
+// cannot answer existence the check never answers, so the price is a CR stuck at CreateOutcomeUnknown
+// indefinitely, which cannot even be deleted. The file found its own cost model wrong, fixed the one code
+// that had bitten, and left this exclusion standing on the refuted model. A refutation does not know what
+// it invalidated.
+//
+// MEASURED (issue 818): on a fresh install of a chart whose resources have a parent, the children race the
+// parent, POST before it exists, and take a 404. Four of six CRs in one consumer's realm chart sat at
+// Ready=False/CreateOutcomeUnknown on a clean install, and it never clears: with the pending marker set,
+// recovery asks the existence check, a findby that lists and matches nothing produces a SYNTHESISED 404,
+// and exists.go deliberately does not read that as absence -- correctly, which is what makes the stamp
+// permanent rather than slow. The same consumer's troubleshooting doc shows a wrong project id in a URL
+// 404s EVERY create, so this is a typo away from any install, not an exotic ordering race.
+//
+// THE RESIDUAL RISK, stated rather than dismissed: a vendor that answers 404 from a route which
+// nevertheless wrote. That is the same risk class this list already accepts for 400, 401 and 422 -- a
+// vendor that writes and then rejects -- and no measured case takes that shape. What distinguishes 409
+// below is that its "it already exists" reading is a DOCUMENTED vendor behaviour, not a hypothetical.
+//
+// AND THE REMEDY IS MEASURED, not assumed: removing the annotation by hand recovered a stranded CR in 52
+// seconds (create fired, succeeded, Ready=True, vendor id stamped). So before this change the defect cost
+// a human; it did not destroy the resource.
 //
 // NOT 5xx or a transport error, which are the whole reason the recovery exists: the vendor may have
 // committed and lost the acknowledgement. That is the case a create must never blindly retry.
@@ -70,7 +94,7 @@ import "net/http"
 // which is correct: no status means the request may never have completed.
 func createRefusedWithoutCreating(code int) bool {
 	switch code {
-	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound, http.StatusUnprocessableEntity:
 		return true
 	default:
 		return false
