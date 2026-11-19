@@ -278,9 +278,29 @@ type Schema struct {
 	// because Type is a []string the converter copies whole, getPrimaryType skips "null", and schemaToMap
 	// emits a multi-element type as a JSON array. That is why 3.1 worked while 3.0 and 2.0 did not --
 	// 3.1 expresses it inside a field that was already carried (#420).
-	Nullable   bool
-	Format     string                 // JSON Schema "format"; numeric formats (int32/int64/float/double) are emitted into the generated schema, all formats are also added to the description
-	Extensions map[string]interface{} // Currently not used but can hold custom extensions
+	Nullable bool
+	Format   string // JSON Schema "format"; numeric formats (int32/int64/float/double) are emitted into the generated schema, all formats are also added to the description
+	// Extensions carries the OAS extension keys that survive the allowlist in list_map_keys.go, and
+	// schemaToMap emits them onto the generated CRD.
+	//
+	// THE COMMENT HERE USED TO SAY "Currently not used but can hold custom extensions". That was TRUE at
+	// 0.52.0 -- a consumer verified there was no population site in the whole tree, against controls of
+	// 4 assignment sites for .Nullable and 6 for .MinItems -- and nothing swept it when
+	// libopenapi_adapter.go started filling the field. It read as "do not bother" to the next person
+	// asking whether extensions are plumbed, which is exactly the question it was found by.
+	//
+	// WHAT REACHES A CRD IS A CLOSED TWO-KEY LIST, not anything an author writes:
+	// x-kubernetes-list-type and x-kubernetes-list-map-keys. x-kubernetes-validations is NOT on it, so
+	// CEL written in an OAS document is silently dropped even though crdgen's passthroughExtensions has
+	// copied it since v1.14.2 -- the gate is here, not downstream (issue 847). Adding it is not a
+	// one-line change: a rule the apiserver rejects refuses the WHOLE CRD, so every Kind in that
+	// RestDefinition stops being served, from a document the author may not control, at install time.
+	//
+	// AND ONLY THE OAS-3 ADAPTER POPULATES THIS FIELD. libopenapi_v2_adapter.go reads extensions for
+	// x-nullable and never assigns Extensions, so both allowlisted keys are silently ignored in Swagger
+	// 2.0 documents -- for a v2 author the allowlist is empty (issue 848). That is #249's shape: a
+	// feature reaching one path through a shared converter while the hand-built path is never touched.
+	Extensions map[string]interface{}
 
 	// --- validation keywords (#249) ---
 	//
