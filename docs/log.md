@@ -26,6 +26,104 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-19 — 0.85.0
+
+**Two silences become signals.** A generated controller that cannot take its ownership Lease reported
+Running with zero restarts while reconciling nothing; a create the vendor keeps refusing stopped being
+retried and said nothing about why. Both were found by consumers measuring their own fleets, and in
+both cases the mechanism was already present and only the reporting was missing.
+
+### A readiness probe is now served, and defaulted ON
+
+`unstructured-runtime` has carried `(*Controller).ReadyzCheck` for a long time: it fails while the first
+list has not succeeded and while a peer legitimately holds the ownership Lease. **Nothing in this repo
+called it** — measured, 0 occurrences against a control of 12 `builder.` calls in `main.go` — and the
+chart set no probe.
+
+A consumer measured the consequence on a real cluster, **6 of 6 controllers**:
+
+```
+avail=1 ready=1 restarts=0 waiting=-
+each logging  "Waiting for the ownership lease before reconciling"
+and never     "Holding the ownership lease; starting workers"
+```
+
+**Four pod signals, identical values, opposite truths.** The probe now exists and the chart points at it:
+
+| value | default |
+|---|---|
+| `rdc.healthProbePort` | `8081` |
+| `rdc.readinessProbe.httpGet` | `/readyz` on `8081` |
+| `rdc.readinessProbe.failureThreshold` | `30` (with `periodSeconds: 10`, about five minutes) |
+| `rdc.livenessProbe` | `{}` — deliberately empty |
+
+**This breaks a convention in this chart on purpose.** `rdc.metrics.port` defaults to `0`, i.e. off, and
+a diagnostic defaulting ON is the opposite choice. The reason is that the defect it reports is invisible
+by construction: an operator reading pod status cannot tell a working controller from a stalled one, so
+a probe nobody enables reports nothing to the only people who would enable it.
+
+**READINESS ONLY, and the distinction is load-bearing.** Waiting for a Lease is HEALTHY — exactly one
+replica holds it and the others are correct to wait. A liveness probe wired to this check would restart
+every waiting replica in a loop, turning a working design into a crash loop. `rdc.livenessProbe` is an
+empty mapping rather than absent so that the emptiness reads as a decision in a values diff.
+
+**The generous `failureThreshold` is the second half of that care.** A controller legitimately waiting
+for a peer's Lease must not be marked NotReady during an ordinary leader handover, and five minutes is
+long enough that it is not.
+
+### A create the vendor keeps refusing now says so
+
+A consumer reported roughly 6 POSTs per resync cycle against a vendor refusing every create, and asked
+for a cap. **The cap already shipped, enabled, and those 6 POSTs were it working.**
+
+```
+REST_CONTROLLER_MIN_ERROR_RETRY_INTERVAL    1s    base of the doubling
+REST_CONTROLLER_MAX_ERROR_RETRY_INTERVAL   90s    ceiling
+REST_CONTROLLER_MAX_ERROR_RETRIES           5    the drop
+```
+
+Five retries at 1, 2, 4, 8, 16s is six requests. **And the budget is per-object-LIFETIME, not
+per-cycle:** the limiter's `Forget` is unconditional and the worker calls it on SUCCESS ONLY, so an
+object that keeps failing never has its requeue count reset. The budget is spent once, and every later
+resync is dropped immediately — at DEBUG, setting nothing.
+
+**The log level comes from the chart, so on a default install nothing visible happens at all.** "Stopped
+retrying" and "still retrying" look identical from `kubectl get`. That is what this release changes.
+
+| | |
+|---|---|
+| new condition reason | `CreateRefusedPersistently`, on `Ready` with status `False` |
+| when | the resource has not been Ready for at least the deadline |
+| deadline | `REST_CONTROLLER_CREATE_REFUSAL_REPORT_AFTER`, default **1h**; `0` disables |
+| what it changes about retries | **nothing** |
+
+**IT REPLACES THE `Ready` CONDITION RATHER THAN ADDING ONE.** A consumer filtering on
+`reason == "Creating"` stops matching on resources that have been failing for an hour. Nothing counting
+conditions sees a change.
+
+> **The message says "has not been Ready for 1h0m0s", never "retried for 1h0m0s"**, and that wording is
+> a constraint rather than a style. The anchor is the `Ready` condition's `lastTransitionTime`, and the
+> runtime's `Upsert` compares STATUS and not Reason — so a resource already `Ready=False` for an
+> unrelated cause carries an anchor earlier than its first create attempt. The condition reports what was
+> measured; claiming a retry duration would be a claim the anchor cannot support.
+
+**Why not suppress the requests too, which is what the issue asked for:** not returning
+`CreateNotCommitted` hands the create to the runtime's existence-confirm path, where a kind that cannot
+answer existence sits at `CreateOutcomeUnknown` **and cannot be deleted**. A signal is additive; a
+behaviour change there would reintroduce a defect this project has already shipped a fix for.
+
+### `unstructured-runtime` moves to v1.28.1
+
+The create and update dispatches are now gated on the management policy, so a resource whose policy
+excludes a verb is not sent one. Measured per imported package rather than from the bump's own notes.
+
+### Also
+
+- the README's install pin is now gated in CI against the log's newest release heading, so the two cannot
+  drift apart silently
+- `go/rest-dynamic-controller/README.md` names that directory as the source of the published image, which
+  three candidate repositories had made ambiguous
+
 ## 2026-11-18 — 0.84.0
 
 **A vendor's own `default` is now sent on a parameter it also declared `required`, and two fields that
