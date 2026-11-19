@@ -195,6 +195,11 @@ func main() {
 	maxErrorRetry := flag.Int("max-error-retries",
 		env.Int("REST_CONTROLLER_MAX_ERROR_RETRIES", 5),
 		"How many times to retry the processing of a resource when an error occurs before giving up and dropping the resource.")
+	createRefusalReportAfter := flag.Duration("create-refusal-report-after",
+		env.Duration("REST_CONTROLLER_CREATE_REFUSAL_REPORT_AFTER", restResources.DefaultCreateRefusalReportAfter),
+		"How long a refused create may go on before the controller sets a condition saying so. This "+
+			"REPORTS ONLY: the retry budget is bounded by max-error-retries and is unaffected. Zero disables "+
+			"the report.")
 	metricsServerPort := flag.Int("metrics-server-port",
 		env.Int("REST_CONTROLLER_METRICS_SERVER_PORT", 0),
 		"The address to bind the metrics server to. If empty, metrics server is disabled.")
@@ -456,6 +461,17 @@ func main() {
 		SetEventRecorder(event.Recorder)
 	}); ok {
 		h.SetEventRecorder(apiRecorder)
+	}
+
+	// THE SETTER CALL IS THE FEATURE. Without it the handler keeps NewHandler's default and the flag
+	// above is dead -- which no build, no unit test and no live check would report, because a defaulted
+	// field and a configured one are indistinguishable from everything except the flag's effect.
+	if h, ok := handler.(interface {
+		SetCreateRefusalReportAfter(time.Duration)
+	}); ok {
+		h.SetCreateRefusalReportAfter(*createRefusalReportAfter)
+	} else {
+		log.Debug("The handler does not accept a create-refusal report deadline; the flag has no effect")
 	}
 
 	// The C8 audit emitter (#253). Built from the GLOBAL LoggerProvider that SetupOTLPLogs installed,

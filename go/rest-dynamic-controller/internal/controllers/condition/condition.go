@@ -1,6 +1,9 @@
 package condition
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/krateo-platformops/unstructured-runtime/pkg/tools/unstructured/condition"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -17,6 +20,10 @@ const (
 	// issued, enough times in a row that the update is evidently not able to fix it. The controller stops
 	// issuing that update; the resource stays NOT ready, with the field named.
 	ReasonDriftNotConverging string = "DriftNotConverging"
+	// ReasonCreateRefusedPersistently is set when a create has been refused long enough that the
+	// refusal is evidently not transient. It reports; it does not change the retry behaviour, which the
+	// runtime already bounds. See CreateRefusedPersistently for why those are separate.
+	ReasonCreateRefusedPersistently string = "CreateRefusedPersistently"
 	// ReasonCreateUnreachable is set when a resource's create is its ONLY write verb and its findby
 	// matches, so the runtime can never queue that create -- it queues one only on !ResourceExists.
 	// The resource's single effect cannot fire, and no reconcile will change that.
@@ -140,6 +147,48 @@ func Updating() metav1.Condition {
 // tried and changed nothing. The remedy is a declaration change (usually a responseTransform reconciling a
 // request/response shape divergence), which is a human's decision, so the condition's job is to say which
 // field and stop.
+// CreateRefusedPersistently returns a condition saying this resource has been not-Ready long enough
+// that the refusal is evidently not transient, so an operator should look at it.
+//
+// IT ANNOUNCES; IT DOES NOT CHANGE THE RETRY BEHAVIOUR, and that separation is the whole point. The
+// runtime already bounds the retries: rest-dynamic-controller passes WithMaxRetries(5) and an
+// exponential limiter (1s base, 90s ceiling), and worker.go drops the event once NumRequeues reaches
+// the budget. Because the limiter's Forget runs on SUCCESS ONLY, a resource that keeps failing never has
+// its count reset -- so the budget is spent once per object LIFETIME, not per cycle, and every later
+// resync is dropped immediately.
+//
+// The drop logs at DEBUG and sets nothing. The log level comes from the chart, so on a default install
+// nothing visible happens at all: "stopped retrying" and "still retrying" look identical from
+// `kubectl get`. THAT is the gap this condition closes, and it is the only one -- suppressing further
+// requests here would mean not returning controller.CreateNotCommitted, which hands the create to the
+// runtime's existence-confirm path, where a kind that cannot answer existence sits at
+// CreateOutcomeUnknown and cannot even be deleted (issue 818). A signal is additive; a behaviour change
+// there is a regression.
+//
+// THE MESSAGE NAMES THE MEASURED QUANTITY, "not Ready for <d>", rather than "retried for <d>". The
+// anchor is the Ready condition's lastTransitionTime, and the runtime's Upsert compares STATUS not
+// Reason -- so a resource already Ready=False for an unrelated reason carries an earlier anchor than its
+// first create attempt. Saying "retried for an hour" would be a claim the anchor cannot support. See
+// createRefusedLongerThan for the anchor's derivation and why the two external-create-* stamps cannot
+// serve.
+func CreateRefusedPersistently(d time.Duration, code int, detail string) metav1.Condition {
+	msg := fmt.Sprintf("the vendor has refused this create and the resource has not been Ready for %s", d.Round(time.Second))
+	if code != 0 {
+		msg += fmt.Sprintf(" (last status %d)", code)
+	}
+	if detail != "" {
+		msg += ": " + detail
+	}
+	msg += ". The retry budget is spent, so the controller is no longer re-sending within each cycle"
+	return metav1.Condition{
+		Type:               condition.TypeReady,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonCreateRefusedPersistently,
+		Message:            msg,
+	}
+}
+
 func DriftNotConverging(field, detail string) metav1.Condition {
 	msg := detail
 	if field != "" {
