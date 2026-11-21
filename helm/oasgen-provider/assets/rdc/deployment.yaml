@@ -117,7 +117,11 @@ spec:
               # The readiness listener, declared for the same reason as metrics below: a containerPort
               # for a server the binary never starts is a declaration a reader or a NetworkPolicy takes
               # at face value. REST_CONTROLLER_HEALTH_PROBE_PORT: "0" means nothing is listening -- and
-              # in that case rdc.readinessProbe must be empty too, or every pod is marked NotReady.
+              # in that case rdc.readinessProbe must be set to NULL too -- NOT {} -- or every pod is
+              # marked NotReady. Measured: helm MERGES maps, so `readinessProbe: {}` in a values file
+              # leaves this chart's httpGet in place and the probe still points at a port nothing
+              # binds. `readinessProbe: null` is what removes it. This comment said "empty" and that
+              # was wrong in the direction that causes the outage it warns about..
             - name: health
               containerPort: {{ .Values.rdc.healthProbePort }}
               protocol: TCP
@@ -131,10 +135,26 @@ spec:
               protocol: TCP
               {{- end }}
               protocol: TCP
+          # GUARDED, NOT JUST DEFAULTED. `toYaml` on an empty map renders `{}`, and the apiserver
+          # REFUSES a probe with no handler: "livenessProbe: Required value: must specify a handler
+          # type". The Deployment is rejected at ADMISSION, so the asset parses perfectly and no
+          # YAML-level check can see it -- which is exactly how 0.85.1 shipped unable to create any
+          # generated controller after 0.85.0's indentation defect was fixed. Two errors in this
+          # block, and fixing the first revealed the second.
+          #
+          # `with` rather than a defaulted value because it survives a USER setting {} themselves.
+          # rdc.livenessProbe ships as {} on purpose -- the emptiness is a decision, visible in a
+          # values diff -- and the chart's own documented escape hatch for readiness
+          # (healthProbePort: 0 plus an emptied readinessProbe) produces {} too. Both must render
+          # NOTHING rather than an empty handler.
+          {{- with .Values.rdc.livenessProbe }}
           livenessProbe:
-            {{- toYaml .Values.rdc.livenessProbe | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.rdc.readinessProbe }}
           readinessProbe:
-            {{- toYaml .Values.rdc.readinessProbe | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.rdc.resources | nindent 12 }}
       {{- with .Values.rdc.volumeMounts }}

@@ -277,6 +277,35 @@
 # event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
+  - version: "0.85.1"
+    charts:
+      - oasgen-provider
+      - oasgen-provider-crds
+      - controller-render-service
+    use: "0.84.0"
+    reason: >-
+      NO GENERATED CONTROLLER CAN BE CREATED -- the SECOND defect in the same block, revealed by
+      fixing the first. The rdc Deployment is REFUSED BY THE APISERVER:
+      "spec.template.spec.containers[0].livenessProbe: Required value: must specify a handler type".
+      rdc.livenessProbe ships as `{}` (deliberately, so the emptiness is visible in a values diff)
+      and the asset rendered it unconditionally through `toYaml`, which emits `{}` -- a probe with no
+      handler. At 0.84.0 the key was ABSENT, so `toYaml nil` rendered `null` and the field did not
+      exist. 0.85.0 hid this because its asset never parsed at all.
+      MEASURED by two consumers independently: the published 0.85.1 chart renders
+      `livenessProbe: {}` where 0.84.0 renders `None`, and `kubectl apply --dry-run=server` of a
+      minimal Deployment carrying `livenessProbe: {}` is refused on a live 1.36 apiserver while the
+      same Deployment without it is accepted.
+      THE ASSET PARSES EITHER WAY, which is why 0.85.1's own decode gate passed: the rejection is at
+      ADMISSION, and "this YAML is valid" and "the apiserver accepts this object" are different
+      facts. Fixed in 0.85.2 by guarding both probes with `{{- with }}`, plus a gate asserting no
+      probe field is emitted unguarded.
+      ALSO CORRECTED IN 0.85.2, and wrong in the direction of the outage it warned about: this
+      chart's own comment said that disabling readiness means setting rdc.readinessProbe "empty".
+      Helm MERGES maps, so `readinessProbe: {}` leaves the chart's httpGet in place and the probe
+      points at a port nothing binds -- every pod NotReady. `readinessProbe: null` is what removes
+      it.
+      The rdc.metrics.port caveat on 0.84.0 still applies: do not set it. The window is 0.81.0
+      through 0.85.1.
   - version: "0.85.0"
     charts:
       - oasgen-provider
@@ -294,9 +323,16 @@ retracted:
       controllers at all. THE SAME DEFECT IS PRESENT ON `- name: metrics` SINCE 0.77.0 AND WAS
       DORMANT: rdc.metrics.port defaults to 0 so its `{{- if }}` never rendered, while
       rdc.healthProbePort defaults to 8081, so 0.85.0 renders the broken shape on every install. Both
-      are fixed in 0.85.1, with a gate that decodes the SHIPPED asset through the provider's own
-      CreateK8sObject -- the check that was missing, because the only tests of this file used a
+      are fixed in a later version, with a gate that decodes the SHIPPED asset through the provider's
+      own CreateK8sObject -- the check that was missing, because the only tests of this file used a
       SEPARATE fixture that never received the change.
+      DO NOT READ THIS AS "UPGRADE TO 0.85.1". This entry originally said "fixed in 0.85.1", written
+      BEFORE anyone installed 0.85.1 -- and 0.85.1 cannot create a generated controller either, for a
+      different reason (see its own entry above). A retraction entry does two jobs: recording that a
+      version is bad, which is true forever, and recommending a remedy, which is a PREDICTION about a
+      version nobody had verified when the entry was written. The second job is the one that has now
+      been wrong twice. The `use:` field above names the known-good fallback and is the only remedy
+      this file should be read as giving.
       DO NOT SET rdc.metrics.port ON 0.84.0, THE VERSION THIS ENTRY SENDS YOU TO. The metrics half
       of the same defect is live wherever the chart ACCEPTS that key and renders the block.
       Measured by rendering each published chart with --set rdc.metrics.port=8080 and decoding the
