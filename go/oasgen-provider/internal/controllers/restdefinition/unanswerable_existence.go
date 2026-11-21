@@ -143,3 +143,30 @@ func existenceAnswerableCondition() rtv1.Condition {
 
 // ReasonExistenceAnswerable is the cleared counterpart.
 const ReasonExistenceAnswerable rtv1.ConditionReason = "ExistenceAnswerable"
+
+// existenceConditionFor is the whole decision as a VALUE, so a test can assert what the CR actually
+// receives rather than what a constructor returns when handed literals.
+//
+// WHY THIS EXISTS AS A FUNCTION AT ALL. The decision used to be inline at the call site:
+//
+//	if param, source, unanswerable := unanswerableExistence(cr.Spec.Resource); unanswerable {
+//	    cr.SetConditions(existenceUnanswerableCondition(cr.Spec.Resource.Kind, param, source))
+//	} else {
+//	    cr.SetConditions(existenceAnswerableCondition())
+//	}
+//
+// Every arm tested `unanswerableExistence` or `existenceUnanswerableCondition` SEPARATELY, with
+// literals -- so THREE string parameters in a row were passed with nothing asserting the order.
+// Swap `param` and `source` there and the code compiles, the message names the source as the
+// parameter and the parameter as the source, and NOT ONE of the fifteen arms fails.
+//
+// A peer hit this four times in one day on their own reporter, each fix moving the untested boundary
+// one level out -- decide() -> search_cmd -> create_cmd -> create_attempts. Their generalisation,
+// which this follows: ASSERT ON THE VALUE THE IO CONSUMES, NOT ON THE FUNCTION THAT BUILDS IT,
+// because between the function and the call there is always another place to get it wrong.
+func existenceConditionFor(cr *definitionv1alpha1.RestDefinition) rtv1.Condition {
+	if param, source, unanswerable := unanswerableExistence(cr.Spec.Resource); unanswerable {
+		return existenceUnanswerableCondition(cr.Spec.Resource.Kind, param, source)
+	}
+	return existenceAnswerableCondition()
+}
