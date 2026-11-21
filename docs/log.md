@@ -26,7 +26,7 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
-## 2026-11-19 — 0.85.0
+## 2026-11-21 — 0.85.0
 
 **Two silences become signals.** A generated controller that cannot take its ownership Lease reported
 Running with zero restarts while reconciling nothing; a create the vendor keeps refusing stopped being
