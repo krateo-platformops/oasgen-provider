@@ -34,7 +34,7 @@ vendor's explanation.
 |---|---|---|---|---|---|---|
 | Ready | `Pending` | False | rest-dynamic-controller | converging | `next pass`: a referent the spec names has not resolved yet | `Pending`, `PendingReferent` |
 | Ready | `Updating` | False | rest-dynamic-controller | converging | `next pass`: an update was issued; the next observe decides whether it took | `Updating` |
-| Ready | `CreateRefusedPersistently` | False | rest-dynamic-controller | converging | **NOT DELIVERED as of 0.86.0 — see the section below.** `indefinite`: re-sent on every resync until the vendor accepts the create; `Synced=False/ReconcileError` carries the vendor's error | `CreateRefusedPersistently` |
+| Ready | `CreateRefusedPersistently` | False | rest-dynamic-controller | converging | `indefinite`: re-sent on every resync until the vendor accepts the create; `Synced=False/ReconcileError` carries the vendor's error | `CreateRefusedPersistently` |
 | Ready | `DriftNotConverging` | False | rest-dynamic-controller | converging | `indefinite`: the same difference has been reported and the same update issued repeatedly; it will not clear without a spec or vendor change | `DriftNotConverging` |
 | Ready | `CreateUnreachable` | False | rest-dynamic-controller | failed | `never`: create is the resource's only write verb and its findby cannot resolve, so no pass can reach the create | `CreateUnreachable` |
 | Ready | `AuthorizationDenied` | False | rest-dynamic-controller | failed | `never`, without a credential change: the API answered 403 and the response carried no retryable signal | `AuthorizationDenied` |
@@ -49,38 +49,38 @@ vendor's explanation.
 | ResolverDigestRecorded | `DigestRecorded` | True | rest-dynamic-controller | — | `steady`: a resolver digest was recorded for this pass | `ResolverDigestRecorded` |
 | ResolverDigestRecorded | `DigestFieldAbsent` | False | rest-dynamic-controller | — | `next pass`: the field a digest would be taken from is absent | `ResolverDigestFieldAbsent` |
 
-## NOT DELIVERED as of 0.86.0: `Ready=False/CreateRefusedPersistently`
+## How `Ready=False/CreateRefusedPersistently` reaches the cluster, and why it did not before 0.86.0
 
-**This row describes behaviour the controller attempts and the runtime discards. Do not map it yet.**
+**It works from 0.86.0. It did not in any earlier release, and the reason is worth keeping because it
+is a general rule about this runtime.**
 
-**Measured on a live cluster** by the `azuredevops-provider-kog` session, run 0852 at 0.85.2: a CR
-whose create the vendor refused with a 400 sat for **198 minutes** against a **1-hour** deadline, and
-the reason never changed. It read `Ready=False/Creating` with the runtime's own message
-(`create failed: ... unexpected status: 400`) throughout. **Exactly one Ready condition, and its
-`lastTransitionTime` held** — so the anchor this report depends on works; the report does not arrive.
+**Measured on a live cluster** by the `azuredevops-provider-kog` session, run 0852 at **0.85.2**: a CR
+whose create the vendor refused with a 400 sat **198 minutes** against a **1-hour** deadline, and the
+reason never changed. It read `Ready=False/Creating` with the runtime's own message throughout.
+**Exactly one Ready condition, and its `lastTransitionTime` held** — so the anchor the report depends
+on worked; the report did not arrive.
 
-**Why**, traced in `unstructured-runtime` v1.30.0's `handleCreate`:
+**THE RULE, which is a boundary rather than a bug:** *conditions reach the cluster only through a
+returned result.* A handler that calls `SetConditions` on the object it was handed is writing to a
+copy the runtime then discards — it re-fetches so that it owns the single status write, and a write
+from inside the call would leave the runtime's copy at a stale resourceVersion. The channel is the
+**returned** `ExternalObservation.Conditions` or `CreateResult.Conditions`, never the argument.
 
-```
-the failure branch RE-FETCHES the object, so the handler's in-memory condition is gone
-it then writes Creating + ReconcileError itself
-and returns BEFORE setCreateConditions(created.Conditions) is reached
-```
+**What was missing was narrower than that:** `CreateResult.Conditions` were applied only **on a nil
+error**, and both refusals its contract named were `Requested=false`. A *failed* create had no
+channel at all — neither the argument (discarded) nor the result (not applied on that path).
 
-**So neither channel delivers on a failed create** — not a handler writing to the object it was
-handed, and not `CreateResult.Conditions`, whose call sites are past that return. **Note this was a
-deliberate boundary rather than an oversight:** that field's contract was *"applied on a nil error"*.
+**`unstructured-runtime` v1.32.1 extends it.** On a failed create the handler's
+`CreateResult.Conditions` are upserted by Type onto the object that gets written, **after** the
+runtime's own, so a handler `Ready` **replaces** `Ready=False/Creating` and any other type is
+**added**. **A handler `Synced` is ignored on that path by design**, because it would hide
+`Synced=False/DeletionPolicyInvalid` — which *can* coexist with a create. (**Not**
+`ManagementPolicyInvalid`: an invalid management policy is observe-only, so `worker.go`
+short-circuits the Create event at `!ManagementDecision(el).May(managementpolicy.Create)` and
+`handleCreate` is never reached at all.)
 
-**What fixes it:** `unstructured-runtime` **v1.32.1** extends the contract — on a failed create the
-handler's `CreateResult.Conditions` are upserted by Type onto the object that gets written, **after**
-the runtime's own, so a handler `Ready` replaces `Ready=False/Creating`. **A handler `Synced` is
-ignored on that path by design**, because it would hide `Synced=False/DeletionPolicyInvalid` — which
-*can* coexist with a create. (**Not** `ManagementPolicyInvalid`: an invalid management policy is
-observe-only, so `worker.go` short-circuits the Create event at
-`!ManagementDecision(el).May(managementpolicy.Create)` and `handleCreate` is never reached at all.)
-
-**This row becomes true when this module's `unstructured-runtime` pin reaches v1.32.1.** Until then a
-consumer mapping it will never see the pill fire, and the reason is this, not their integration.
+**So from 0.86.0 the row above is a plain row.** On 0.85.2 and earlier it never fired, and a consumer
+whose pill never lit was reading a correct integration against a release that could not deliver.
 
 ## Where there is deliberately NO condition
 
