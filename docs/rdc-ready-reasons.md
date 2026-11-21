@@ -34,7 +34,7 @@ vendor's explanation.
 |---|---|---|---|---|---|---|
 | Ready | `Pending` | False | rest-dynamic-controller | converging | `next pass`: a referent the spec names has not resolved yet | `Pending`, `PendingReferent` |
 | Ready | `Updating` | False | rest-dynamic-controller | converging | `next pass`: an update was issued; the next observe decides whether it took | `Updating` |
-| Ready | `CreateRefusedPersistently` | False | rest-dynamic-controller | converging | `indefinite`: re-sent on every resync until the vendor accepts the create; `Synced=False/ReconcileError` carries the vendor's error | `CreateRefusedPersistently` |
+| Ready | `CreateRefusedPersistently` | False | rest-dynamic-controller | converging | **NOT DELIVERED as of 0.86.0 — see the section below.** `indefinite`: re-sent on every resync until the vendor accepts the create; `Synced=False/ReconcileError` carries the vendor's error | `CreateRefusedPersistently` |
 | Ready | `DriftNotConverging` | False | rest-dynamic-controller | converging | `indefinite`: the same difference has been reported and the same update issued repeatedly; it will not clear without a spec or vendor change | `DriftNotConverging` |
 | Ready | `CreateUnreachable` | False | rest-dynamic-controller | failed | `never`: create is the resource's only write verb and its findby cannot resolve, so no pass can reach the create | `CreateUnreachable` |
 | Ready | `AuthorizationDenied` | False | rest-dynamic-controller | failed | `never`, without a credential change: the API answered 403 and the response carried no retryable signal | `AuthorizationDenied` |
@@ -48,6 +48,37 @@ vendor's explanation.
 | Observed | `NoResponseBody` | False | rest-dynamic-controller | — | `next pass`: the last observe got no body to compare against | `NotObserved` |
 | ResolverDigestRecorded | `DigestRecorded` | True | rest-dynamic-controller | — | `steady`: a resolver digest was recorded for this pass | `ResolverDigestRecorded` |
 | ResolverDigestRecorded | `DigestFieldAbsent` | False | rest-dynamic-controller | — | `next pass`: the field a digest would be taken from is absent | `ResolverDigestFieldAbsent` |
+
+## NOT DELIVERED as of 0.86.0: `Ready=False/CreateRefusedPersistently`
+
+**This row describes behaviour the controller attempts and the runtime discards. Do not map it yet.**
+
+**Measured on a live cluster** by the `azuredevops-provider-kog` session, run 0852 at 0.85.2: a CR
+whose create the vendor refused with a 400 sat for **198 minutes** against a **1-hour** deadline, and
+the reason never changed. It read `Ready=False/Creating` with the runtime's own message
+(`create failed: ... unexpected status: 400`) throughout. **Exactly one Ready condition, and its
+`lastTransitionTime` held** — so the anchor this report depends on works; the report does not arrive.
+
+**Why**, traced in `unstructured-runtime` v1.30.0's `handleCreate`:
+
+```
+the failure branch RE-FETCHES the object, so the handler's in-memory condition is gone
+it then writes Creating + ReconcileError itself
+and returns BEFORE setCreateConditions(created.Conditions) is reached
+```
+
+**So neither channel delivers on a failed create** — not a handler writing to the object it was
+handed, and not `CreateResult.Conditions`, whose call sites are past that return. **Note this was a
+deliberate boundary rather than an oversight:** that field's contract was *"applied on a nil error"*.
+
+**What fixes it:** `unstructured-runtime` **v1.32.1** extends the contract — on a failed create the
+handler's `CreateResult.Conditions` are upserted by Type onto the object that gets written, **after**
+the runtime's own, so a handler `Ready` replaces `Ready=False/Creating`. **A handler `Synced` is
+ignored on that path by design**, because it would bypass the precedence funnel that makes
+`ManagementPolicyInvalid` win.
+
+**This row becomes true when this module's `unstructured-runtime` pin reaches v1.32.1.** Until then a
+consumer mapping it will never see the pill fire, and the reason is this, not their integration.
 
 ## Where there is deliberately NO condition
 
