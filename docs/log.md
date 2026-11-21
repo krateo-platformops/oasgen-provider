@@ -2087,6 +2087,22 @@ five-minute gap. And a passing pin never reads `use:` at all; only a refused ver
 > DECLARATION, never inferred from the latch, since inferring it would delete the detector for the
 > population it exists for.
 
+> **Note (2026-11-21): `restsAtNotReady` was never built, and this sentence is the only place the name
+> exists.** Measured on this commit: 0 occurrences under `go/` or `helm/`, 1 anywhere in the repo — the
+> line above. `restsAtNotReadyEffective` has 0 occurrences anywhere. So there is no API field, no CRD
+> property and no chart value, and core-provider does not read the status field either.
+>
+> **The sentence is a PROPOSAL phrased declaratively**, and a consumer traced what that cost: this
+> changelog line became a memory note restating it as a shipped field with semantics, which parked an
+> acceptance arm "waiting for the tag that ships it", which became a question to me about when that tag
+> would land. **Their own repo had the right answer all along** — a six-tag sweep with a live positive
+> control per row, stating the field does not exist — and the wrong summary of it was what they reasoned
+> from.
+>
+> Kept rather than deleted, because the proposal is still the right shape if anyone builds it. But "The
+> fix is X" in a changelog reads as a description of something that happened, and nothing here says
+> otherwise until this note.
+
 ## 2026-11-16 — 0.73.0
 
 **A dispatch kind's correlation observe read exactly one page.** That was a correctness problem rather
