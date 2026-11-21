@@ -59,9 +59,14 @@ missing. **The reason it cannot be a condition is structural:** that path releas
 finalizer, so a condition written there disappears with the object it was written on. An event
 outlives the CR; a condition does not.
 
-**The event's exact reason literal is owned by `unstructured-runtime`** and will be added here with
-that repository named as the writer once its change lands. Until then, do not map a reason string for
-this case — there is none to map.
+**The event's reason literal is `ExternalResourceKeptExistenceUnanswerable`**, with action
+`DeleteExternalResource`, written by `unstructured-runtime`.
+
+**NOT YET SHIPPED, and that distinction is the point:** it comes from `unstructured-runtime` PR 121,
+which is **open and unmerged**, and it ships in **v1.32.0**, which is **not tagged** — this module
+pins v1.30.0. So the literal is recorded here as what the PR declares, not as something observable
+in any released version. **Do not map it in a consumer until that tag exists**; if the PR renames it
+before merging, this line is wrong and the PR is right.
 
 **The NOT-being-deleted path is different and DOES carry a condition:** the existing
 `Ready=False/CreateOutcomeUnknown`, with no new reason, whose message names why the existence check
