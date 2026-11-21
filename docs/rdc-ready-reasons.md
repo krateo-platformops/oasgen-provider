@@ -112,9 +112,20 @@ and one the runtime's, and no single one of them looks load-bearing on its own.*
 | 3 | The runtime re-fetches before its own write on every path **except** the failed-delete branch (`worker.go:1875-1883`) | that one exception lands on exactly the path covered by leg 2 |
 
 **Remove any one leg and a silent 409 appears** — which the runtime then requeues quietly (#359), so
-the symptom is a retry that reports nothing, not an error. **Legs 1 and 2 are ours and are pinned by
-`stale_resourceversion_invariant_test.go`. Leg 3 is the runtime's and can only move under a version
-bump**, which is why that test's comment names the file and lines for a bump reviewer to re-check.
+the symptom is a retry that reports nothing, not an error.
+
+**Legs 1 and 2 are ours and are pinned by `stale_resourceversion_invariant_test.go`. Leg 3 is now
+pinned on the runtime's side too** — `unstructured-runtime#125` asserts that a failed delete persists
+`Ready=False/Deleting` *carrying the vendor error*, with `Synced=ReconcileError` and the finalizer
+kept, and kills a mutant that writes a plain `Deleting`. **Verified against the server as OPEN, not
+merged**, so until it lands a version-bump reviewer should still check `worker.go:1875-1883` by hand.
+
+**Which half of leg 3 is pinned matters, and it is not the obvious half.** #125 pins that the branch
+**writes** its own `Deleting`-with-message; it deliberately does **not** pin whether that branch
+re-fetches first. **A re-fetch there would change nothing for us** — it would discard our five plain
+`Deleting` writes, which the runtime replaces anyway with one carrying more information. **But if the
+branch ever stopped writing its own `Deleting`, we would silently lose the delete-failure message
+entirely, because we never persist ours.**
 
 **That test is a source-shape test, which is a weak instrument, and it is chosen deliberately:** the
 property is a **non-event** — a conflict that never happens — and our two fakes disagree about

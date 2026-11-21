@@ -29,9 +29,21 @@ import (
 //	    branch (worker.go:1875-1883 writes the object it already held, with no re-fetch). That one
 //	    exception lands on exactly the path covered by (2).
 //
-// Remove any one leg and a silent 409 appears. (1) and (2) are ours, so they are asserted here. (3)
-// is the runtime's and can only change under a version bump -- which is why the comment names the
-// file and lines, so a bump's reviewer can check it.
+// Remove any one leg and a silent 409 appears. (1) and (2) are ours, so they are asserted here.
+//
+// (3) IS THE RUNTIME'S, AND IT IS NOW PINNED THERE TOO: unstructured-runtime#125,
+// TestHandleDelete_FailureCarriesTheVendorErrorOnReady, asserts that a failed delete persists
+// Ready=False/Deleting CARRYING THE VENDOR ERROR, with Synced=ReconcileError and the finalizer kept;
+// a mutant writing a plain Deleting with no message is killed. VERIFIED AGAINST THE SERVER AS OPEN,
+// NOT MERGED, at the time of writing -- so until it lands, this comment is still the only handoff,
+// and a bump reviewer should check worker.go:1875-1883 by hand.
+//
+// NOTE WHICH HALF IS PINNED, because it is the half that matters and not the obvious one. #125 pins
+// that the branch WRITES its own Deleting-with-message. It deliberately does NOT pin whether that
+// branch re-fetches first. A re-fetch there would discard our five plain Deleting writes and change
+// nothing, because the runtime's write replaces them anyway with one carrying more information. But
+// if the branch ever stopped writing its own Deleting, we would silently lose the delete-failure
+// message entirely, since we never persist ours.
 //
 // THIS IS A SOURCE-SHAPE TEST, which is a weak instrument, and it is chosen deliberately: the
 // behaviour it protects is a NON-event (a conflict that never happens), and a test that asserts a
