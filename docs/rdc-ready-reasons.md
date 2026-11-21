@@ -49,6 +49,39 @@ vendor's explanation.
 | ResolverDigestRecorded | `DigestRecorded` | True | rest-dynamic-controller | — | `steady`: a resolver digest was recorded for this pass | `ResolverDigestRecorded` |
 | ResolverDigestRecorded | `DigestFieldAbsent` | False | rest-dynamic-controller | — | `next pass`: the field a digest would be taken from is absent | `ResolverDigestFieldAbsent` |
 
+## How `Ready=False/CreateRefusedPersistently` reaches the cluster, and why it did not before 0.86.0
+
+**It works from 0.86.0. It did not in any earlier release, and the reason is worth keeping because it
+is a general rule about this runtime.**
+
+**Measured on a live cluster** by the `azuredevops-provider-kog` session, run 0852 at **0.85.2**: a CR
+whose create the vendor refused with a 400 sat **198 minutes** against a **1-hour** deadline, and the
+reason never changed. It read `Ready=False/Creating` with the runtime's own message throughout.
+**Exactly one Ready condition, and its `lastTransitionTime` held** — so the anchor the report depends
+on worked; the report did not arrive.
+
+**THE RULE, which is a boundary rather than a bug:** *conditions reach the cluster only through a
+returned result.* A handler that calls `SetConditions` on the object it was handed is writing to a
+copy the runtime then discards — it re-fetches so that it owns the single status write, and a write
+from inside the call would leave the runtime's copy at a stale resourceVersion. The channel is the
+**returned** `ExternalObservation.Conditions` or `CreateResult.Conditions`, never the argument.
+
+**What was missing was narrower than that:** `CreateResult.Conditions` were applied only **on a nil
+error**, and both refusals its contract named were `Requested=false`. A *failed* create had no
+channel at all — neither the argument (discarded) nor the result (not applied on that path).
+
+**`unstructured-runtime` v1.32.1 extends it.** On a failed create the handler's
+`CreateResult.Conditions` are upserted by Type onto the object that gets written, **after** the
+runtime's own, so a handler `Ready` **replaces** `Ready=False/Creating` and any other type is
+**added**. **A handler `Synced` is ignored on that path by design**, because it would hide
+`Synced=False/DeletionPolicyInvalid` — which *can* coexist with a create. (**Not**
+`ManagementPolicyInvalid`: an invalid management policy is observe-only, so `worker.go`
+short-circuits the Create event at `!ManagementDecision(el).May(managementpolicy.Create)` and
+`handleCreate` is never reached at all.)
+
+**So from 0.86.0 the row above is a plain row.** On 0.85.2 and earlier it never fired, and a consumer
+whose pill never lit was reading a correct integration against a release that could not deliver.
+
 ## Where there is deliberately NO condition
 
 **Deletion of a CR whose existence is permanently unanswerable reports through an `unstructured-runtime`
