@@ -25,10 +25,17 @@ func (h *handler) persistentCreateRefusalConditions(mg *unstructured.Unstructure
 	if !over {
 		return nil
 	}
-	// RETURNED, NOT WRITTEN, and this is the whole correction. Writing onto `mg` with SetConditions
-	// is NOT A CHANNEL ON ANY PATH: the runtime re-fetches the object after the handler returns so
-	// that it owns the single status write, so an in-handler write is discarded by design -- and a
-	// write from inside the call would leave the runtime's copy at a stale resourceVersion.
+	// RETURNED, NOT WRITTEN -- and NOT because an in-handler write never works. It usually does: this
+	// controller pairs SetConditions with tools.UpdateStatus at 24 non-test sites and those conditions
+	// arrive. THIS function was the one site of 25 that called SetConditions and no UpdateStatus, so
+	// its write never left the process.
+	//
+	// AND PERSISTING WOULD NOT HAVE BEEN ENOUGH HERE, which is why the fix is the returned channel and
+	// not an added UpdateStatus. handleCreate RE-FETCHES after CreateWithResult returns
+	// (worker.go:1565) and writes its own conditions (1595); Upsert REPLACES a condition of the same
+	// TYPE, and both our CreateRefusedPersistently and the runtime's Creating are on Ready. A
+	// persisted Ready would have been replaced too. v1.32.1 applies the RETURNED conditions AFTER its
+	// own, so only that channel is durable on this path.
 	//
 	// MEASURED, which is why this is a correction rather than a refactor. This function used to call
 	// SetConditions(mg, ...), and a consumer measured the consequence on 0.85.2: a create refused

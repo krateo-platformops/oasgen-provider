@@ -71,11 +71,36 @@ reason never changed. It read `Ready=False/Creating` with the runtime's own mess
 **Exactly one Ready condition, and its `lastTransitionTime` held** — so the anchor the report depends
 on worked; the report did not arrive.
 
-**THE RULE, which is a boundary rather than a bug:** *conditions reach the cluster only through a
-returned result.* A handler that calls `SetConditions` on the object it was handed is writing to a
-copy the runtime then discards — it re-fetches so that it owns the single status write, and a write
-from inside the call would leave the runtime's copy at a stale resourceVersion. The channel is the
-**returned** `ExternalObservation.Conditions` or `CreateResult.Conditions`, never the argument.
+**THE RULE, CORRECTED. An earlier revision of this section said *"conditions reach the cluster only
+through a returned result."* THAT IS FALSE, and believing it would mislead you about 24 other sites
+in this controller.** The correction is worth more than the original claim, so here is what is
+actually true, measured against `unstructured-runtime` v1.32.1 and this module's own source.
+
+**This controller persists most of its own conditions, and they arrive.** `SetConditions(mg, …)`
+alone only edits an in-memory object — but RDC pairs it with `tools.UpdateStatus`, an unconditional
+status API write, at **24 non-test call sites**: 10 in `Observe`, 3 each in `CreateWithResult`,
+`Update` and `observeDispatch`, and the rest in the async and stop-path helpers. **Those conditions
+are not dead.** The immediately neighbouring create path shows the working shape:
+
+```go
+if err := unstructuredtools.SetConditions(mg, condition.Creating()); err != nil { … }   // 1699
+if _, err := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{…}); err != nil { … }      // 1702
+```
+
+**So the defect was narrow, and it was ours.** `reportPersistentCreateRefusal` called `SetConditions`
+and **no** `UpdateStatus` — the only site of the 25 that wrote without persisting. **The write never
+left the process.** That alone explains the measured 198 minutes.
+
+**AND PERSISTING WOULD NOT HAVE BEEN ENOUGH ON THIS ONE PATH**, which is the part worth keeping.
+After `CreateWithResult` returns, `handleCreate` **re-fetches** (worker.go:1565) and writes its own
+conditions (1595). `Upsert` replaces a condition of the **same type** and adds other types — and both
+the handler's `CreateRefusedPersistently` and the runtime's `Creating` are on `Ready`. **So the
+runtime's Ready would have replaced a persisted one too.**
+
+**Hence the rule, stated so it is true:** *a handler's condition survives unless the runtime writes
+the same condition TYPE after the handler returns.* On the failed-create path it does, so there the
+only durable channel is the **returned** `CreateResult.Conditions`, which v1.32.1 applies **after**
+its own. Everywhere else in this controller, `SetConditions` + `UpdateStatus` is correct and works.
 
 **What was missing was narrower than that:** `CreateResult.Conditions` were applied only **on a nil
 error**, and both refusals its contract named were `Requested=false`. A *failed* create had no
