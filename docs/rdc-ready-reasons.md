@@ -74,8 +74,10 @@ deliberate boundary rather than an oversight:** that field's contract was *"appl
 **What fixes it:** `unstructured-runtime` **v1.32.1** extends the contract — on a failed create the
 handler's `CreateResult.Conditions` are upserted by Type onto the object that gets written, **after**
 the runtime's own, so a handler `Ready` replaces `Ready=False/Creating`. **A handler `Synced` is
-ignored on that path by design**, because it would bypass the precedence funnel that makes
-`ManagementPolicyInvalid` win.
+ignored on that path by design**, because it would hide `Synced=False/DeletionPolicyInvalid` — which
+*can* coexist with a create. (**Not** `ManagementPolicyInvalid`: an invalid management policy is
+observe-only, so `worker.go` short-circuits the Create event at
+`!ManagementDecision(el).May(managementpolicy.Create)` and `handleCreate` is never reached at all.)
 
 **This row becomes true when this module's `unstructured-runtime` pin reaches v1.32.1.** Until then a
 consumer mapping it will never see the pill fire, and the reason is this, not their integration.
