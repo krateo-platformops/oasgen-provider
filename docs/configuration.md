@@ -134,6 +134,31 @@ the PROBE's port          rdc.readinessProbe.httpGet.port, which must match
 well on `/readyz`** — the probe asks for something that was never served. Same for the port: two
 values that must agree, and if you move one, move both.
 
+### Start here: `/readyz` 503 and `/readyz` unreachable are different diagnoses
+
+**A troubleshooting section's first job is to rule itself out for the wrong case.** If you are
+here because pods are NotReady, read this table before anything else: the rest of this section is
+about a Lease, and one very common configuration produces the identical symptom from an unrelated
+cause.
+
+**This is the discriminator worth knowing before you debug a quiet controller:**
+
+| symptom | means |
+|---|---|
+| `/readyz` returns **503** | the informer has not listed, or the Lease cannot be read — check the Lease RBAC |
+| `/readyz` is **unreachable**, pods NotReady | the listener is probably disabled (`healthProbePort: 0`) with `readinessProbe: {}` instead of `null` — nothing to do with the Lease |
+
+**Checking the Lease grant needs the lease NAME.** The Role is `resourceNames`-scoped, so the
+unnamed question answers "no" for a perfectly good grant:
+
+```
+kubectl auth can-i get leases.coordination.k8s.io                     -> no   (MEANINGLESS)
+kubectl auth can-i get leases.coordination.k8s.io/<lease-name>        -> the real answer
+```
+
+**And `kubectl apply` cannot modify that Role** — see `docs/provider-runtime-create-markers.md`. Use
+`kubectl edit`, a JSON patch, or `apply --server-side`.
+
 ### Two timescales, and the gap between them is the point
 
 **Measured at 0.85.2 on a real cluster, by a consumer's probe:**
@@ -171,26 +196,6 @@ rdc:
 **Helm MERGES maps.** `{}` leaves this chart's `httpGet` in place, so the probe keeps polling a port
 nothing binds. **Measured: this is how 0.85.1's sibling defect worked** — a values file that looked
 like it had disabled something had not.
-
-### `/readyz` 503 and `/readyz` unreachable are different diagnoses
-
-**This is the discriminator worth knowing before you debug a quiet controller:**
-
-| symptom | means |
-|---|---|
-| `/readyz` returns **503** | the informer has not listed, or the Lease cannot be read — check the Lease RBAC |
-| `/readyz` is **unreachable**, pods NotReady | the listener is probably disabled (`healthProbePort: 0`) with `readinessProbe: {}` instead of `null` — nothing to do with the Lease |
-
-**Checking the Lease grant needs the lease NAME.** The Role is `resourceNames`-scoped, so the
-unnamed question answers "no" for a perfectly good grant:
-
-```
-kubectl auth can-i get leases.coordination.k8s.io                     -> no   (MEANINGLESS)
-kubectl auth can-i get leases.coordination.k8s.io/<lease-name>        -> the real answer
-```
-
-**And `kubectl apply` cannot modify that Role** — see `docs/provider-runtime-create-markers.md`. Use
-`kubectl edit`, a JSON patch, or `apply --server-side`.
 
 ## Comparing an array the vendor returns reordered — `x-kubernetes-list-type`
 
