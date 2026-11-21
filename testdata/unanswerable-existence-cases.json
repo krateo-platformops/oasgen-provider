@@ -1,0 +1,128 @@
+{
+  "_comment": [
+    "THE CANONICAL unanswerable-existence CASES, read by BOTH modules' tests.",
+    "",
+    "oasgen-provider decides this at generation time (restdefinition.unanswerableExistence) and warns",
+    "on the RestDefinition, so somebody can add a findby while the document is still being written.",
+    "rest-dynamic-controller decides the same thing at runtime and returns",
+    "unstructured-runtime's ErrExistenceUnanswerable, so the runtime stops and reports instead of",
+    "stranding the CR. They cannot share code -- separate Go modules, no dependency either way, and",
+    "both predicates live under internal/ -- so they share THIS FILE instead.",
+    "",
+    "That is the enforceable version of 'one predicate'. A comment saying 'keep these in sync' is not:",
+    "it fails silently, and the whole point is that a WARNING and a RUNTIME REFUSAL must not disagree",
+    "about which kinds they describe. If the two drift, a row here fails in the other module's suite.",
+    "",
+    "WHY THE PREDICATE IS WHAT IT IS. The runtime's existence check picks its read verb by",
+    "ADDRESSABILITY, not by which verbs exist: it dry-runs the GET, and only when that does not",
+    "validate does it fall back to findby. A get parameter sourced from status is empty at reconcile 1,",
+    "so the GET does not validate, the action becomes findby, and if none is declared the check can",
+    "NEVER answer -- because the only thing that would fill that status field is the create response",
+    "that was lost. Measured: 4 of 6 CRs in one consumer's chart stranded on a CLEAN install, 2 more on",
+    "another consumer's chart. See unstructured-runtime issue 119.",
+    "",
+    "DELIBERATELY NARROW. A parameter with NO mapping is not flagged: it may still resolve by name from",
+    "the generated spec, and deciding that here would mean re-deriving the rendered schema in both",
+    "modules -- an approximation of the real resolver, which is how a vacuous gate got written in this",
+    "repo. A false negative is possible; a false positive is not. Measured on one consumer's chart: ten",
+    "findby-less kinds split SIX exposed and FOUR not, and warning on all ten would have sent operators",
+    "to do manual work on four kinds that need none."
+  ],
+  "cases": [
+    {
+      "name": "the measured case: get needs a status id, no findby",
+      "kind": "GitPush",
+      "verbs": [
+        { "action": "create", "path": "/pushes", "mappings": [] },
+        { "action": "get", "path": "/pushes/{pushId}", "mappings": [{ "inPath": "pushId", "inCustomResource": "status.pushId" }] }
+      ],
+      "unanswerable": true,
+      "param": "pushId",
+      "source": "status.pushId"
+    },
+    {
+      "name": "a declared findby makes it answerable, whatever the get needs",
+      "kind": "Issue",
+      "verbs": [
+        { "action": "get", "path": "/issues/{number}", "mappings": [{ "inPath": "number", "inCustomResource": "status.number" }] },
+        { "action": "findby", "path": "/issues", "mappings": [] }
+      ],
+      "unanswerable": false
+    },
+    {
+      "name": "get addresses from spec, so it validates at reconcile 1",
+      "kind": "RepositoryPermission",
+      "verbs": [
+        { "action": "get", "path": "/repos/{projectId}/perms", "mappings": [{ "inPath": "projectId", "inCustomResource": "spec.projectId" }] }
+      ],
+      "unanswerable": false
+    },
+    {
+      "name": "no get verb at all is a DIFFERENT defect, reported elsewhere",
+      "kind": "Trigger",
+      "verbs": [
+        { "action": "create", "path": "/triggers", "mappings": [] }
+      ],
+      "unanswerable": false
+    },
+    {
+      "name": "an unmapped parameter is NOT flagged -- it may resolve by name from the spec",
+      "kind": "Widget",
+      "verbs": [
+        { "action": "get", "path": "/widgets/{name}", "mappings": [] }
+      ],
+      "unanswerable": false
+    },
+    {
+      "name": "no path parameters at all",
+      "kind": "Settings",
+      "verbs": [
+        { "action": "get", "path": "/settings", "mappings": [] }
+      ],
+      "unanswerable": false
+    },
+    {
+      "name": "one of three parameters comes from status -- one is enough",
+      "kind": "CheckTask",
+      "verbs": [
+        { "action": "get", "path": "/orgs/{org}/checks/{checkId}/tasks/{taskId}", "mappings": [
+          { "inPath": "org", "inCustomResource": "spec.org" },
+          { "inPath": "checkId", "inCustomResource": "status.checkId" },
+          { "inPath": "taskId", "inCustomResource": "spec.taskId" }
+        ] }
+      ],
+      "unanswerable": true,
+      "param": "checkId",
+      "source": "status.checkId"
+    },
+    {
+      "name": "action casing does not matter for get",
+      "kind": "Run",
+      "verbs": [
+        { "action": "GET", "path": "/runs/{runId}", "mappings": [{ "inPath": "runId", "inCustomResource": "status.runId" }] }
+      ],
+      "unanswerable": true,
+      "param": "runId",
+      "source": "status.runId"
+    },
+    {
+      "name": "action casing does not matter for findby either",
+      "kind": "IssueTwo",
+      "verbs": [
+        { "action": "get", "path": "/issues/{number}", "mappings": [{ "inPath": "number", "inCustomResource": "status.number" }] },
+        { "action": "FindBy", "path": "/issues", "mappings": [] }
+      ],
+      "unanswerable": false
+    },
+    {
+      "name": "the DEPRECATED mapping field is read too, or pre-rename definitions go unwarned",
+      "kind": "Legacy",
+      "verbs": [
+        { "action": "get", "path": "/things/{thingId}", "deprecatedMappings": [{ "inPath": "thingId", "inCustomResource": "status.thingId" }] }
+      ],
+      "unanswerable": true,
+      "param": "thingId",
+      "source": "status.thingId"
+    }
+  ]
+}
