@@ -1,5 +1,5 @@
 ---
-type: Reference
+type: API
 title: rest-dynamic-controller condition reasons
 description: Every condition rest-dynamic-controller sets on a generated kind's CR, with its wire value, its parent-composition verdict and whether it clears on its own. Shares core-provider's seven-column shape so one vendoring parser reads both, and records why a condition message never carries the vendor's response body.
 resource: oci://ghcr.io/krateo-platformops/charts/oasgen-provider
