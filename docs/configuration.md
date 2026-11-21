@@ -120,8 +120,19 @@ rdc.readinessProbe:
   timeoutSeconds: 3
 ```
 
-**The path `/readyz` is fixed. The port is not** — it is two chart values that must agree, and if you
-move one, move both.
+**THREE values, and the trap is that two of them have the same name.**
+
+```
+the SERVER's route        /readyz, hardcoded in health.go -- you cannot change it
+the PROBE's request path  rdc.readinessProbe.httpGet.path -- A CHART VALUE, you can
+the PROBE's port          rdc.readinessProbe.httpGet.port, which must match
+                          rdc.healthProbePort
+```
+
+**So "the path is hardcoded" is true of the server and FALSE of the probe.** Change
+`readinessProbe.httpGet.path` and every pod goes NotReady **against a server answering perfectly
+well on `/readyz`** — the probe asks for something that was never served. Same for the port: two
+values that must agree, and if you move one, move both.
 
 ### Two timescales, and the gap between them is the point
 
