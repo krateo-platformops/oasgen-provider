@@ -323,9 +323,16 @@ retracted:
       controllers at all. THE SAME DEFECT IS PRESENT ON `- name: metrics` SINCE 0.77.0 AND WAS
       DORMANT: rdc.metrics.port defaults to 0 so its `{{- if }}` never rendered, while
       rdc.healthProbePort defaults to 8081, so 0.85.0 renders the broken shape on every install. Both
-      are fixed in 0.85.1, with a gate that decodes the SHIPPED asset through the provider's own
-      CreateK8sObject -- the check that was missing, because the only tests of this file used a
+      are fixed in a later version, with a gate that decodes the SHIPPED asset through the provider's
+      own CreateK8sObject -- the check that was missing, because the only tests of this file used a
       SEPARATE fixture that never received the change.
+      DO NOT READ THIS AS "UPGRADE TO 0.85.1". This entry originally said "fixed in 0.85.1", written
+      BEFORE anyone installed 0.85.1 -- and 0.85.1 cannot create a generated controller either, for a
+      different reason (see its own entry above). A retraction entry does two jobs: recording that a
+      version is bad, which is true forever, and recommending a remedy, which is a PREDICTION about a
+      version nobody had verified when the entry was written. The second job is the one that has now
+      been wrong twice. The `use:` field above names the known-good fallback and is the only remedy
+      this file should be read as giving.
       DO NOT SET rdc.metrics.port ON 0.84.0, THE VERSION THIS ENTRY SENDS YOU TO. The metrics half
       of the same defect is live wherever the chart ACCEPTS that key and renders the block.
       Measured by rendering each published chart with --set rdc.metrics.port=8080 and decoding the
