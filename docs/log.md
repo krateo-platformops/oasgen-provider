@@ -26,6 +26,83 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-21 — 0.85.2
+
+**THE RELEASE THAT MAKES 0.85.x INSTALLABLE.** 0.85.0 and 0.85.1 are both retracted to 0.84.0, in
+all three charts, because neither can create a generated controller at all. If you are on either,
+read `retracted-versions.yaml` rather than this section: **0.85.0's entry quotes its own original
+wording, which recommended 0.85.1, and says in capitals not to read it that way.**
+
+### What was broken, and why four checks did not see it
+
+```
+0.85.0   the shipped rdc Deployment asset did not PARSE
+         `- name: health` at indent 14 where `- name: http` sits at 12, so the health port
+         became a nested list inside the http item. `- name: metrics` had the same defect
+         since 0.81.0, dormant only because rdc.metrics.port defaults to 0.
+
+0.85.1   it parsed, and the apiserver REFUSED it:
+             spec.template.spec.containers[0].livenessProbe: Required value:
+             must specify a handler type
+         `rdc.livenessProbe: {}` renders a probe with no handler. Valid YAML; invalid object.
+```
+
+**PARSE, VERSION, CONTENT and ADMISSION are four separate facts.** A consumer verified 0.85.1 was
+pullable, correctly versioned **and** contained the previous fix — three readings — and still could
+not catch it. The decode gate added for 0.85.0 passed on 0.85.1, because `{}` decodes.
+
+### The fixes
+
+- **Both probes are now guarded** by `{{- with .Values.rdc.livenessProbe }}`, so an empty value
+  drops the whole block instead of emitting a handler-less probe. `rdc.livenessProbe` ships as `{}`
+  on purpose and `rdc.readinessProbe` carries a real `httpGet /readyz`.
+- **The escape-hatch comment was corrected from "empty" to "NULL".** Helm MERGES maps:
+  `readinessProbe: {}` in a values file leaves the chart's `httpGet` in place, so a reader following
+  the old comment would have got every pod `NotReady`. Only `readinessProbe: null` removes it.
+- **An admission gate**, which is what was missing. The offline half renders the shipped asset
+  through both passes — helm's with the chart's real `values.yaml`, then the provider's — decodes it
+  with the production `CreateK8sObject`, and asserts the object carries a readiness probe **with a
+  handler** and no liveness probe. It runs in the unit suite on every PR and **catches both 0.85.0's
+  and 0.85.1's shapes**, verified by mutating the chart to each and watching it fail. The cluster
+  half dry-runs the object against a real apiserver, with a negative control that `livenessProbe: {}`
+  must be refused *and refused for that reason*.
+
+### Also in this release
+
+- **`unstructured-runtime` is bumped to v1.30.0** (#854). Its policy table went from 91 rows to 161:
+  **5 changed, 0 removed, 70 new**, 40 of them for a new `orphaned` deletion-policy value. Keyed by
+  row identity, not by diff lines — a diff-line count says 80 and is the wrong instrument. **The
+  `observe-delete` over `deletion-policy: orphan` precedent recorded earlier in this log is REVERSED
+  from this version**, and the note at that paragraph now says so.
+- **A persistently refused create no longer claims the controller has stopped.** The condition
+  message used to end *"the controller is no longer re-sending"*, written on a reading of the retry
+  limiter that a consumer's measurement falsified: the limiter keys its failure map on the boxed
+  `Event` value, `Event` carries a `QueuedAt` timestamp, and every fresh enqueue is a new key whose
+  count restarts. **`MAX_ERROR_RETRIES` caps retries per ENQUEUED EVENT**, so a refused create is
+  re-sent on every resync, indefinitely — roughly six calls per CR per cycle with no taper. A
+  consumer maps that reason to a UI pill; the old wording would have told an operator the system had
+  given up on a request it was still retrying every three minutes.
+- **A management-policy value no policy recognises is now reported.** `krateo.io/management-policy:
+  defualt` makes `IsActionAllowed` deny create, update **and** delete, and the three call sites log
+  at Debug and return nil — so the RestDefinition reported healthy while managing nothing, with a log
+  line identical to a deliberate `observe` policy. **It is an annotation, not a CRD field, so nothing
+  validates it at admission.** The new condition is `ManagementPolicyValid=False` /
+  `ManagementPolicyInvalid`, naming the offending value; it is **not** on `Synced`, because
+  provider-runtime v1.8.2's reconciler sets `Synced=True` on the policy-denied path and would
+  overwrite it every pass. It retires when the provider-runtime pin reaches the version that reports
+  this itself.
+- **The not-ready message names the count and the cause** (#855) instead of saying only that the
+  deployment is not ready.
+- **A reason table consumers can vendor**, `docs/rdc-ready-reasons.md`: every condition this
+  controller sets, with its **wire value** (two differ from their Go identifiers), its
+  parent-composition verdict, and whether it clears on its own. It shares core-provider's
+  seven-column shape so one parser reads both, and it records that **a condition message never
+  carries the vendor's response body** — that text is logged at Info instead, because `.status` is
+  readable by anyone who can `get` the CR.
+- **Test-only**: the two field-mapping spellings are pinned equivalent with the current one winning
+  on conflict (#859), and `IsResourceKnown`'s step-3 auto-populate is discriminated from step-5
+  mappings (#858).
+
 ## 2026-11-21 — 0.85.1
 
 **0.85.0 could not create any generated controller. This is the fix, and nothing else.**
@@ -3819,7 +3896,8 @@ CR **before** anything restores the controller. That annotation is honoured on g
 `unstructured-runtime`; `management-policy: observe-delete` overrides it (#609, #611, and see #616).
 
 > **Note (2026-11-21): the override above is REVERSED from unstructured-runtime v1.30.0**, which ships
-> in 0.86.0. The runtime's own policy table is shipped as testdata, so this is measured rather than
+> in 0.85.2 (it was written expecting 0.86.0, before 0.85.0 and 0.85.1 were both retracted and the
+> bump went out in the recovery release instead). The runtime's own policy table is shipped as testdata, so this is measured rather than
 > relayed -- the two rows that change, keyed by policy / deletion-policy / state:
 >
 > ```
