@@ -202,6 +202,13 @@ rdc:
     failureThreshold: 30
     timeoutSeconds: 3
 
+  # SHIPPED AS {} AND THAT IS NOW SAFE ONLY BECAUSE THE ASSET GUARDS IT. `toYaml {}`
+  # renders `{}`, and the apiserver REFUSES a probe with no handler -- "livenessProbe:
+  # Required value: must specify a handler type". 0.85.1 shipped exactly that and could not
+  # create any generated controller; the asset parses, so the rejection is at ADMISSION and
+  # no YAML check sees it. assets/rdc/deployment.yaml now wraps both probes in `with`.
+  # To DISABLE the readiness probe, set rdc.readinessProbe to NULL, not {}: helm merges
+  # maps, so {} leaves this chart's httpGet in place.
   # Deliberately empty -- see the readinessProbe comment above. A liveness probe pointed at /readyz
   # would restart every replica that is correctly waiting for the ownership lease.
   livenessProbe: {}
