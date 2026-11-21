@@ -896,7 +896,11 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 				"error", berr)
 		} else if len(bodyFields) > 0 {
 			if found := remoteOnlyBodyKeys(specFields(mg), b, bodyFields); len(found) > 0 {
-				h.reportUnmodelledKeys(ctx, mg, found, log)
+				// The UPDATE verb's partial set, because that is the verb whose body this warns about.
+				// Free here: clientInfo already carries the verbs, so no extra request and no value
+				// threaded across handler calls -- the same reason the detection itself lives here.
+				partial := partialFieldsFor(clientInfo.Resource.VerbsDescription, string(apiaction.Update))
+				h.reportUnmodelledKeys(ctx, mg, found, partial, log)
 			}
 		}
 		if !res.IsEqual {

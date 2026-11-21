@@ -22,7 +22,11 @@ func TestTheUnmodelledKeyWarningDoesNotAssertTheVendorsBehaviour(t *testing.T) {
 	h, evs := latchedHandler(t, mg)
 
 	found := map[string][]string{"settings": {"manualQueueOnly"}, "type": {"displayName", "url"}}
-	if !h.reportUnmodelledKeys(context.Background(), mg, found, logging.NewNopLogger()) {
+	// A NIL PARTIAL SET, deliberately: this test is about the non-partial wording, and passing nil keeps
+	// it asserting exactly the case issue 757 measured. The partial wording has its own test, and the two
+	// must not share a fixture -- a single input exercising both would let either sentence satisfy an
+	// assertion meant for the other.
+	if !h.reportUnmodelledKeys(context.Background(), mg, found, nil, logging.NewNopLogger()) {
 		t.Fatal("reportUnmodelledKeys returned false, so nothing was reported and this test asserts nothing")
 	}
 
