@@ -277,6 +277,36 @@
 # event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
+  - version: "0.85.0"
+    charts:
+      - oasgen-provider
+      - oasgen-provider-crds
+      - controller-render-service
+    use: "0.84.0"
+    reason: >-
+      NO GENERATED CONTROLLER CAN BE CREATED. The rdc Deployment asset does not parse: in
+      helm/oasgen-provider/assets/rdc/deployment.yaml the readiness containerPort `- name: health` is
+      indented 14 spaces where `- name: http` sits at 12, so it is a nested list inside the http
+      item's mapping. Every Deployment decode fails with "failed to decode object: yaml: line 86: did
+      not find expected key". MEASURED on a consumer's GKE cluster upgrading 0.76.0 -> 0.85.0: 454
+      occurrences, 0 of 25 RestDefinitions regenerated, all 25 build stamps still reading 0.76.0, and
+      the previously deployed controllers left running the older image. A fresh install creates no
+      controllers at all. THE SAME DEFECT IS PRESENT ON `- name: metrics` SINCE 0.77.0 AND WAS
+      DORMANT: rdc.metrics.port defaults to 0 so its `{{- if }}` never rendered, while
+      rdc.healthProbePort defaults to 8081, so 0.85.0 renders the broken shape on every install. Both
+      are fixed in 0.85.1, with a gate that decodes the SHIPPED asset through the provider's own
+      CreateK8sObject -- the check that was missing, because the only tests of this file used a
+      SEPARATE fixture that never received the change.
+      DO NOT SET rdc.metrics.port ON 0.84.0, THE VERSION THIS ENTRY SENDS YOU TO. The metrics half
+      of the same defect is live wherever the chart ACCEPTS that key and renders the block.
+      Measured by rendering each published chart with --set rdc.metrics.port=8080 and decoding the
+      rdc deployment out of the rendered ConfigMap:
+      0.76.0, 0.77.0 and 0.80.0 REFUSE the key ("additional properties 'metrics' not allowed"), so
+      they are safe by construction; 0.81.0, 0.82.0, 0.83.1 and 0.84.0 ACCEPT it and render an
+      asset that DOES NOT PARSE. The affected window is therefore 0.81.0 through 0.85.0 -- narrower
+      than it first appeared, because below 0.81.0 the schema is the control. At the default of 0
+      the block is not rendered and every one of those versions is fine, which is why this went
+      unnoticed for four releases.
   - version: "0.53.0"
     charts:
       - oasgen-provider
