@@ -572,8 +572,31 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 			"name", obj.Name, "namespace", obj.Namespace,
 		)
 
+		// NAME THE COUNT AND THE LIKELY CAUSE, because "not ready yet" reads as "still starting"
+		// (issue 815). Since 0.85.0 the chart defaults a readinessProbe at /readyz, which fails when
+		// the generated controller cannot READ OR WRITE its ownership Lease -- so this branch is now
+		// the signal for a controller that will NEVER become ready, and the old wording sent an
+		// operator away to wait.
+		//
+		// WHAT THE PROBE ACTUALLY FAILS ON, measured in unstructured-runtime readyz.go:39-45: the
+		// informer's first list not having succeeded, and the Lease being unreadable or unwritable.
+		// A replica merely WAITING for a peer's Lease is READY, so a persistent 0-of-N here is not a
+		// handover and not contention -- it is the controller unable to reach the Lease at all.
+		//
+		// The replica counts are already in hand: obj was populated by LookupDeployment above, so
+		// this costs nothing. desired is read through a nil-safe helper because Spec.Replicas is a
+		// *int32 and a nil there would panic in the message rather than report the defect.
+		desired := int32(1)
+		if obj.Spec.Replicas != nil {
+			desired = *obj.Spec.Replicas
+		}
 		cr.SetConditions(rtv1.Unavailable().
-			WithMessage(fmt.Sprintf("Dynamic Controller '%s' not ready yet", obj.Name)))
+			WithMessage(fmt.Sprintf(
+				"Dynamic Controller '%s' is not ready: %d/%d replicas pass the readiness check. "+
+					"While it is starting this is expected; if it persists, the controller cannot read "+
+					"or write its ownership Lease -- check the RBAC on its ServiceAccount. A replica "+
+					"waiting for a peer's Lease is READY, so this is not contention.",
+				obj.Name, obj.Status.ReadyReplicas, desired)))
 
 		// EXISTS BUT NOT READY IS NOT "DOES NOT EXIST". The Deployment is right there -- deployOk is
 		// true -- it simply has not finished rolling out.
