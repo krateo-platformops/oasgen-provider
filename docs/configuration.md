@@ -161,7 +161,9 @@ kubectl auth can-i get leases.coordination.k8s.io/<lease-name>        -> the rea
 
 ### Two timescales, and the gap between them is the point
 
-**Measured at 0.85.2 on a real cluster, by a consumer's probe:**
+**Measured at 0.85.2 on a real cluster** -- the `openstack-nova-operator-kog` session's
+lease-readiness probe, runs `44930009330` and `44931943538`, both `conclusion=success`, each with
+a healthy control pod whose grant was never touched:
 
 ```
 the Lease becomes unreachable
@@ -172,7 +174,18 @@ the Lease becomes unreachable
 ```
 
 **The gap is the failureThreshold doing its job:** a transient Lease blip does not evict a working
-controller, and a persistent one does. **Derive the window from the deployed object** —
+controller, and a persistent one does.
+
+**The recovery is the half worth stating, because nobody thinks to ask for it:** `/readyz` returns to
+200 **on its own, without a restart**, once the Lease is readable again. The ownership error is
+overwritten on every attempt rather than latched -- read in `unstructured-runtime`'s `ownership.go`,
+and then confirmed by the measurement above, which is a different channel from the reading.
+
+**Scope of these numbers:** 0.85.2 pins `unstructured-runtime v1.30.0`, and `condition.Upsert` is
+**byte-identical** at v1.30.0 and v1.32.0 (771 bytes, empty diff), so the stamp behaviour this
+depends on is not specific to either pin. **Reproduced independently** by the
+`azuredevops-provider-kog` session from its own partial clone of the module -- same function,
+same 771 bytes at both tags, non-empty -- rather than taken from this repository's reading of it. **Derive the window from the deployed object** —
 `periodSeconds x failureThreshold` — rather than memorising 300s, because both are values you can
 change.
 
