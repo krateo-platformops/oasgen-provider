@@ -26,6 +26,72 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-21 — 0.86.0
+
+**A KIND WHOSE EXISTENCE CAN NEVER BE READ IS NOW SAID SO, AT BOTH ENDS.** Two consumers measured
+the same dead end on two vendors with two status codes: a create whose response is lost, on a kind
+whose `get` needs a server-assigned id and which declares no `findby`. The existence check can never
+answer — the only thing that would fill `status.<id>` is the response that was lost — so the CR sat
+at `Ready=False/CreateOutcomeUnknown` forever **and could not be deleted**. Measured: 4 of 6 CRs in
+one Keycloak realm chart on a CLEAN install (oasgen-provider PR 825); 2 more on an Azure DevOps
+chart over ~2h, on a 409 whose "already exists" reading is false for a push.
+
+### What ships
+
+- **At apply time, oasgen-provider warns.** A RestDefinition whose `get` path parameter is mapped
+  from `status.*`, with no `findby` declared, now carries `ExistenceAnswerable=False` /
+  `ExistenceUnanswerable`, naming the kind, the parameter, its source, and the way out. **It warns
+  and still generates** — refusing would have taken six live kinds out of service on one consumer's
+  chart at upgrade, which is a regression delivered as a fix. **Not on `status.schemaWarnings`**:
+  issue 708 measured that field non-empty on 23 of 25 *healthy* RestDefinitions, so a new entry there
+  is a warning nobody reads.
+- **At reconcile time, rest-dynamic-controller refuses.** The same predicate returns
+  `unstructured-runtime`'s `ErrExistenceUnanswerable`, so the runtime **stays stopped and reports**
+  rather than stranding the CR. The marker is deliberately kept: skipping it would trade a definite
+  strand for a **silent duplicate** on exactly the kinds that cannot detect one.
+- **The two predicates cannot drift.** They share
+  `testdata/unanswerable-existence-cases.json` — 10 rows, asserted by **both** modules' suites, the
+  same arrangement this repo already uses for `action-only-shape.json`. A change to one that the
+  other does not follow turns the other module's suite red and names the row.
+
+### Deliberately narrow, and the direction is the point
+
+**Only an EXPLICIT `status.*` mapping counts.** An unmapped parameter may still resolve by name from
+the generated spec, and deciding that here would mean re-deriving the rendered schema in both
+modules. **A false negative leaves today's behaviour; a false positive stops a resource forever.**
+Measured on one consumer's chart: ten findby-less kinds split **six exposed and four not**, and
+warning on all ten would have sent operators to do manual work on four kinds that need none.
+
+**And the mark is never returned alongside `ExistenceUndetermined`:** the runtime's precedence rule
+treats an error carrying both as TRANSIENT, so a double mark silently reverts to waiting — it would
+look like the fix was in while the behaviour was unchanged.
+
+### Also in this release
+
+- **`unstructured-runtime` is bumped to v1.32.0**, audited per package rather than compared as a
+  version number: 11 files differ and every changed package is one this module imports. Two needed
+  specific checks. **`Event` gained a field and `Event` is the rate limiter's map key** — but
+  `workqueue.go` is byte-identical and the limiter is still instantiated over `any`, so the key is
+  still the whole boxed value and the per-enqueue retry budget is unchanged. **And `GetConditions`
+  now parses entry by entry** (their #115): a stamp that is absent, null, not a string or not
+  RFC3339 reads as the zero time on a **kept** condition instead of discarding the whole list.
+  Measured rather than inferred: removing this repo's `IsZero` guard now fails **both** arms of the
+  deadline test, where at v1.30.0 it failed only one. The guard protects two shapes here, not one,
+  and the comment that said otherwise now names the version it was measured at.
+- **`kubectl apply` cannot modify any RBAC this provider generates**, documented in
+  `docs/provider-runtime-create-markers.md`. Every Role and RoleBinding for a generated kind is
+  written by the controller, so none carries `last-applied-configuration` and client-side apply
+  refuses it — **with an error that names an annotation rather than the cause**, so an operator
+  mid-incident goes looking at RBAC. It cost a peer an entire probe run. `kubectl edit`, a JSON
+  patch, or `apply --server-side` all work.
+- **`docs/rdc-ready-reasons.md` states where there is deliberately NO condition.** Deletion of a CR
+  whose existence is permanently unanswerable reports through a runtime Warning **event** and sets no
+  condition — because that path releases the finalizer, so a condition written there disappears with
+  the object it was written on.
+- **Test-only**: the condition a CR receives is now asserted rather than the function that builds it.
+  The decision passed three strings in a row, so swapping two of them compiled, made the message name
+  each as the other, and failed none of the fifteen existing arms.
+
 ## 2026-11-21 — 0.85.2
 
 **THE RELEASE THAT MAKES 0.85.x INSTALLABLE.** 0.85.0 and 0.85.1 are both retracted to 0.84.0, in
