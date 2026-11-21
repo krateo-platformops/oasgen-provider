@@ -442,11 +442,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	// THE RESOURCE IS STILL GENERATED. Refusing would take six live kinds out of service on one
 	// consumer's chart at upgrade, which is a regression delivered as a fix. Evaluated here rather
 	// than once at generation time so the condition CLEARS when the document is fixed.
-	if param, source, unanswerable := unanswerableExistence(cr.Spec.Resource); unanswerable {
-		cr.SetConditions(existenceUnanswerableCondition(cr.Spec.Resource.Kind, param, source))
-	} else {
-		cr.SetConditions(existenceAnswerableCondition())
-	}
+	cr.SetConditions(existenceConditionFor(cr))
 	span.SetAttributes(
 		attribute.String("k8s.object.name", cr.Name),
 		attribute.String("k8s.object.namespace", cr.Namespace),
