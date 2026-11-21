@@ -140,7 +140,12 @@ func (h *handler) Exists(ctx context.Context, mg *unstructured.Unstructured) (bo
 	if apiCall == nil || callInfo == nil {
 		// No verb to read with. NOT false: a kind with no get and no findby is unobservable, and reporting
 		// "definitely absent" for it would let recovery recreate on every grace-period expiry.
-		return false, fmt.Errorf("existence check: this kind declares no %s verb, so existence cannot be read", action)
+		err := fmt.Errorf("existence check: this kind declares no %s verb, so existence cannot be read", action)
+
+		// AND IF IT CAN NEVER BE ANSWERED, SAY SO -- but only then. See
+		// markIfPermanentlyUnanswerable for why the decision is a value rather than an inline `if`,
+		// and for the precedence hazard that makes a double mark worse than no mark.
+		return false, markIfPermanentlyUnanswerable(clientInfo.Resource, err)
 	}
 
 	reqConfiguration := builder.BuildCallConfig(ctx, callInfo, mg, clientInfo.ConfigurationSpec, nil)
