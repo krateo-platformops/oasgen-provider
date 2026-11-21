@@ -100,6 +100,42 @@ Still open and in the same family: **oasgen-provider#446**, *"RestDefinition Rea
 apiserver is serving the new CRD schema"* — readiness signals that describe the writer rather than whether
 the apiserver serves the schema.
 
+## `kubectl apply` cannot modify any RBAC this provider generates
+
+**Measured, by a peer's probe, and it holds at every version:**
+
+```
+$ kubectl apply -f role.yaml
+Warning: resource roles/<name> is missing the kubectl.kubernetes.io/last-applied-configuration
+annotation which is required by kubectl apply. kubectl apply should only be used on resources
+created declaratively...
+rc=1
+```
+
+**Every Role and RoleBinding this provider creates for a generated kind is written by the
+controller, not by `kubectl`** — so none of them carries `last-applied-configuration`, and plain
+client-side `kubectl apply` refuses to touch them. **This is not a permissions problem, and the
+error does not say so.**
+
+**What works instead:**
+
+```
+kubectl edit role <name> -n <ns>
+kubectl patch role <name> -n <ns> --type=json -p '[...]'
+kubectl apply --server-side -f role.yaml
+```
+
+**WHY THIS IS IN THE RUNBOOK AND NOT ONLY IN A COMMENT.** The remedies in this file use
+`kubectl annotate`, which works — it does not go through apply's three-way merge. **But the next
+remedy somebody writes for a stranded CR will reach for `kubectl apply`, because that is what one
+reaches for**, and it will fail with a message naming an annotation nobody has heard of. An operator
+following it mid-incident will go looking at RBAC, which is the one place the cause is not.
+
+**It cost a peer an entire probe run**: their restore step applied a Role the controller had created,
+the apply failed, and three different causes shared one exit code — so the run could not say whether
+the grant had come back. **Their fix is an inverse JSON patch rather than an apply**, which needs no
+annotation this controller never wrote.
+
 ## Practical guidance
 
 1. **Never compare these annotations as strings.** Parse them.
