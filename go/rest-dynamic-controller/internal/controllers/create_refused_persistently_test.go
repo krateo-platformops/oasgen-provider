@@ -98,14 +98,21 @@ func TestTheDeadlineIsMeasuredFromReadysTransition(t *testing.T) {
 	})
 
 	t.Run("a SERIALIZED zero stamp reaches the guard and must not report", func(t *testing.T) {
-		// THE TWO SHAPES ARE NOT INTERCHANGEABLE, and only this one tests the guard. Measured:
+		// THE TWO SHAPES WERE NOT INTERCHANGEABLE AT unstructured-runtime v1.30.0, and the version is
+		// the part this comment used to omit. Measured at v1.30.0:
 		//
-		//	"not-a-timestamp"        time.Parse errors -> GetConditions returns NIL for the WHOLE
-		//	                         list, so the condition never reaches createRefusedLongerThan
-		//	"0001-01-01T00:00:00Z"   parses cleanly AND IsZero() is true -> it DOES reach the guard
+		//	"not-a-timestamp"        time.Parse errors -> GetConditions returned NIL for the WHOLE
+		//	                         list, so the condition never reached createRefusedLongerThan
+		//	"0001-01-01T00:00:00Z"   parses cleanly AND IsZero() is true -> it DID reach the guard
 		//
-		// The arm above uses the first and passes with the guard removed, because it never exercises it.
-		// This one is the guard's actual negative test.
+		// CORRECTED AT v1.32.0, and measured by removing the guard rather than inferred from the
+		// release note: BOTH arms now fail without it. #115 made GetConditions parse entry by entry,
+		// so a stamp that is absent, null, not a string or not RFC3339 reads as the ZERO TIME on a
+		// KEPT condition instead of discarding the whole list. The guard therefore protects two shapes
+		// here, not one, and the distinction this comment drew has dissolved.
+		//
+		// Both arms are kept: they are now two routes to the same guard, and if a later version
+		// separates them again the pair still covers both.
 		mg := &unstructured.Unstructured{Object: map[string]interface{}{
 			"status": map[string]interface{}{
 				"conditions": []interface{}{

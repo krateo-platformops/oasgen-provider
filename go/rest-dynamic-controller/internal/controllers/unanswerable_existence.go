@@ -1,8 +1,11 @@
 package restResources
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
+
+	ucontroller "github.com/krateo-platformops/unstructured-runtime/pkg/controller"
 
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
 )
@@ -88,4 +91,28 @@ func statusMappedGetParam(get *getter.VerbsDescription, param string) (string, b
 		}
 	}
 	return "", false
+}
+
+// markIfPermanentlyUnanswerable returns err wrapped with unstructured-runtime's permanent sentinel
+// when this resource's existence can never be read, and err unchanged otherwise.
+//
+// IT EXISTS AS A VALUE-RETURNING FUNCTION so a test can assert WHAT Exists returns rather than
+// re-deriving the decision. The branch it replaces was inline, and reaching it from a unit test
+// requires a fetchable OAS document -- Exists refuses first with "no OAS document is declared for
+// action \"get\"" -- so the inline form was only testable with a served document. A correct
+// predicate behind a mis-wired `if` is invisible to every arm that calls the predicate directly, and
+// the consequence is not cosmetic: the runtime STAYS STOPPED on a permanent error and WAITS on a
+// transient one.
+//
+// IT MUST NOT ALSO CARRY ExistenceUndetermined. The runtime's precedence rule treats an error marked
+// BOTH ways as TRANSIENT, so a double mark does not fail loudly -- it silently reverts to waiting,
+// which looks like the fix is in while the behaviour is unchanged.
+func markIfPermanentlyUnanswerable(res getter.Resource, err error) error {
+	param, source, permanent := existenceIsPermanentlyUnanswerable(res)
+	if !permanent {
+		return err
+	}
+	return ucontroller.ExistenceUnanswerable(fmt.Errorf(
+		"%w: the get path needs {%s}, which is mapped from %q, and no findby verb is declared, so no "+
+			"later pass can resolve it", err, param, source))
 }
