@@ -413,6 +413,23 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	ctx, span := oteltelemetry.Tracer().Start(ctx, "restdefinition.observe")
 	defer span.End()
 	defer func() { oteltelemetry.RecordError(span, err) }()
+
+	// AN UNRECOGNISED MANAGEMENT POLICY IS REPORTED, not just obeyed.
+	//
+	// meta.IsActionAllowed returns FALSE for create, update AND delete when the annotation holds a
+	// value no policy knows -- a misspelling, or a verb set an older provider-runtime cannot parse.
+	// The three call sites below then log at Debug and `return nil`, which reads as SUCCESS to every
+	// layer above, so the RestDefinition reports healthy while managing nothing. The log line they
+	// emit is word for word the line a DELIBERATE `observe` policy produces, so nothing in the
+	// object distinguishes "the operator asked me not to act" from "the operator misspelled
+	// default".
+	//
+	// Set here rather than at those three sites because Observe runs on every pass, while Create
+	// runs only when the resource is absent: a RestDefinition that already exists would otherwise
+	// never report the fault at all.
+	if bad, unrecognised := managementPolicyIsUnrecognised(cr); unrecognised {
+		cr.SetConditions(managementPolicyInvalidCondition(bad))
+	}
 	span.SetAttributes(
 		attribute.String("k8s.object.name", cr.Name),
 		attribute.String("k8s.object.namespace", cr.Namespace),
