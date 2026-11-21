@@ -49,10 +49,21 @@ vendor's explanation.
 | ResolverDigestRecorded | `DigestRecorded` | True | rest-dynamic-controller | — | `steady`: a resolver digest was recorded for this pass | `ResolverDigestRecorded` |
 | ResolverDigestRecorded | `DigestFieldAbsent` | False | rest-dynamic-controller | — | `next pass`: the field a digest would be taken from is absent | `ResolverDigestFieldAbsent` |
 
-## How `Ready=False/CreateRefusedPersistently` reaches the cluster, and why it did not before 0.86.0
+## How `Ready=False/CreateRefusedPersistently` reaches the cluster, and why it has never arrived yet
 
-**It works from 0.86.0. It did not in any earlier release, and the reason is worth keeping because it
-is a general rule about this runtime.**
+**IT DOES NOT WORK IN ANY RELEASED VERSION, INCLUDING 0.86.0.** An earlier revision of this section
+said "it works from 0.86.0". That was wrong, and the way it was wrong is the point of keeping it:
+**the fix has two halves, and 0.86.0 shipped only the half that was not ours.**
+
+| Half | What it does | Where it is |
+|---|---|---|
+| The runtime applies a handler's conditions on the **failed**-create path | `unstructured-runtime` #124 | **Released**, v1.32.1, pinned by 0.86.0 |
+| This handler **returns** the condition instead of writing it | RDC's create paths | **Merged, unreleased** — see the PR that carries this line |
+
+**So on 0.86.0 the runtime dutifully applies `created.Conditions`, which this handler left empty, and
+the report still does not arrive.** A consumer pre-registered the row INVERTED against 0.86.0 for
+exactly that reason. **Do not read "v1.32.1 is pinned" as "the report works"** — that is the whole
+mistake this table exists to prevent.
 
 **Measured on a live cluster** by the `azuredevops-provider-kog` session, run 0852 at **0.85.2**: a CR
 whose create the vendor refused with a 400 sat **198 minutes** against a **1-hour** deadline, and the
@@ -78,6 +89,10 @@ runtime's own, so a handler `Ready` **replaces** `Ready=False/Creating` and any 
 `ManagementPolicyInvalid`: an invalid management policy is observe-only, so `worker.go`
 short-circuits the Create event at `!ManagementDecision(el).May(managementpolicy.Create)` and
 `handleCreate` is never reached at all.)
+
+**AND THAT ALONE WAS NOT ENOUGH.** The runtime can only apply what a handler RETURNS. This handler
+wrote the condition onto its argument until the PR named in the table above, so the extended contract
+had nothing to act on. **Bumping a dependency is not the same as using it.**
 
 **So from 0.86.0 the row above is a plain row.** On 0.85.2 and earlier it never fired, and a consumer
 whose pill never lit was reading a correct integration against a release that could not deliver.
