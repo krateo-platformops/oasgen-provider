@@ -118,17 +118,17 @@ spec:
               # for a server the binary never starts is a declaration a reader or a NetworkPolicy takes
               # at face value. REST_CONTROLLER_HEALTH_PROBE_PORT: "0" means nothing is listening -- and
               # in that case rdc.readinessProbe must be empty too, or every pod is marked NotReady.
-              - name: health
-                containerPort: {{ .Values.rdc.healthProbePort }}
-                protocol: TCP
+            - name: health
+              containerPort: {{ .Values.rdc.healthProbePort }}
+              protocol: TCP
               {{- end }}
               {{- if ne (int .Values.rdc.metrics.port) 0 }}
               # ONLY WHEN NON-ZERO (#772). A containerPort for a server the binary never starts is a
               # declaration a reader, a NetworkPolicy or a scrape config would take at face value -- and
               # REST_CONTROLLER_METRICS_SERVER_PORT: "0" means nothing is listening.
-              - name: metrics
-                containerPort: {{ .Values.rdc.metrics.port }}
-                protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.rdc.metrics.port }}
+              protocol: TCP
               {{- end }}
               protocol: TCP
           livenessProbe:

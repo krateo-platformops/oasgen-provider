@@ -277,6 +277,26 @@
 # event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
+  - version: "0.85.0"
+    charts:
+      - oasgen-provider
+      - oasgen-provider-crds
+      - controller-render-service
+    use: "0.84.0"
+    reason: >-
+      NO GENERATED CONTROLLER CAN BE CREATED. The rdc Deployment asset does not parse: in
+      helm/oasgen-provider/assets/rdc/deployment.yaml the readiness containerPort `- name: health` is
+      indented 14 spaces where `- name: http` sits at 12, so it is a nested list inside the http
+      item's mapping. Every Deployment decode fails with "failed to decode object: yaml: line 86: did
+      not find expected key". MEASURED on a consumer's GKE cluster upgrading 0.76.0 -> 0.85.0: 454
+      occurrences, 0 of 25 RestDefinitions regenerated, all 25 build stamps still reading 0.76.0, and
+      the previously deployed controllers left running the older image. A fresh install creates no
+      controllers at all. THE SAME DEFECT IS PRESENT ON `- name: metrics` SINCE 0.77.0 AND WAS
+      DORMANT: rdc.metrics.port defaults to 0 so its `{{- if }}` never rendered, while
+      rdc.healthProbePort defaults to 8081, so 0.85.0 renders the broken shape on every install. Both
+      are fixed in 0.85.1, with a gate that decodes the SHIPPED asset through the provider's own
+      CreateK8sObject -- the check that was missing, because the only tests of this file used a
+      SEPARATE fixture that never received the change.
   - version: "0.53.0"
     charts:
       - oasgen-provider
