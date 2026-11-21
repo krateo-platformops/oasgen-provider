@@ -430,6 +430,23 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	if bad, unrecognised := managementPolicyIsUnrecognised(cr); unrecognised {
 		cr.SetConditions(managementPolicyInvalidCondition(bad))
 	}
+
+	// AND WARN IF THIS RESOURCE'S EXISTENCE CAN NEVER BE READ.
+	//
+	// A get path parameter sourced only from status is empty at reconcile 1, so the GET does not
+	// validate, rest-dynamic-controller's existence check falls through to findby, and if none is
+	// declared it returns an error on every pass forever -- because the only thing that would fill
+	// that status field is the create response that was lost. Measured: 4 of 6 CRs in one consumer's
+	// chart stranded on a CLEAN install. See unstructured-runtime issue 119.
+	//
+	// THE RESOURCE IS STILL GENERATED. Refusing would take six live kinds out of service on one
+	// consumer's chart at upgrade, which is a regression delivered as a fix. Evaluated here rather
+	// than once at generation time so the condition CLEARS when the document is fixed.
+	if param, source, unanswerable := unanswerableExistence(cr.Spec.Resource); unanswerable {
+		cr.SetConditions(existenceUnanswerableCondition(cr.Spec.Resource.Kind, param, source))
+	} else {
+		cr.SetConditions(existenceAnswerableCondition())
+	}
 	span.SetAttributes(
 		attribute.String("k8s.object.name", cr.Name),
 		attribute.String("k8s.object.namespace", cr.Namespace),
