@@ -188,8 +188,16 @@ rdc:
     # guaranteed failure at every start.
     initialDelaySeconds: 5
     periodSeconds: 10
-    # ~5 minutes before the pod is marked NotReady. GENEROUS ON PURPOSE: a lease handover between
-    # replicas, or a slow first list on a large cluster, must not flap the pod. The signal is meant to
+    # ~5 minutes before the pod is marked NotReady. GENEROUS ON PURPOSE: a slow first list on a
+    # large cluster must not flap the pod. NOT for a lease handover -- a replica waiting for a
+    # peer's lease is READY, so a handover does not fail this check at all.
+    # TWO CHANNELS, TWO TIMESCALES, and conflating them reads as a defect in the probe. Measured:
+    # the Lease is read every ~2s (the runtime's retry period), so /readyz starts answering 503
+    # within seconds of the lease becoming unreadable -- while the POD's Ready condition needs
+    # periodSeconds x failureThreshold = 10 x 30 = ~300s to flip. A 503 with a still-Ready pod at
+    # two minutes is this threshold working, not a broken probe. Recovery is fast in both: a
+    # successful read clears the error unconditionally, so /readyz returns 200 within ~2s and the
+    # pod follows after one successful probe. The signal is meant to
     # catch a controller that is PERMANENTLY unable to serve, not one that is briefly behind.
     failureThreshold: 30
     timeoutSeconds: 3
