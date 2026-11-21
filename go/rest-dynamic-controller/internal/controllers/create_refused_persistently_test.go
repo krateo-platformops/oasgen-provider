@@ -217,15 +217,62 @@ func TestBothCreatePathsReportTheRefusal(t *testing.T) {
 	require.Contains(t, src, "func NewHandler(", "the file read does not look like restResources.go")
 	classifications := strings.Count(src, "createRefusedWithoutCreating(code)")
 	require.Equal(t, 2, classifications,
-		"the number of create paths that classify a refusal changed. Every one of them needs the "+
-			"reporter, or the condition appears on some installs and not others depending on which path "+
-			"sent the request")
+		"the number of create paths that classify a refusal changed. Every one of them needs to RETURN "+
+			"the condition, or it appears on some installs and not others depending on which path sent "+
+			"the request")
 
-	reports := strings.Count(src, "h.reportPersistentCreateRefusal(mg,")
+	// IT COUNTS THE RETURN, NOT THE CALL, and that distinction is the whole correction. The previous
+	// version of this arm counted `h.reportPersistentCreateRefusal(mg,` -- it asserted the helper was
+	// CALLED and passed for a year while the condition reached nothing, because the helper wrote onto
+	// the object the handler was handed and the runtime discards that by design.
+	reports := strings.Count(src, "Conditions: h.persistentCreateRefusalConditions(mg,")
 	require.Equal(t, classifications, reports,
-		"a create path classifies a refusal and does NOT report it. That path's resources stop being "+
-			"retried after the budget is spent and say nothing about why -- the exact silence this change "+
-			"exists to remove")
+		"a create path classifies a refusal and does NOT return the condition in CreateResult. "+
+			"Conditions written onto `mg` are discarded: the runtime re-fetches so that it owns the "+
+			"single status write, so only a RETURNED condition reaches the cluster")
+
+	// AND THE OLD SHAPE MUST NOT COME BACK. An in-handler SetConditions on this path is the defect,
+	// not a style choice, so its absence is asserted rather than left to review.
+	require.NotContains(t, src, "h.reportPersistentCreateRefusal(mg,",
+		"a create path went back to WRITING the condition instead of returning it; that write is "+
+			"discarded by the runtime and the report silently stops arriving")
+}
+
+// TestTheRefusalConditionIsRETURNEDNotWritten is the behavioural half, and the half that did not
+// exist.
+//
+// MEASURED BY A CONSUMER on 0.85.2: a create refused with a 400 sat 198 MINUTES against a 1-HOUR
+// deadline and the reason NEVER CHANGED. The anchor held exactly as designed; the report had never
+// reached an apiserver in any release since 0.84.0 -- and every arm in this file passed throughout,
+// because they asserted that a helper writes, which was true, and never that the write survives.
+func TestTheRefusalConditionIsRETURNEDNotWritten(t *testing.T) {
+	now := time.Now()
+	h := &handler{createRefusalReportAfter: time.Hour}
+
+	// Over the deadline: the condition must be RETURNED.
+	mg := crWithReady(t, metav1.ConditionFalse, now.Add(-2*time.Hour))
+	got := h.persistentCreateRefusalConditions(mg, 400, "bad request")
+	require.Len(t, got, 1, "nothing was returned, so the runtime has nothing to apply and the report "+
+		"does not arrive -- which is exactly the measured 0.85.2 behaviour")
+	require.Equal(t, customcondition.ReasonCreateRefusedPersistently, got[0].Reason)
+	require.Equal(t, runtimecondition.TypeReady, got[0].Type,
+		"the condition must be Ready: the runtime replaces its own Ready on that path and ADDS other "+
+			"types, so a different type would not displace Ready=False/Creating")
+
+	// AND IT MUST NOT ALSO WRITE. The object handed in must be untouched, or the handler is doing
+	// both and the stale-resourceVersion hazard the runtime's contract warns about is back.
+	before := len(unstructuredtools.GetConditions(mg))
+	_ = h.persistentCreateRefusalConditions(mg, 400, "bad request")
+	require.Equal(t, before, len(unstructuredtools.GetConditions(mg)),
+		"calling the reporter MUTATED the object it was handed. Conditions must be returned, not "+
+			"written: a write from inside the call leaves the runtime's copy at a stale resourceVersion")
+
+	// SETUP CONTROL: under the deadline it returns nothing, so the assertion above is about the
+	// deadline and not about the function always returning one condition.
+	fresh := crWithReady(t, metav1.ConditionFalse, now.Add(-1*time.Minute))
+	require.Empty(t, h.persistentCreateRefusalConditions(fresh, 400, "bad request"),
+		"a resource under the deadline returned a condition, so this arm cannot tell the deadline is "+
+			"doing anything")
 }
 
 // TestTheFlagReachesTheHandler closes the last gap: a defaulted field and a configured one are

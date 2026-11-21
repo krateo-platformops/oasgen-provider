@@ -49,10 +49,21 @@ vendor's explanation.
 | ResolverDigestRecorded | `DigestRecorded` | True | rest-dynamic-controller | — | `steady`: a resolver digest was recorded for this pass | `ResolverDigestRecorded` |
 | ResolverDigestRecorded | `DigestFieldAbsent` | False | rest-dynamic-controller | — | `next pass`: the field a digest would be taken from is absent | `ResolverDigestFieldAbsent` |
 
-## How `Ready=False/CreateRefusedPersistently` reaches the cluster, and why it did not before 0.86.0
+## How `Ready=False/CreateRefusedPersistently` reaches the cluster, and why it has never arrived yet
 
-**It works from 0.86.0. It did not in any earlier release, and the reason is worth keeping because it
-is a general rule about this runtime.**
+**IT DOES NOT WORK IN ANY RELEASED VERSION, INCLUDING 0.86.0.** An earlier revision of this section
+said "it works from 0.86.0". That was wrong, and the way it was wrong is the point of keeping it:
+**the fix has two halves, and 0.86.0 shipped only the half that was not ours.**
+
+| Half | What it does | Where it is |
+|---|---|---|
+| The runtime applies a handler's conditions on the **failed**-create path | `unstructured-runtime` #124 | **Released**, v1.32.1, pinned by 0.86.0 |
+| This handler **returns** the condition instead of writing it | RDC's create paths | **Merged, unreleased** — see the PR that carries this line |
+
+**So on 0.86.0 the runtime dutifully applies `created.Conditions`, which this handler left empty, and
+the report still does not arrive.** A consumer pre-registered the row INVERTED against 0.86.0 for
+exactly that reason. **Do not read "v1.32.1 is pinned" as "the report works"** — that is the whole
+mistake this table exists to prevent.
 
 **Measured on a live cluster** by the `azuredevops-provider-kog` session, run 0852 at **0.85.2**: a CR
 whose create the vendor refused with a 400 sat **198 minutes** against a **1-hour** deadline, and the
@@ -60,11 +71,36 @@ reason never changed. It read `Ready=False/Creating` with the runtime's own mess
 **Exactly one Ready condition, and its `lastTransitionTime` held** — so the anchor the report depends
 on worked; the report did not arrive.
 
-**THE RULE, which is a boundary rather than a bug:** *conditions reach the cluster only through a
-returned result.* A handler that calls `SetConditions` on the object it was handed is writing to a
-copy the runtime then discards — it re-fetches so that it owns the single status write, and a write
-from inside the call would leave the runtime's copy at a stale resourceVersion. The channel is the
-**returned** `ExternalObservation.Conditions` or `CreateResult.Conditions`, never the argument.
+**THE RULE, CORRECTED. An earlier revision of this section said *"conditions reach the cluster only
+through a returned result."* THAT IS FALSE, and believing it would mislead you about 24 other sites
+in this controller.** The correction is worth more than the original claim, so here is what is
+actually true, measured against `unstructured-runtime` v1.32.1 and this module's own source.
+
+**This controller persists most of its own conditions, and they arrive.** `SetConditions(mg, …)`
+alone only edits an in-memory object — but RDC pairs it with `tools.UpdateStatus`, an unconditional
+status API write, at **24 non-test call sites**: 10 in `Observe`, 3 each in `CreateWithResult`,
+`Update` and `observeDispatch`, and the rest in the async and stop-path helpers. **Those conditions
+are not dead.** The immediately neighbouring create path shows the working shape:
+
+```go
+if err := unstructuredtools.SetConditions(mg, condition.Creating()); err != nil { … }   // 1699
+if _, err := tools.UpdateStatus(ctx, mg, tools.UpdateOptions{…}); err != nil { … }      // 1702
+```
+
+**So the defect was narrow, and it was ours.** `reportPersistentCreateRefusal` called `SetConditions`
+and **no** `UpdateStatus` — the only site of the 25 that wrote without persisting. **The write never
+left the process.** That alone explains the measured 198 minutes.
+
+**AND PERSISTING WOULD NOT HAVE BEEN ENOUGH ON THIS ONE PATH**, which is the part worth keeping.
+After `CreateWithResult` returns, `handleCreate` **re-fetches** (worker.go:1565) and writes its own
+conditions (1595). `Upsert` replaces a condition of the **same type** and adds other types — and both
+the handler's `CreateRefusedPersistently` and the runtime's `Creating` are on `Ready`. **So the
+runtime's Ready would have replaced a persisted one too.**
+
+**Hence the rule, stated so it is true:** *a handler's condition survives unless the runtime writes
+the same condition TYPE after the handler returns.* On the failed-create path it does, so there the
+only durable channel is the **returned** `CreateResult.Conditions`, which v1.32.1 applies **after**
+its own. Everywhere else in this controller, `SetConditions` + `UpdateStatus` is correct and works.
 
 **What was missing was narrower than that:** `CreateResult.Conditions` were applied only **on a nil
 error**, and both refusals its contract named were `Requested=false`. A *failed* create had no
@@ -78,6 +114,10 @@ runtime's own, so a handler `Ready` **replaces** `Ready=False/Creating` and any 
 `ManagementPolicyInvalid`: an invalid management policy is observe-only, so `worker.go`
 short-circuits the Create event at `!ManagementDecision(el).May(managementpolicy.Create)` and
 `handleCreate` is never reached at all.)
+
+**AND THAT ALONE WAS NOT ENOUGH.** The runtime can only apply what a handler RETURNS. This handler
+wrote the condition onto its argument until the PR named in the table above, so the extended contract
+had nothing to act on. **Bumping a dependency is not the same as using it.**
 
 **So from 0.86.0 the row above is a plain row.** On 0.85.2 and earlier it never fired, and a consumer
 whose pill never lit was reading a correct integration against a release that could not deliver.
