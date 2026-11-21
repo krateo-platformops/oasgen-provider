@@ -370,6 +370,19 @@ type VerbsDescription struct {
 	OASPath string `json:"oasPath,omitempty"`
 	// RequestFieldMapping provides explicit mapping from API parameters (path, query, or body)
 	// to fields in the Custom Resource. Deprecated: mirrored for backward compatibility; prefer FieldMapping.
+	//
+	// PRECEDENCE, because "prefer FieldMapping" leaves it open and a consumer inferred it backwards.
+	// BuildCallConfig applies this field FIRST and FieldMapping SECOND, and both write directly with no
+	// existence check -- the "avoid overwriting existing values" guard is on step 3's by-name
+	// auto-populate only. So where a verb declares BOTH for the same parameter with different sources,
+	// the CURRENT field wins and this one is overwritten.
+	//
+	// Pinned by TestTheCurrentMappingFieldWinsOnConflict, whose two sources resolve to distinguishable
+	// values so the arm cannot pass whichever field won. And
+	// TestTheTwoMappingFieldsProduceTheSameRequest pins that the same declaration on either field
+	// produces an identical request across Parameters, Query, Headers, Cookies and Body -- which is what
+	// a consumer needs before migrating verbs off this field, since doing so edits spec.resource and
+	// regenerates every generated CRD.
 	RequestFieldMapping []RequestFieldMappingItem `json:"requestFieldMapping,omitempty"`
 	// FieldMapping is the unified request/response field mapping (see FieldMappingItem). Response-direction
 	// entries (inResponse) are applied to the observed body before status population and drift comparison.
