@@ -68,7 +68,7 @@ look like the fix was in while the behaviour was unchanged.
 
 ### Also in this release
 
-- **`unstructured-runtime` is bumped to v1.32.0**, audited per package rather than compared as a
+- **`unstructured-runtime` is bumped to v1.32.1**, audited per package rather than compared as a
   version number: 11 files differ and every changed package is one this module imports. Two needed
   specific checks. **`Event` gained a field and `Event` is the rate limiter's map key** — but
   `workqueue.go` is byte-identical and the limiter is still instantiated over `any`, so the key is
@@ -78,6 +78,20 @@ look like the fix was in while the behaviour was unchanged.
   Measured rather than inferred: removing this repo's `IsZero` guard now fails **both** arms of the
   deadline test, where at v1.30.0 it failed only one. The guard protects two shapes here, not one,
   and the comment that said otherwise now names the version it was measured at.
+- **A create the vendor keeps refusing is now actually REPORTED.** `Ready=False/CreateRefusedPersistently`
+  has existed since 0.84.0 and **had never reached an apiserver**: the runtime's create-failure path
+  re-fetches the object, so a handler's in-memory condition was discarded, and `CreateResult.Conditions`
+  were applied only on a *nil* error. **Measured by a consumer on 0.85.2: a CR whose create was refused
+  with a 400 sat 198 minutes against a 1-hour deadline and the reason never changed** — the anchor held
+  exactly as designed, and the report did not arrive. `unstructured-runtime` v1.32.1 extends the
+  contract so a handler `Ready` replaces the runtime's `Creating` on that path. **The general rule, worth
+  more than the instance: conditions reach the cluster only through a RETURNED result** — writing them
+  onto the object a handler was handed is not a channel on any path, because the runtime re-fetches so
+  that it owns the single status write.
+- **A successful delete no longer strips finalizers that are not ours.** v1.32.1 also carries the
+  runtime's #123: `foregroundDeletion`, and any other owner's finalizer, were being cleared on every
+  successful delete — true since the runtime's first commit, and affecting every generated REST
+  resource.
 - **`kubectl apply` cannot modify any RBAC this provider generates**, documented in
   `docs/provider-runtime-create-markers.md`. Every Role and RoleBinding for a generated kind is
   written by the controller, so none carries `last-applied-configuration` and client-side apply
