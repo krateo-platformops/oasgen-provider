@@ -3818,6 +3818,32 @@ stuck `Terminating` after this chain is a delayed charge, and the remedy is to a
 CR **before** anything restores the controller. That annotation is honoured on generated kinds, by
 `unstructured-runtime`; `management-policy: observe-delete` overrides it (#609, #611, and see #616).
 
+> **Note (2026-11-21): the override above is REVERSED from unstructured-runtime v1.30.0**, which ships
+> in 0.86.0. The runtime's own policy table is shipped as testdata, so this is measured rather than
+> relayed -- the two rows that change, keyed by policy / deletion-policy / state:
+>
+> ```
+> v1.28.1  observe-delete  orphan  deleting-present   delete count 1   DeletedExternalResource
+> v1.28.1  observe-delete  orphan  deleting-absent    delete count 1   DeletedExternalResource
+> v1.30.0  observe-delete  orphan  deleting-present   delete count 0   -
+> v1.30.0  observe-delete  orphan  deleting-absent    delete count 0   -
+> ```
+>
+> **So `deletion-policy=orphan` now wins, and `observe-delete` no longer overrides it.** The remedy in
+> the paragraph above is unaffected -- annotating every surviving CR before anything restores the
+> controller is still right, and from v1.30.0 it is right for one fewer exception.
+>
+> Five rows change in all, and the other three are the invalid-policy case: `observe-create` (not a
+> recognised policy) with an absent resource now reads `Synced=False/ReconcileError` and
+> `ExternalResourceAbsentUnderPolicy` instead of a silent success, under each of the three
+> deletion-policy values.
+>
+> **Scope, because a row count is easy to misread:** of 91 rows present at v1.28.1, **5 changed and 0
+> were removed**; v1.30.0 adds **70 new rows**, 40 of them for a new `orphaned` deletion-policy value.
+> A diff-line count comes to 80 and is the wrong instrument -- keying each row by its policy /
+> deletion-policy / state is what separates "changed" from "new", and core-provider's "5 of 90" was
+> right where my first reading of the diff was not.
+
 On 0.61.0 and later the branch is unreachable from the RestDefinition delete path, because #576's
 discovery guard refuses one layer earlier — both read `observedVersion(cr)` and `deploy.Undeploy` has one
 caller. That is cover, not correctness: `Undeploy` is exported and the contract "a zero means there is
