@@ -103,6 +103,100 @@ container args by the rendered Deployment; the rest can be set via `rdc.env.*`:
 The managed GVR is appended to `OTEL_RESOURCE_ATTRIBUTES` as `krateo.io/rest-gvr`, so
 telemetry is attributable per dynamic CR type.
 
+## The readiness listener — `rdc.healthProbePort` and `rdc.readinessProbe`
+
+**Every generated controller serves `/readyz`, and the pod's readiness depends on it.** It reports
+NOT ready on exactly two conditions: the informer's first list has not succeeded, or the ownership
+Lease cannot be read or written. **A replica WAITING for a peer's Lease is READY** — that is
+deliberate, and it is why `replicaCount: 2` does not leave one pod permanently NotReady.
+
+```
+rdc.healthProbePort: 8081                 -> REST_CONTROLLER_HEALTH_PROBE_PORT
+rdc.readinessProbe:
+  httpGet: { path: /readyz, port: 8081 }
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 30
+  timeoutSeconds: 3
+```
+
+**THREE values, and the trap is that two of them have the same name.**
+
+```
+the SERVER's route        /readyz, hardcoded in health.go -- you cannot change it
+the PROBE's request path  rdc.readinessProbe.httpGet.path -- A CHART VALUE, you can
+the PROBE's port          rdc.readinessProbe.httpGet.port, which must match
+                          rdc.healthProbePort
+```
+
+**So "the path is hardcoded" is true of the server and FALSE of the probe.** Change
+`readinessProbe.httpGet.path` and every pod goes NotReady **against a server answering perfectly
+well on `/readyz`** — the probe asks for something that was never served. Same for the port: two
+values that must agree, and if you move one, move both.
+
+### Start here: `/readyz` 503 and `/readyz` unreachable are different diagnoses
+
+**A troubleshooting section's first job is to rule itself out for the wrong case.** If you are
+here because pods are NotReady, read this table before anything else: the rest of this section is
+about a Lease, and one very common configuration produces the identical symptom from an unrelated
+cause.
+
+**This is the discriminator worth knowing before you debug a quiet controller:**
+
+| symptom | means |
+|---|---|
+| `/readyz` returns **503** | the informer has not listed, or the Lease cannot be read — check the Lease RBAC |
+| `/readyz` is **unreachable**, pods NotReady | the listener is probably disabled (`healthProbePort: 0`) with `readinessProbe: {}` instead of `null` — nothing to do with the Lease |
+
+**Checking the Lease grant needs the lease NAME.** The Role is `resourceNames`-scoped, so the
+unnamed question answers "no" for a perfectly good grant:
+
+```
+kubectl auth can-i get leases.coordination.k8s.io                     -> no   (MEANINGLESS)
+kubectl auth can-i get leases.coordination.k8s.io/<lease-name>        -> the real answer
+```
+
+**And `kubectl apply` cannot modify that Role** — see `docs/provider-runtime-create-markers.md`. Use
+`kubectl edit`, a JSON patch, or `apply --server-side`.
+
+### Two timescales, and the gap between them is the point
+
+**Measured at 0.85.2 on a real cluster, by a consumer's probe:**
+
+```
+the Lease becomes unreachable
+  /readyz -> 503             within ~30s   (the Lease is read every ~2s)
+  pod Ready -> False         within ~300s  (periodSeconds 10 x failureThreshold 30)
+  Ready=True WHILE /readyz is 503, for the first ~30s
+  /readyz -> 200             ~10s after access returns, on its own, no restart
+```
+
+**The gap is the failureThreshold doing its job:** a transient Lease blip does not evict a working
+controller, and a persistent one does. **Derive the window from the deployed object** —
+`periodSeconds x failureThreshold` — rather than memorising 300s, because both are values you can
+change.
+
+### Disabling the listener: `null`, NEVER `{}`
+
+**Setting `rdc.healthProbePort: 0` means nothing listens.** In that configuration you must ALSO
+clear the probe, and **only `null` clears it**:
+
+```yaml
+rdc:
+  healthProbePort: 0
+  readinessProbe: null     # correct
+```
+
+```yaml
+rdc:
+  healthProbePort: 0
+  readinessProbe: {}       # WRONG -- every pod goes NotReady
+```
+
+**Helm MERGES maps.** `{}` leaves this chart's `httpGet` in place, so the probe keeps polling a port
+nothing binds. **Measured: this is how 0.85.1's sibling defect worked** — a values file that looked
+like it had disabled something had not.
+
 ## Comparing an array the vendor returns reordered — `x-kubernetes-list-type`
 
 A vendor that stores an array as a set returns it in an arbitrary order, and the drift comparison is
