@@ -156,7 +156,27 @@ func unmodelledKeysSignature(mg *unstructured.Unstructured, found map[string][]s
 //
 // Not fatal and not a drift signal either: reporting drift is what makes the reconciler call Update, and
 // an Update is the thing that performs the deletion.
-func (h *handler) reportUnmodelledKeys(ctx context.Context, mg *unstructured.Unstructured, found map[string][]string, log logging.Logger) bool {
+// THE PARTIAL SET SPLITS THE MESSAGE, because for a partial field this warning's premise is INVERTED.
+//
+// Both halves came from issue 400: the detection below, and the partialFields merge that exists precisely
+// so those keys are NOT lost. The detection never learned about the merge. Measured on main before this
+// change: updateBodyFields returns callInfo.ReqParams.Body with no partial filtering, remoteOnlyBodyKeys
+// names the vendor-only key regardless, and `partial` appears three times in this file -- all in comments.
+//
+// So on a kind declaring `partialFields: [config]` against a vendor that masks a secret on read, an
+// operator got a warning that their keys might be deleted -- which partialFields makes impossible -- and
+// NO warning about the hazard that is real there: the mask is replayed as the value (issue 739).
+//
+//	not partial   the field is sent WHOLE; whether the vendor drops the unsent keys is its own behaviour
+//	partial       the keys are REPLAYED from the vendor's current value; a value masked on read is
+//	              written back as the value
+//
+// NO MASK DETECTION, and that is the point of reporting the keys instead. Deciding "this value is a mask"
+// can only be a heuristic, and the two error directions are not symmetric: a false positive drops a real
+// secret from the request and the vendor's own key survives, while a false negative writes asterisks over
+// a live credential and nothing on the cluster explains the next authentication failure. Naming the keys
+// is decidable; judging their values is not.
+func (h *handler) reportUnmodelledKeys(ctx context.Context, mg *unstructured.Unstructured, found map[string][]string, partial text.StringSet, log logging.Logger) bool {
 	sig := unmodelledKeysSignature(mg, found)
 	if sig == "" {
 		return false
@@ -170,11 +190,16 @@ func (h *handler) reportUnmodelledKeys(ctx context.Context, mg *unstructured.Uns
 		fields = append(fields, f)
 	}
 	sort.Strings(fields)
-	parts := make([]string, 0, len(fields))
+	var wholeParts, replayParts []string
 	for _, f := range fields {
-		parts = append(parts, fmt.Sprintf("spec.%s: %s", f, strings.Join(found[f], ", ")))
+		part := fmt.Sprintf("spec.%s: %s", f, strings.Join(found[f], ", "))
+		if partial.Contains(f) {
+			replayParts = append(replayParts, part)
+		} else {
+			wholeParts = append(wholeParts, part)
+		}
 	}
-	detail := strings.Join(parts, "; ")
+	detail := strings.Join(append(append([]string{}, wholeParts...), replayParts...), "; ")
 
 	// WHAT WE SEND IS OBSERVABLE; WHAT THE VENDOR DOES WITH IT IS NOT (issue 757). The old wording said an
 	// update "would DELETE" these keys. Measured on Azure DevOps across SEVEN kinds and sixteen key rows:
@@ -189,14 +214,25 @@ func (h *handler) reportUnmodelledKeys(ctx context.Context, mg *unstructured.Uns
 	// The split is reported rather than guessed at: it is a per-endpoint property, and the controller
 	// cannot tell a server-computed echo from an author-set setting without a heuristic whose wrong answers
 	// SUPPRESS real warnings.
-	h.eventRecorder.Event(mg, event.Warning(reasonUnmodelledKeys, "Observe", fmt.Errorf(
-		"the vendor holds keys this CR does not express, and an update sends each of these fields WHOLE -- "+
-			"%s. Whether the vendor then drops the keys it was not sent is that endpoint's behaviour and is "+
-			"not observable from here: measured on one vendor, every server-filled value was preserved and "+
-			"most author-set settings were reset. Nothing is failing; the resource "+
-			"reconciles correctly and the declaration is incomplete. Check the endpoint's own semantics, "+
-			"then either model the missing keys in the CR or confirm the CR is meant to own the whole field",
-		detail)))
+	var msg strings.Builder
+	msg.WriteString("the vendor holds keys this CR does not express. ")
+	if len(wholeParts) > 0 {
+		fmt.Fprintf(&msg, "An update sends each of these fields WHOLE -- %s. Whether the vendor then drops "+
+			"the keys it was not sent is that endpoint's behaviour and is not observable from here: "+
+			"measured on one vendor, every server-filled value was preserved and most author-set settings "+
+			"were reset. ", strings.Join(wholeParts, "; "))
+	}
+	if len(replayParts) > 0 {
+		fmt.Fprintf(&msg, "These fields are declared PARTIAL, so their unexpressed keys are REPLAYED from "+
+			"the vendor's current value rather than dropped -- %s. Nothing is lost, but a value the vendor "+
+			"MASKS on read is sent back as the value: a redacted secret would be written over the real one, "+
+			"and the update would succeed. Declare any such key, by a secretRef resolver or literally, and "+
+			"the CR's value wins. ", strings.Join(replayParts, "; "))
+	}
+	msg.WriteString("Nothing is failing; the resource reconciles correctly and the declaration is " +
+		"incomplete. Check the endpoint's own semantics, then either model the missing keys in the CR or " +
+		"confirm the CR is meant to own the whole field")
+	h.eventRecorder.Event(mg, event.Warning(reasonUnmodelledKeys, "Observe", fmt.Errorf("%s", msg.String())))
 	log.Info("The vendor holds keys the CR does not express, and an update sends those fields whole",
 		"kind", mg.GetKind(), "name", mg.GetName(), "fields", detail)
 
