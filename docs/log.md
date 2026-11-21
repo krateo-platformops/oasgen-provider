@@ -26,6 +26,69 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-21 — 0.85.1
+
+**0.85.0 could not create any generated controller. This is the fix, and nothing else.**
+
+### The rdc Deployment asset did not parse
+
+0.85.0's readiness listener (#843) added a container port to
+`helm/oasgen-provider/assets/rdc/deployment.yaml` indented **14** spaces, where `- name: http` sits at
+**12**. That makes it a nested list inside the http item's mapping, so the asset is not valid YAML and
+every Deployment decode fails:
+
+```
+"failed to decode object: yaml: line 86: did not find expected key"
+```
+
+**Measured on a consumer's GKE cluster upgrading 0.76.0 → 0.85.0:** 454 occurrences, **0 of 25
+RestDefinitions regenerated**, all 25 build stamps still reading 0.76.0, and the previously deployed
+controllers left running the older image. A fresh install creates no controllers at all.
+
+**0.85.0 is listed in `retracted-versions.yaml`**, naming all three charts.
+
+### The same defect was already present on the metrics port, and dormant
+
+`- name: metrics` has carried the same indentation since **0.81.0**. Nobody hit it because
+`rdc.metrics.port` defaults to `0` and its `{{- if }}` never rendered. `rdc.healthProbePort` defaults to
+`8081`, so 0.85.0 rendered the broken shape on every install.
+
+**The indentation was copied from a block whose guard was always false** — a wrong exemplar that no
+default could reach.
+
+| set `rdc.metrics.port` ≠ 0 on | result |
+|---|---|
+| 0.76.0, 0.77.0, 0.80.0 | **refused** by the chart schema: `additional properties 'metrics' not allowed` |
+| 0.81.0 – 0.85.0 | accepted, and the rendered asset **does not parse** |
+| 0.85.1 | accepted and parses |
+
+Measured by rendering each published chart with `--set rdc.metrics.port=8080` and decoding the rdc
+Deployment out of the rendered ConfigMap. Below 0.81.0 the schema is the control, so those versions are
+safe by construction rather than by luck.
+
+### Why nothing caught it
+
+**There are two `deployment.yaml` files and only one shipped the change.**
+
+```
+helm/oasgen-provider/assets/rdc/deployment.yaml                         SHIPS. Got the change.
+internal/controllers/restdefinition/testdata/setup/rdc/deployment.yaml  TESTS. Did not.
+```
+
+The fixture has **0** occurrences of `healthProbePort`, so every test in this repo exercised text that
+never contained the defect. And #843's own wiring test asserted the rendered ConfigMap *contains*
+`REST_CONTROLLER_HEALTH_PROBE_PORT` — **`strings.Contains` cannot see invalid YAML**, so it passed on a
+file that would not parse.
+
+**The new gate decodes the SHIPPED asset through the provider's own `CreateK8sObject`** — the function
+that produced the consumer's error — and asserts `http`, `health` and `metrics` all decode as sibling
+ports. Re-nesting either port fails it. The metrics port is substituted with a non-zero value on
+purpose: at the default of `0` the guard drops the block and the gate would pass over the dormant half.
+
+**Found by a consumer who caught it in a live regression and stopped the run.** The artifact sweep that
+verified 0.85.0 checked that five artifacts existed and that the chart's `appVersion` resolved to the
+image it shipped with — none of which looks inside the asset the provider has to parse.
+
 ## 2026-11-21 — 0.85.0
 
 **Two silences become signals.** A generated controller that cannot take its ownership Lease reported
@@ -2023,6 +2086,22 @@ five-minute gap. And a passing pin never reads `use:` at all; only a refused ver
 > the counter's signature is `gen=%d;<kind>`. The fix is for `restsAtNotReady` to suppress it — keyed on the
 > DECLARATION, never inferred from the latch, since inferring it would delete the detector for the
 > population it exists for.
+
+> **Note (2026-11-21): `restsAtNotReady` was never built, and this sentence is the only place the name
+> exists.** Measured on this commit: 0 occurrences under `go/` or `helm/`, 1 anywhere in the repo — the
+> line above. `restsAtNotReadyEffective` has 0 occurrences anywhere. So there is no API field, no CRD
+> property and no chart value, and core-provider does not read the status field either.
+>
+> **The sentence is a PROPOSAL phrased declaratively**, and a consumer traced what that cost: this
+> changelog line became a memory note restating it as a shipped field with semantics, which parked an
+> acceptance arm "waiting for the tag that ships it", which became a question to me about when that tag
+> would land. **Their own repo had the right answer all along** — a six-tag sweep with a live positive
+> control per row, stating the field does not exist — and the wrong summary of it was what they reasoned
+> from.
+>
+> Kept rather than deleted, because the proposal is still the right shape if anyone builds it. But "The
+> fix is X" in a changelog reads as a description of something that happened, and nothing here says
+> otherwise until this note.
 
 ## 2026-11-16 — 0.73.0
 
