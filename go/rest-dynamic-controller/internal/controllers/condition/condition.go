@@ -179,7 +179,19 @@ func CreateRefusedPersistently(d time.Duration, code int, detail string) metav1.
 	if detail != "" {
 		msg += ": " + detail
 	}
-	msg += ". The retry budget is spent, so the controller is no longer re-sending within each cycle"
+	// THE RETRY BUDGET RESETS EVERY RESYNC, so this must not say the controller has stopped.
+	//
+	// The previous wording was "The retry budget is spent, so the controller is no longer re-sending
+	// within each cycle", written on a reading of the limiter that a consumer's measurement
+	// falsified: a full retry series runs in EVERY resync cycle, indefinitely. The limiter keys its
+	// failure map on the boxed Event VALUE, and Event carries a QueuedAt timestamp -- so a retry
+	// re-adds the identical value and its attempts accumulate, while each fresh enqueue is a NEW key
+	// whose count starts at one. MAX_ERROR_RETRIES caps retries PER ENQUEUED EVENT.
+	//
+	// A reader of the old sentence would conclude the system had given up. It had not, and it never
+	// does: a consumer measured ~6 refused calls per CR per cycle with no taper.
+	msg += ". The in-cycle retry budget is spent, and the controller will try again on the next " +
+		"resync -- it has NOT stopped retrying"
 	return metav1.Condition{
 		Type:               condition.TypeReady,
 		Status:             metav1.ConditionFalse,
