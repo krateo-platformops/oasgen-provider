@@ -35,8 +35,25 @@ both cases the mechanism was already present and only the reporting was missing.
 
 ### A readiness probe is now served, and defaulted ON
 
+> **Note (2026-11-21), correcting this section as first published.** It said `ReadyzCheck` *"fails while
+> the first list has not succeeded **and while a peer legitimately holds the ownership Lease**"*. The
+> second clause is the inverse of what the runtime does. `readyz.go:43` states it directly -- *"a
+> controller WAITING for the Lease is Ready ... but one that cannot read or write the Lease can never
+> reconcile, and is not"* -- and `ownershipReadyzError()` returns non-nil only when
+> `ownershipState.lastErr()` is set.
+>
+> **So a replica waiting for a peer's Lease is READY, and a NotReady standby would be the defect.** The
+> same wrong sentence reached `health.go`'s package doc, the `-health-probe-port` flag help and
+> `values.schema.json`'s description -- four surfaces from one wrong belief, none of which the code
+> shared. An operator with two replicas would have expected a NotReady standby, seen Ready, and
+> concluded the probe was broken.
+>
+> **The `failureThreshold: 30` justification moves with it:** it is earned by a slow first list on a
+> large cluster, not by a lease handover, which does not fail the check at all. Found by a consumer
+> asking which of the two readings to assert, before running anything.
+
 `unstructured-runtime` has carried `(*Controller).ReadyzCheck` for a long time: it fails while the first
-list has not succeeded and while a peer legitimately holds the ownership Lease. **Nothing in this repo
+list has not succeeded. **Nothing in this repo
 called it** — measured, 0 occurrences against a control of 12 `builder.` calls in `main.go` — and the
 chart set no probe.
 

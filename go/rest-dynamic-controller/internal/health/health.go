@@ -1,8 +1,24 @@
 // Package health serves the controller's readiness over HTTP, because nothing was serving it.
 //
 // WHY THIS EXISTS. unstructured-runtime has carried `(*Controller).ReadyzCheck(*http.Request) error`
-// for a long time: it fails while the first list has not succeeded and while a peer legitimately holds
-// the ownership lease, and it is already an http-shaped handler. Nothing in this repo called it --
+// for a long time, and it is already an http-shaped handler.
+//
+// WHAT IT ACTUALLY FAILS ON, because this comment said something else until a consumer asked:
+//
+//	the informer has not completed its first successful list   -> NOT ready
+//	the lease cannot be READ OR WRITTEN (RBAC, API error)      -> NOT ready
+//	a PEER legitimately holds the lease and we are waiting      -> READY
+//
+// readyz.go:43 states the third row explicitly -- "a controller WAITING for the Lease is Ready ... but
+// one that cannot read or write the Lease can never reconcile, and is not" -- and
+// ownershipReadyzError() returns non-nil only when ownershipState.lastErr() is set.
+//
+// THIS COMMENT HAD IT INVERTED, and so did main.go's flag help, values.schema.json's description and
+// the 0.85.0 log section: all four said a replica waiting for the lease reports NotReady. An operator
+// with two replicas would have expected a NotReady standby, seen Ready, and concluded the probe was
+// broken. The code was always right; one wrong belief was written down four times.
+//
+// NOTHING IN THIS REPO CALLED ReadyzCheck before this package --
 // measured, 0 occurrences, against a control of 12 `builder.` calls in main.go -- and the chart set no
 // probe, so a generated controller that cannot acquire its Lease reported Running with 0 restarts while
 // reconciling nothing.

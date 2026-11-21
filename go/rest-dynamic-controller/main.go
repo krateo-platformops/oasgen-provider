@@ -206,10 +206,10 @@ func main() {
 	healthProbePort := flag.Int("health-probe-port",
 		env.Int("REST_CONTROLLER_HEALTH_PROBE_PORT", 0),
 		"Port for the readiness endpoint at /readyz. 0 disables it. The check fails while the first "+
-			"list has not succeeded and while a peer holds the ownership lease -- so a replica waiting "+
-			"for the lease reports NotReady instead of Running-and-reconciling-nothing (#815). READINESS "+
-			"ONLY: waiting for a lease is healthy, so wiring a LIVENESS probe here would restart every "+
-			"waiting replica in a loop.")
+			"list has not succeeded, and while the ownership lease cannot be READ OR WRITTEN -- which is "+
+			"the controller that reported Running and reconciled nothing (#815). A replica merely WAITING "+
+			"for a peer's lease is READY: waiting is healthy and exactly one replica holds the lease. "+
+			"READINESS ONLY, so wiring a LIVENESS probe here would restart a waiting replica in a loop.")
 	otelEnabled := flag.Bool("otel-enabled",
 		env.Bool("OTEL_ENABLED", false),
 		"Enable OTLP metrics export for provider-runtime reconcile telemetry.")

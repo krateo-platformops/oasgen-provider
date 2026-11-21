@@ -481,7 +481,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 65535,
-          "description": "Port for the generated controller's readiness endpoint at /readyz. 0 disables it. The check fails while the first list has not succeeded and while a peer holds the ownership lease, so a replica waiting for the lease reports NotReady instead of Running-and-reconciling-nothing (#815). IT MUST AGREE WITH rdc.readinessProbe.httpGet.port: a probe pointed at a port nothing binds marks EVERY pod NotReady, which is an outage produced by a diagnostic. A test asserts the two match. Setting this to 0 without also emptying rdc.readinessProbe is the same outage."
+          "description": "Port for the generated controller's readiness endpoint at /readyz. 0 disables it. The check fails while the first list has not succeeded, and while the ownership lease cannot be READ OR WRITTEN -- which is the controller that reported Running and reconciled nothing (#815). A replica merely WAITING for a peer's lease is READY: waiting is healthy, exactly one replica holds the lease, and a NotReady standby would be the defect. IT MUST AGREE WITH rdc.readinessProbe.httpGet.port: a probe pointed at a port nothing binds marks EVERY pod NotReady, which is an outage produced by a diagnostic. A test asserts the two match. Setting this to 0 without also emptying rdc.readinessProbe is the same outage."
         },
         "readinessProbe": {
           "type": "object",

@@ -188,8 +188,9 @@ rdc:
     # guaranteed failure at every start.
     initialDelaySeconds: 5
     periodSeconds: 10
-    # ~5 minutes before the pod is marked NotReady. GENEROUS ON PURPOSE: a lease handover between
-    # replicas, or a slow first list on a large cluster, must not flap the pod. The signal is meant to
+    # ~5 minutes before the pod is marked NotReady. GENEROUS ON PURPOSE: a slow first list on a
+    # large cluster must not flap the pod. NOT for a lease handover -- a replica waiting for a
+    # peer's lease is READY, so a handover does not fail this check at all. The signal is meant to
     # catch a controller that is PERMANENTLY unable to serve, not one that is briefly behind.
     failureThreshold: 30
     timeoutSeconds: 3
