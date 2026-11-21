@@ -97,6 +97,43 @@ conditions (1595). `Upsert` replaces a condition of the **same type** and adds o
 the handler's `CreateRefusedPersistently` and the runtime's `Creating` are on `Ready`. **So the
 runtime's Ready would have replaced a persisted one too.**
 
+**THE CAVEAT THAT BELONGS BESIDE THAT RULE**, raised by the `core-provider` session as the runtime's
+#258: a handler's own status write is a real apiserver write, so it **bumps the object's
+resourceVersion** — and the runtime's in-memory copy from before the call is then stale. The
+runtime's next write in the same pass can lose a 409.
+
+**Measured: it does not bite this controller. But it holds by a conjunction of three facts, two ours
+and one the runtime's, and no single one of them looks load-bearing on its own.**
+
+| Leg | Fact | Measured |
+|---|---|---|
+| 1 | Every `UpdateStatus` site that **discards** the returned object returns before any further status write | 14 of 24 sites discard; all terminal |
+| 2 | `Delete` never persists at all | 0 `UpdateStatus` calls in it |
+| 3 | The runtime re-fetches before its own write on every path **except** the failed-delete branch (`worker.go:1875-1883`) | that one exception lands on exactly the path covered by leg 2 |
+
+**Remove any one leg and a silent 409 appears** — which the runtime then requeues quietly (#359), so
+the symptom is a retry that reports nothing, not an error.
+
+**Legs 1 and 2 are ours and are pinned by `stale_resourceversion_invariant_test.go`. Leg 3 is now
+pinned on the runtime's side too** — `unstructured-runtime#125` asserts that a failed delete persists
+`Ready=False/Deleting` *carrying the vendor error*, with `Synced=ReconcileError` and the finalizer
+kept, and kills a mutant that writes a plain `Deleting`. **Verified against the server as OPEN, not
+merged**, so until it lands a version-bump reviewer should still check `worker.go:1875-1883` by hand.
+
+**Which half of leg 3 is pinned matters, and it is not the obvious half.** #125 pins that the branch
+**writes** its own `Deleting`-with-message; it deliberately does **not** pin whether that branch
+re-fetches first. **A re-fetch there would change nothing for us** — it would discard our five plain
+`Deleting` writes, which the runtime replaces anyway with one carrying more information. **But if the
+branch ever stopped writing its own `Deleting`, we would silently lose the delete-failure message
+entirely, because we never persist ours.**
+
+**That test is a source-shape test, which is a weak instrument, and it is chosen deliberately:** the
+property is a **non-event** — a conflict that never happens — and our two fakes disagree about
+whether a no-op update even bumps `resourceVersion`, so asserting the non-event against a fake would
+prove nothing. **Its first version was in fact vacuous** (it found the `return` inside the
+`if`-statement's own body, so every site read as terminal) and only a positive control that compiled
+revealed it.
+
 **Hence the rule, stated so it is true:** *a handler's condition survives unless the runtime writes
 the same condition TYPE after the handler returns.* On the failed-create path it does, so there the
 only durable channel is the **returned** `CreateResult.Conditions`, which v1.32.1 applies **after**
