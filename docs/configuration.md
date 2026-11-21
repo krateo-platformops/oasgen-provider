@@ -183,7 +183,9 @@ and then confirmed by the measurement above, which is a different channel from t
 
 **Scope of these numbers:** 0.85.2 pins `unstructured-runtime v1.30.0`, and `condition.Upsert` is
 **byte-identical** at v1.30.0 and v1.32.0 (771 bytes, empty diff), so the stamp behaviour this
-depends on is not specific to either pin. **Derive the window from the deployed object** —
+depends on is not specific to either pin. **Reproduced independently** by the
+`azuredevops-provider-kog` session from its own partial clone of the module -- same function,
+same 771 bytes at both tags, non-empty -- rather than taken from this repository's reading of it. **Derive the window from the deployed object** —
 `periodSeconds x failureThreshold` — rather than memorising 300s, because both are values you can
 change.
 
