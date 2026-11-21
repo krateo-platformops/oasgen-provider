@@ -49,6 +49,34 @@ vendor's explanation.
 | ResolverDigestRecorded | `DigestRecorded` | True | rest-dynamic-controller | — | `steady`: a resolver digest was recorded for this pass | `ResolverDigestRecorded` |
 | ResolverDigestRecorded | `DigestFieldAbsent` | False | rest-dynamic-controller | — | `next pass`: the field a digest would be taken from is absent | `ResolverDigestFieldAbsent` |
 
+## Where there is deliberately NO condition
+
+**Deletion of a CR whose existence is permanently unanswerable reports through an `unstructured-runtime`
+Warning EVENT, and sets no condition.**
+
+This is stated rather than left as a gap, because a reader who finds no row for it will assume one is
+missing. **The reason it cannot be a condition is structural:** that path releases the object's
+finalizer, so a condition written there disappears with the object it was written on. An event
+outlives the CR; a condition does not.
+
+**The event's reason literal is `ExternalResourceKeptExistenceUnanswerable`**, with action
+`DeleteExternalResource`, written by `unstructured-runtime`.
+
+**NOT YET SHIPPED, and that distinction is the point:** it comes from `unstructured-runtime` PR 121,
+which is **open and unmerged**, and it ships in **v1.32.0**, which is **not tagged** — this module
+pins v1.30.0. So the literal is recorded here as what the PR declares, not as something observable
+in any released version. **Do not map it in a consumer until that tag exists**; if the PR renames it
+before merging, this line is wrong and the PR is right.
+
+**The NOT-being-deleted path is different and DOES carry a condition:** the existing
+`Ready=False/CreateOutcomeUnknown`, with no new reason, whose message names why the existence check
+can never be answered and the two ways out (write the id into status if the external resource exists;
+clear `krateo.io/external-create-pending` if it does not). **The marker is deliberately kept — there
+is no duplicate risk in staying stopped**, and skipping it would trade a definite strand for a silent
+duplicate on exactly the kinds that cannot detect one.
+
+See `krateo-platformops/unstructured-runtime` issue 119 for the measurements and the decision.
+
 ## Reasons written by the runtime, not by this controller
 
 `Ready=False/Creating`, `Ready=True/Available`, `Synced=True/ReconcileSuccess` and
