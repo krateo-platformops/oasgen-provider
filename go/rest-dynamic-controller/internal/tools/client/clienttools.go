@@ -420,6 +420,72 @@ func (u *UnstructuredClient) bodyMediaType(httpMethod string, path string) strin
 	return mediaType
 }
 
+// acceptMediaType is the media type to ASK FOR, derived from the OAS operation's declared 2xx responses.
+//
+// THE OTHER HALF OF #288, and bodyMediaType's own comment above predicted it: "fixing one of a matched pair
+// is what makes the asymmetry dangerous, regardless of which one you fix first." Content-Type was the half
+// that got fixed. Nothing ever set Accept, and net/http sends none by default, so RDC put a request on the
+// wire with no Accept at all -- which Zendesk answers 415 to BEFORE it checks auth. Measured by zendesk-kog
+// on cluster 057: every correlation.observe failing with "unexpected status: 415", 34+ events.
+//
+// WHY THIS IS NOT JUST THE DECLARED TYPE. Accept states what the CLIENT can parse; the OAS response media
+// type states what the SERVER produces. Copying the declaration across would make RDC send
+// `Accept: application/xml` for a document that declares XML -- and zendesk-kog measured Zendesk answering
+// 415 to exactly that, so the unconditional rule would have created the same break on another API. RDC
+// parses JSON into unstructured objects and can consume nothing else, so a non-JSON declaration is a type
+// this client cannot honour, whatever the vendor says it serves.
+//
+// Returns "" when no 2xx response declares a JSON-compatible type, or the document cannot be read. The
+// caller then falls back to application/json -- the type RDC actually parses.
+func (u *UnstructuredClient) acceptMediaType(httpMethod string, path string) string {
+	if u.DocScheme == nil || u.DocScheme.Model.Paths == nil {
+		return ""
+	}
+	pathItem, ok := u.DocScheme.Model.Paths.PathItems.Get(path)
+	if !ok {
+		return ""
+	}
+	op, ok := pathItem.GetOperations().Get(strings.ToLower(httpMethod))
+	if !ok || op.Responses == nil || op.Responses.Codes == nil {
+		return ""
+	}
+	// LOWEST 2xx WINS, so a document declaring both 200 and 201 is read deterministically rather than in
+	// whatever order the map yields. A non-numeric key such as `default` is SKIPPED, not an error: this is
+	// best-effort and an undiscoverable media type must not make a request unsendable.
+	best, bestCode := "", 0
+	for pair := op.Responses.Codes.First(); pair != nil; pair = pair.Next() {
+		code, err := strconv.Atoi(pair.Key())
+		if err != nil || code < 200 || code >= 300 {
+			continue
+		}
+		resp := pair.Value()
+		if resp == nil || resp.Content == nil {
+			continue
+		}
+		for c := resp.Content.First(); c != nil; c = c.Next() {
+			if !isAcceptableMediaType(c.Key()) {
+				continue
+			}
+			if best == "" || code < bestCode {
+				best, bestCode = c.Key(), code
+			}
+			break
+		}
+	}
+	return best
+}
+
+// isAcceptableMediaType reports whether RDC can parse what this media type names.
+//
+// THE RULE zendesk-kog MEASURED against 11 Zendesk responses: drop parameters, then accept `*/*` or any
+// type containing "json". That keeps vendor JSON -- application/vnd.github+json, application/json-patch+json
+// -- which a strict equality check against "application/json" would throw away, and those are exactly the
+// documents #288 was filed about.
+func isAcceptableMediaType(mediaType string) bool {
+	base := strings.ToLower(strings.TrimSpace(strings.SplitN(mediaType, ";", 2)[0]))
+	return base == "*/*" || strings.Contains(base, "json")
+}
+
 func (u *UnstructuredClient) RequestedBody(httpMethod string, path string) (bodyParams stringset.StringSet, err error) {
 	if u.DocScheme == nil || u.DocScheme.Model.Paths == nil {
 		return nil, fmt.Errorf("document scheme or model is nil")
