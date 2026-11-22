@@ -26,6 +26,38 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-22 — 0.89.0
+
+**ONE COMMIT, and it unblocks a kind that could not be expressed at all.**
+
+- **A delegated observe carrying `notFoundExpr` now satisfies the create-convergence rule.** Two
+  adjacent CEL rules on `spec.resource` contradicted each other: one **requires**
+  `observeApiRef.notFoundExpr` when `createApiRef` meets `observeApiRef` — because that predicate is
+  what lets a delegated observe trigger a create at all — and the other then demanded a `get` or
+  `findby` verb and ignored `notFoundExpr` entirely. **A definition satisfying the first was rejected
+  by the second, so the composition the first exists to enable could not be declared.**
+- **It is not a loosening.** `notFoundExpr` is a gojq boolean over `{spec, status}` evaluated on every
+  ordinary reconcile, so it is level-based in the same sense a `get` is. What the rule must forbid — a
+  `createApiRef` with no way to tell whether the create landed — is still forbidden, and an arm
+  asserts exactly that, on the refusal's own message so it cannot pass for an unrelated reason.
+- **DO NOT "FIX" SUCH A KIND BY GIVING IT A `get` ANYWAY**, which is the obvious-looking alternative
+  and is strictly worse. A `get` pointed at a URL that always answers 200 makes
+  `externalResourceStillExists` read the resource as verifiably **present** after a successful delete
+  and **hold the finalizer forever**. That reasoning now sits in the annotation's own comment, with a
+  pointer to the issue, so the next reader does not have to rediscover it.
+- **FOUND BY THE CONSUMER IT BLOCKED, and the trap was mine.** `keycloak-config-kog`'s client-scope
+  assignment has no per-item read — measured on Keycloak 26.6.3, the assignment URL answers **404
+  whether or not the scope is assigned** — so `get` and `findby` are both unavailable. **I had told
+  them not to declare a `get`, and the CRD then required one.** Their release waited on this rather
+  than shipping a kind whose RestDefinition cannot apply, which was the right call.
+
+**VERIFIED AGAINST THE SHIPPED GENERATED CRD, not a copy of the rules:** the consumer's shape is
+admitted; a `createApiRef` with no `get`, no `findby` and no `observeApiRef` is still refused by the
+convergence rule; `createApiRef` with an `observeApiRef` lacking `notFoundExpr` is still refused by
+the neighbouring rule; an ordinary get-verb kind is still admitted. **The control strips the new
+clause from the generated CRD the test reads and only the first arm fails** — the three guard arms
+hold, which is what distinguishes widening one rule from punching a hole in the other.
+
 ## 2026-11-22 — 0.88.0
 
 **ONE COMMIT, and it closes a gap that a consumer's question opened rather than a test.**
