@@ -43,7 +43,7 @@ func TestTheConditionTheCRReceivesCarriesTheRightValuesInTheRightPLACES(t *testi
 		},
 	}
 
-	got := existenceConditionFor(cr)
+	got := existenceConditionFor(cr, map[string]bool{})
 
 	if got.Status != metav1.ConditionFalse {
 		t.Fatalf("status = %q, want False -- this resource IS unanswerable", got.Status)
@@ -94,7 +94,7 @@ func TestAnAnswerableResourceGetsTheClearedConditionFromTheSameCall(t *testing.T
 		},
 	}
 
-	got := existenceConditionFor(cr)
+	got := existenceConditionFor(cr, map[string]bool{})
 
 	if got.Status != metav1.ConditionTrue {
 		t.Fatalf("status = %q, want True -- this resource's get addresses from spec:\n%s", got.Status, got.Message)
@@ -118,7 +118,7 @@ func TestAnAnswerableResourceGetsTheClearedConditionFromTheSameCall(t *testing.T
 				}},
 			},
 		}},
-	})
+	}, map[string]bool{})
 	if warn.Reason == got.Reason {
 		t.Fatalf("both branches return reason %q, so this arm cannot tell them apart", got.Reason)
 	}

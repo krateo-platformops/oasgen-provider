@@ -26,103 +26,265 @@
     "modules -- an approximation of the real resolver, which is how a vacuous gate got written in this",
     "repo. A false negative is possible; a false positive is not. Measured on one consumer's chart: ten",
     "findby-less kinds split SIX exposed and FOUR not, and warning on all ten would have sent operators",
-    "to do manual work on four kinds that need none."
+    "to do manual work on four kinds that need none.",
+    "specFields is the set of top-level spec property names of the GENERATED kind. A get path parameter whose NAME appears there resolves from the spec even when its status source is empty, so it must NOT be flagged. An EMPTY specFields means 'none', not 'unknown'."
   ],
   "cases": [
     {
       "name": "the measured case: get needs a status id, no findby",
       "kind": "GitPush",
       "verbs": [
-        { "action": "create", "path": "/pushes", "mappings": [] },
-        { "action": "get", "path": "/pushes/{pushId}", "mappings": [{ "inPath": "pushId", "inCustomResource": "status.pushId" }] }
+        {
+          "action": "create",
+          "path": "/pushes",
+          "mappings": []
+        },
+        {
+          "action": "get",
+          "path": "/pushes/{pushId}",
+          "mappings": [
+            {
+              "inPath": "pushId",
+              "inCustomResource": "status.pushId"
+            }
+          ]
+        }
       ],
       "unanswerable": true,
       "param": "pushId",
-      "source": "status.pushId"
+      "source": "status.pushId",
+      "specFields": []
     },
     {
       "name": "a declared findby makes it answerable, whatever the get needs",
       "kind": "Issue",
       "verbs": [
-        { "action": "get", "path": "/issues/{number}", "mappings": [{ "inPath": "number", "inCustomResource": "status.number" }] },
-        { "action": "findby", "path": "/issues", "mappings": [] }
+        {
+          "action": "get",
+          "path": "/issues/{number}",
+          "mappings": [
+            {
+              "inPath": "number",
+              "inCustomResource": "status.number"
+            }
+          ]
+        },
+        {
+          "action": "findby",
+          "path": "/issues",
+          "mappings": []
+        }
       ],
-      "unanswerable": false
+      "unanswerable": false,
+      "specFields": []
     },
     {
       "name": "get addresses from spec, so it validates at reconcile 1",
       "kind": "RepositoryPermission",
       "verbs": [
-        { "action": "get", "path": "/repos/{projectId}/perms", "mappings": [{ "inPath": "projectId", "inCustomResource": "spec.projectId" }] }
+        {
+          "action": "get",
+          "path": "/repos/{projectId}/perms",
+          "mappings": [
+            {
+              "inPath": "projectId",
+              "inCustomResource": "spec.projectId"
+            }
+          ]
+        }
       ],
-      "unanswerable": false
+      "unanswerable": false,
+      "specFields": []
     },
     {
       "name": "no get verb at all is a DIFFERENT defect, reported elsewhere",
       "kind": "Trigger",
       "verbs": [
-        { "action": "create", "path": "/triggers", "mappings": [] }
+        {
+          "action": "create",
+          "path": "/triggers",
+          "mappings": []
+        }
       ],
-      "unanswerable": false
+      "unanswerable": false,
+      "specFields": []
     },
     {
       "name": "an unmapped parameter is NOT flagged -- it may resolve by name from the spec",
       "kind": "Widget",
       "verbs": [
-        { "action": "get", "path": "/widgets/{name}", "mappings": [] }
+        {
+          "action": "get",
+          "path": "/widgets/{name}",
+          "mappings": []
+        }
       ],
-      "unanswerable": false
+      "unanswerable": false,
+      "specFields": []
     },
     {
       "name": "no path parameters at all",
       "kind": "Settings",
       "verbs": [
-        { "action": "get", "path": "/settings", "mappings": [] }
+        {
+          "action": "get",
+          "path": "/settings",
+          "mappings": []
+        }
       ],
-      "unanswerable": false
+      "unanswerable": false,
+      "specFields": []
     },
     {
       "name": "one of three parameters comes from status -- one is enough",
       "kind": "CheckTask",
       "verbs": [
-        { "action": "get", "path": "/orgs/{org}/checks/{checkId}/tasks/{taskId}", "mappings": [
-          { "inPath": "org", "inCustomResource": "spec.org" },
-          { "inPath": "checkId", "inCustomResource": "status.checkId" },
-          { "inPath": "taskId", "inCustomResource": "spec.taskId" }
-        ] }
+        {
+          "action": "get",
+          "path": "/orgs/{org}/checks/{checkId}/tasks/{taskId}",
+          "mappings": [
+            {
+              "inPath": "org",
+              "inCustomResource": "spec.org"
+            },
+            {
+              "inPath": "checkId",
+              "inCustomResource": "status.checkId"
+            },
+            {
+              "inPath": "taskId",
+              "inCustomResource": "spec.taskId"
+            }
+          ]
+        }
       ],
       "unanswerable": true,
       "param": "checkId",
-      "source": "status.checkId"
+      "source": "status.checkId",
+      "specFields": []
     },
     {
       "name": "action casing does not matter for get",
       "kind": "Run",
       "verbs": [
-        { "action": "GET", "path": "/runs/{runId}", "mappings": [{ "inPath": "runId", "inCustomResource": "status.runId" }] }
+        {
+          "action": "GET",
+          "path": "/runs/{runId}",
+          "mappings": [
+            {
+              "inPath": "runId",
+              "inCustomResource": "status.runId"
+            }
+          ]
+        }
       ],
       "unanswerable": true,
       "param": "runId",
-      "source": "status.runId"
+      "source": "status.runId",
+      "specFields": []
     },
     {
       "name": "action casing does not matter for findby either",
       "kind": "IssueTwo",
       "verbs": [
-        { "action": "get", "path": "/issues/{number}", "mappings": [{ "inPath": "number", "inCustomResource": "status.number" }] },
-        { "action": "FindBy", "path": "/issues", "mappings": [] }
+        {
+          "action": "get",
+          "path": "/issues/{number}",
+          "mappings": [
+            {
+              "inPath": "number",
+              "inCustomResource": "status.number"
+            }
+          ]
+        },
+        {
+          "action": "FindBy",
+          "path": "/issues",
+          "mappings": []
+        }
       ],
-      "unanswerable": false
+      "unanswerable": false,
+      "specFields": []
     },
     {
       "name": "the DEPRECATED mapping field is read too, or pre-rename definitions go unwarned",
       "kind": "Legacy",
       "verbs": [
-        { "action": "get", "path": "/things/{thingId}", "deprecatedMappings": [{ "inPath": "thingId", "inCustomResource": "status.thingId" }] }
+        {
+          "action": "get",
+          "path": "/things/{thingId}",
+          "deprecatedMappings": [
+            {
+              "inPath": "thingId",
+              "inCustomResource": "status.thingId"
+            }
+          ]
+        }
       ],
       "unanswerable": true,
       "param": "thingId",
-      "source": "status.thingId"
+      "source": "status.thingId",
+      "specFields": []
+    },
+    {
+      "name": "a status-mapped param that ALSO resolves from the spec is answerable (github Repository)",
+      "kind": "Repository",
+      "verbs": [
+        {
+          "action": "create",
+          "path": "/user/repos",
+          "mappings": []
+        },
+        {
+          "action": "get",
+          "path": "/repos/{owner}/{name}",
+          "mappings": [
+            {
+              "inPath": "name",
+              "inCustomResource": "status.name"
+            }
+          ]
+        }
+      ],
+      "specFields": [
+        "name",
+        "owner",
+        "description"
+      ],
+      "unanswerable": false,
+      "param": "",
+      "source": "",
+      "why": "builder.go fills path parameters from spec BY NAME (processFields at 179) BEFORE applying explicit mappings (236), and a mapping whose source is absent hits `continue` (27-29). So with status.name empty the parameter keeps spec.name, IsResourceKnown's dry-run GET succeeds, and the existence check never falls through to findby. Measured by github-provider-kog: a pre-create GET addresses spec.name and 404s, then status.name takes over after the create (their issue 386)."
+    },
+    {
+      "name": "the SAME shape with the param excluded from the spec is still unanswerable (github Team)",
+      "kind": "Team",
+      "verbs": [
+        {
+          "action": "create",
+          "path": "/orgs/{org}/teams",
+          "mappings": []
+        },
+        {
+          "action": "get",
+          "path": "/orgs/{org}/teams/{team_slug}",
+          "mappings": [
+            {
+              "inPath": "team_slug",
+              "inCustomResource": "status.slug"
+            }
+          ]
+        }
+      ],
+      "specFields": [
+        "org",
+        "name",
+        "description"
+      ],
+      "unanswerable": true,
+      "param": "team_slug",
+      "source": "status.slug",
+      "why": "team_slug is NOT a spec property, so there is no by-name fallback at processFields and the parameter really is empty at reconcile 1. The negative twin of the Repository case: same mapping shape, opposite verdict, decided ONLY by the spec-field set -- so a predicate ignoring specFields would pass this case and fail the one above."
     }
   ]
 }

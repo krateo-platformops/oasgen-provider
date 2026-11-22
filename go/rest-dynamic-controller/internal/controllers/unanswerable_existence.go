@@ -47,7 +47,21 @@ const statusSourcePrefix = "status."
 // rendered schema -- an approximation of the real resolver, which is how a vacuous gate got written
 // in this repo. A false negative leaves today's behaviour; a false positive stops a resource
 // forever. The asymmetry decides the direction.
-func existenceIsPermanentlyUnanswerable(res getter.Resource) (param, source string, unanswerable bool) {
+// specFields carries the same meaning as in oasgen-provider's copy of this predicate: the spec
+// property names of the generated kind, where a parameter whose NAME appears resolves from the spec
+// even with an empty status source. NIL means "unknown" and stays conservative.
+//
+// THE CALLER HERE PASSES NIL, AND THAT IS NOT AN OVERSIGHT. This predicate is reached from exists.go
+// only when APICallBuilder returned a nil call, which already implies IsResourceKnown said the
+// resource is NOT addressable -- i.e. the dry-run GET could not be built, which is exactly the case
+// specFields would suppress. So the suppression is structurally redundant at runtime; the parameter
+// exists so that this predicate and oasgen-provider's remain the SAME FUNCTION, pinned by the same
+// fixture table. Measured: for github-provider-kog's Repository, isKnown is true, action stays Get,
+// the GET operation exists, APICallBuilder returns non-nil, and this function is never called.
+//
+// Do not "simplify" this by dropping the parameter: the shared fixture would then have to hold a
+// per-module expectation for the Repository case, and the two predicates could drift apart silently.
+func existenceIsPermanentlyUnanswerable(res getter.Resource, specFields map[string]bool) (param, source string, unanswerable bool) {
 	var get *getter.VerbsDescription
 	for i := range res.VerbsDescription {
 		switch strings.ToLower(res.VerbsDescription[i].Action) {
@@ -67,6 +81,10 @@ func existenceIsPermanentlyUnanswerable(res getter.Resource) (param, source stri
 
 	for _, m := range pathParamPattern.FindAllStringSubmatch(get.Path, -1) {
 		name := m[1]
+		if specFields[name] {
+			// Resolves from the spec by name; the GET validates whatever the status mapping says.
+			continue
+		}
 		if src, ok := statusMappedGetParam(get, name); ok {
 			return name, src, true
 		}
@@ -108,7 +126,7 @@ func statusMappedGetParam(get *getter.VerbsDescription, param string) (string, b
 // BOTH ways as TRANSIENT, so a double mark does not fail loudly -- it silently reverts to waiting,
 // which looks like the fix is in while the behaviour is unchanged.
 func markIfPermanentlyUnanswerable(res getter.Resource, err error) error {
-	param, source, permanent := existenceIsPermanentlyUnanswerable(res)
+	param, source, permanent := existenceIsPermanentlyUnanswerable(res, nil /* see the predicate: structurally redundant here */)
 	if !permanent {
 		return err
 	}
