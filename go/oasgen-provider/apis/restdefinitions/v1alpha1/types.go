@@ -1028,7 +1028,25 @@ type QueryParam struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="!(has(self.createApiRef) && has(self.observeApiRef) && !has(self.observeApiRef.notFoundExpr))",message="createApiRef with observeApiRef requires observeApiRef.notFoundExpr, so a create can be triggered when the delegated observe reports the resource absent"
-// +kubebuilder:validation:XValidation:rule="!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby')",message="createApiRef requires a get or findby verb so the controller can verify the create converged (level-based convergence)"
+// A DELEGATED OBSERVE WITH notFoundExpr IS ALSO A CONVERGENCE CHECK, and this rule used to ignore it
+// while the rule ABOVE required it. The two contradicted each other: a definition that satisfied
+// "createApiRef with observeApiRef requires notFoundExpr" was then rejected for having no get or
+// findby verb, so the composition the first rule exists to enable could not be expressed at all.
+//
+// FOUND BY A CONSUMER WHOSE KIND IT BLOCKED, not by a test: keycloak-config-kog's client-scope
+// assignment has no per-item read -- the vendor answers 404 for the assignment URL whether or not
+// the scope is assigned -- so get and findby are both unavailable, while notFoundExpr over the
+// client's whole optional-scope list answers the question exactly.
+//
+// THIS IS NOT A LOOSENING. notFoundExpr is a gojq boolean over {spec, status} evaluated on every
+// ordinary reconcile (observe_restaction.go), so it is level-based in the same sense a get is. What
+// the rule must forbid is a createApiRef with NO way to tell whether the create landed, and that is
+// still forbidden.
+//
+// AND DO NOT "SIMPLIFY" THIS BY TELLING SUCH A KIND TO DECLARE A get ANYWAY. A get pointed at a URL
+// that always answers 200 is worse than no get: externalResourceStillExists would read the resource
+// as verifiably PRESENT after a successful delete and hold the finalizer forever (see issue 885).
+// +kubebuilder:validation:XValidation:rule="!has(self.createApiRef) || self.verbsDescription.exists(v, v.action == 'get' || v.action == 'findby') || (has(self.observeApiRef) && has(self.observeApiRef.notFoundExpr))",message="createApiRef requires a get or findby verb, or an observeApiRef with notFoundExpr, so the controller can verify the create converged (level-based convergence)"
 // +kubebuilder:validation:XValidation:rule="!has(self.compareScope) || self.compareScope != 'identifiersAndStatus' || (has(self.identifiers) && size(self.identifiers) > 0) || (has(self.additionalStatusFields) && size(self.additionalStatusFields) > 0)",message="compareScope 'identifiersAndStatus' requires at least one identifier or additionalStatusField to compare against"
 // +kubebuilder:validation:XValidation:rule="!has(self.compareScope) || self.compareScope != 'updatable' || self.verbsDescription.exists(v, v.action == 'update')",message="compareScope 'updatable' requires an update verb: with no update verb the set of updatable fields is empty, so nothing would ever be compared and the resource would silently never report drift"
 // +kubebuilder:validation:XValidation:rule="!(has(self.includedSpecFields) && has(self.excludedSpecFields))",message="declare at most one of includedSpecFields or excludedSpecFields: an allowlist and a blocklist over the same fields is a contradiction, not a merge"
