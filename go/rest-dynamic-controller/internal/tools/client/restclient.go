@@ -295,6 +295,21 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 		headers.Set("Content-Type", mediaType)
 	}
 
+	// ACCEPT, OUTSIDE THE HAS-A-BODY BRANCH ABOVE -- deliberately. The Content-Type block sits inside it,
+	// and putting Accept there would skip every GET, which is the only shape that was failing: a
+	// correlation.observe is a GET with no body, and Zendesk answers 415 to a missing Accept before it
+	// checks auth. Measured on cluster 057 by zendesk-kog, 34+ events.
+	//
+	// Set BEFORE opts.Headers is applied below, for the reason already written above about Content-Type: a
+	// verbsDescription[].headers entry naming Accept must still win, because it is the author's explicit
+	// override for a document that declares the wrong thing. CorrelationObserve has no headers field, so
+	// for the correlation walk this derived value is the ONLY way an Accept can be set at all.
+	accept := u.acceptMediaType(httpMethod, path)
+	if accept == "" {
+		accept = "application/json"
+	}
+	headers.Set("Accept", accept)
+
 	for k, v := range opts.Headers {
 		headers.Set(k, v)
 	}
@@ -911,6 +926,21 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 		}
 		headers.Set("Content-Type", mediaType)
 	}
+
+	// ACCEPT, OUTSIDE THE HAS-A-BODY BRANCH ABOVE -- deliberately. The Content-Type block sits inside it,
+	// and putting Accept there would skip every GET, which is the only shape that was failing: a
+	// correlation.observe is a GET with no body, and Zendesk answers 415 to a missing Accept before it
+	// checks auth. Measured on cluster 057 by zendesk-kog, 34+ events.
+	//
+	// Set BEFORE opts.Headers is applied below, for the reason already written above about Content-Type: a
+	// verbsDescription[].headers entry naming Accept must still win, because it is the author's explicit
+	// override for a document that declares the wrong thing. CorrelationObserve has no headers field, so
+	// for the correlation walk this derived value is the ONLY way an Accept can be set at all.
+	accept := u.acceptMediaType(httpMethod, path)
+	if accept == "" {
+		accept = "application/json"
+	}
+	headers.Set("Accept", accept)
 
 	for k, v := range opts.Headers {
 		headers.Set(k, v)
