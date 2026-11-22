@@ -477,7 +477,7 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 		}, nil
 	}
 
-	err = handleResponse(resp.Body, &response)
+	err = handleResponse(resp.Body, resp.Header.Get("Content-Type"), &response)
 	if err != nil {
 		return Response{}, fmt.Errorf("handling response: %w", err)
 	}
@@ -1081,7 +1081,7 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 		}, resp, nil
 	}
 
-	err = handleResponse(resp.Body, &response)
+	err = handleResponse(resp.Body, resp.Header.Get("Content-Type"), &response)
 	if err != nil {
 		return Response{}, nil, fmt.Errorf("handling response: %w", err)
 	}
@@ -1437,6 +1437,22 @@ func (u *UnstructuredClient) isItemMatch(itemMap map[string]interface{}) (bool, 
 	}
 }
 
+// describeContentType renders the header for a human, truncated but NOT normalised.
+//
+// An ABSENT header is its own fact and gets its own words: a server that sent no Content-Type at all is a
+// different situation from one that sent the wrong type, and "" in the middle of a sentence reads as a
+// formatting bug rather than as information.
+func describeContentType(contentType string) string {
+	if strings.TrimSpace(contentType) == "" {
+		return "(none sent)"
+	}
+	const max = 120
+	if len(contentType) > max {
+		return contentType[:max] + "...(truncated)"
+	}
+	return contentType
+}
+
 func jsonToYAML(jsonData []byte) ([]byte, error) {
 	// First unmarshal JSON into a generic interface
 	var obj interface{}
@@ -1454,7 +1470,18 @@ func jsonToYAML(jsonData []byte) ([]byte, error) {
 }
 
 // response should be a pointer to the object where the response will be unmarshalled.
-func handleResponse(rc io.ReadCloser, response any) error {
+// contentType is what the SERVER labelled the body, passed in verbatim rather than parsed (issue 894).
+//
+// WHY IT IS A PARAMETER AND NOT PARSED HERE. A gateway's `text/html; charset=utf-8` and an API's
+// `application/json;charset=UTF-8` read differently to a human, and the charset oddity -- or a missing
+// space after the semicolon -- is sometimes what identifies the intermediary. Normalising to a bare media
+// type throws away the part that names the culprit.
+//
+// DIAGNOSTIC ONLY. Nothing here rejects a body because of this header. Plenty of gateways and some
+// deployments label a perfectly parseable JSON body text/plain or omit the charset, so refusing on the
+// header would break working resources in order to improve an error message. A wrong guess in a message
+// costs nothing; a wrong guess in a parse decision breaks a live resource.
+func handleResponse(rc io.ReadCloser, contentType string, response any) error {
 	if rc == nil {
 		return nil
 	}
@@ -1469,7 +1496,11 @@ func handleResponse(rc io.ReadCloser, response any) error {
 
 	yamlData, err := jsonToYAML(data)
 	if err != nil {
-		return fmt.Errorf("converting JSON to YAML: %w", err)
+		// "converting JSON to YAML" NAMED THE WRONG OPERATION: the body was never JSON, so nothing was
+		// converting anything. What the reader needs is what the server actually sent, which until #894
+		// was available on the response and never read.
+		return fmt.Errorf("the server returned Content-Type: %s, and the body did not parse as JSON: %w",
+			describeContentType(contentType), err)
 	}
 
 	err = rawyaml.Unmarshal(yamlData, response)
