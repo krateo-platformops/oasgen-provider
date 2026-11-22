@@ -117,8 +117,11 @@ the symptom is a retry that reports nothing, not an error.
 **Legs 1 and 2 are ours and are pinned by `stale_resourceversion_invariant_test.go`. Leg 3 is now
 pinned on the runtime's side too** — `unstructured-runtime#125` asserts that a failed delete persists
 `Ready=False/Deleting` *carrying the vendor error*, with `Synced=ReconcileError` and the finalizer
-kept, and kills a mutant that writes a plain `Deleting`. **Verified against the server as OPEN, not
-merged**, so until it lands a version-bump reviewer should still check `worker.go:1875-1883` by hand.
+kept, and kills a mutant that writes a plain `Deleting`. **It is MERGED** — squash `7aa0cc8`, which
+is `unstructured-runtime` main's head, verified against the server rather than taken from the message
+that announced it. **It is test-only, so there is no release to bump to: the gate lives in that
+repo's CI from here on, and a version-bump reviewer no longer has to check `worker.go:1875-1883` by
+hand.**
 
 **Which half of leg 3 is pinned matters, and it is not the obvious half.** #125 pins that the branch
 **writes** its own `Deleting`-with-message; it deliberately does **not** pin whether that branch

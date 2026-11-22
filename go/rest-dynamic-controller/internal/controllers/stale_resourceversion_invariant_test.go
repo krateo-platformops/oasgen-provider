@@ -34,9 +34,10 @@ import (
 // (3) IS THE RUNTIME'S, AND IT IS NOW PINNED THERE TOO: unstructured-runtime#125,
 // TestHandleDelete_FailureCarriesTheVendorErrorOnReady, asserts that a failed delete persists
 // Ready=False/Deleting CARRYING THE VENDOR ERROR, with Synced=ReconcileError and the finalizer kept;
-// a mutant writing a plain Deleting with no message is killed. VERIFIED AGAINST THE SERVER AS OPEN,
-// NOT MERGED, at the time of writing -- so until it lands, this comment is still the only handoff,
-// and a bump reviewer should check worker.go:1875-1883 by hand.
+// a mutant writing a plain Deleting with no message is killed. IT IS MERGED: squash 7aa0cc8, which
+// is that repo's main head, verified against the server rather than taken from the message that
+// announced it. Being test-only there is no release to bump to -- the gate lives in their CI from
+// here on, so a bump reviewer no longer has to check worker.go:1875-1883 by hand.
 //
 // NOTE WHICH HALF IS PINNED, because it is the half that matters and not the obvious one. #125 pins
 // that the branch WRITES its own Deleting-with-message. It deliberately does NOT pin whether that
