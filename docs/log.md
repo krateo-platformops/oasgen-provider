@@ -26,6 +26,35 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-22 — 0.88.0
+
+**ONE COMMIT, and it closes a gap that a consumer's question opened rather than a test.**
+
+- **`ExistenceAnswerable` now requires a SCALAR spec property before it suppresses a flag.** 0.87.0
+  stopped flagging a get path parameter whose name is also a spec property, because the runtime fills
+  path parameters from the spec by name. **But the runtime only renders a SCALAR into a parameter** —
+  `scalarParamValue` accepts `string`, `bool`, `int64`, `float64` and `nil` and skips objects and
+  arrays. So an `object`-typed property with a matching name never fills the parameter, and
+  suppressing the flag on that basis would hide a kind that genuinely cannot answer existence.
+  0.87.0 matched on the name alone and did not look at the type.
+- **The direction of the error is why this was worth a release of its own.** A missed flag leaves
+  0.86.0's behaviour. **A spurious suppression hides exactly the defect the condition exists to
+  report**, so the conservative side is the one to be on: an empty or unknown type does not count,
+  and a schema that cannot be read at all still flags as before.
+- **HOW IT WAS FOUND, which is the part worth keeping: by answering a consumer precisely rather than
+  approximately.** `azuredevops-provider-kog` asked what exactly "resolves from the spec" tests
+  before pre-registering a row against it. The honest answer was *"the parameter's name, and not its
+  type"* — and saying that out loud is what exposed the gap. No test of mine was going to.
+
+**WHAT THIS RELEASE DOES NOT CHANGE, stated because a passing consumer row would otherwise look like
+validation.** The scalar rule only alters an outcome when a matched spec property is `object`- or
+`array`-typed. **Neither consumer chart measured so far contains that shape** — on azuredevops's six
+kinds no parameter matched a spec property at all, and github-provider-kog's Repository matches a
+`required` `string`. So both will see exactly their 0.87.0 results, and **a PASS there cannot
+distinguish this rule working from this rule never firing.** The case is covered in the unit suite
+with controls in both directions — accepting too much and accepting too little — and that is the
+honest place for it.
+
 ## 2026-11-22 — 0.87.0
 
 **TWO REPORTS THAT HAD NEVER ARRIVED, AND BOTH WERE FOUND BY CONSUMERS RUNNING 0.86.0 — not by this
