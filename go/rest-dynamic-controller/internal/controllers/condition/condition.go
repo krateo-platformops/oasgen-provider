@@ -23,6 +23,19 @@ const (
 	// ReasonCreateRefusedPersistently is set when a create has been refused long enough that the
 	// refusal is evidently not transient. It reports; it does not change the retry behaviour, which the
 	// runtime already bounds. See CreateRefusedPersistently for why those are separate.
+	//
+	// THIS LITERAL IS A CROSS-REPO CONTRACT. core-provider's cdc rollup keys an arm on this exact string
+	// (core-provider#619) to map an affected composition to `childFailed` NAMED, rather than letting it
+	// fall to the converging default at childhealth.go:1362 -- which reported `Creating` forever for a
+	// state that is not converging.
+	//
+	// SO A RENAME IS A BREAKING CHANGE FOR A REPO THAT DOES NOT BUILD AGAINST US. Their arm matches the
+	// reason only, and they pass our message through verbatim beside the child, deliberately -- the
+	// message's wording has already changed once, after a consumer measurement falsified it, so nothing
+	// parses it. Renaming this const compiles here, passes every test here, and silently drops their arm
+	// back to the default.
+	//
+	// If it must change: tell core-provider the new literal BEFORE the release, not after.
 	ReasonCreateRefusedPersistently string = "CreateRefusedPersistently"
 	// ReasonCreateUnreachable is set when a resource's create is its ONLY write verb and its findby
 	// matches, so the runtime can never queue that create -- it queues one only on !ResourceExists.
