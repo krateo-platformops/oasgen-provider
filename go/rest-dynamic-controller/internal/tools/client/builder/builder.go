@@ -337,7 +337,26 @@ func describeMapping(m getter.FieldMappingItem) string {
 func applyFieldMapping(ctx context.Context, callInfo *CallInfo, mg *unstructured.Unstructured, reqConfiguration *restclient.RequestConfiguration, mapBody map[string]interface{}, resolved map[string]interface{}) {
 	for _, mapping := range callInfo.FieldMapping {
 		if mapping.InPath == "" && mapping.InQuery == "" && mapping.InBody == "" {
-			continue // response-direction (inResponse) entry, handled elsewhere
+			// RESPONSE-DIRECTION (inResponse) ENTRY. Handled by normalizeItems in
+			// internal/tools/client/restclient.go, which runs fieldmapping.NormalizeResponseBody over
+			// every findby item before matching.
+			//
+			// THE DESTINATION IS NAMED HERE BECAUSE NOT NAMING IT COST A CONSUMER TWO DAYS. "handled
+			// elsewhere" with no file reference reads as "handled nowhere" to anyone grepping this
+			// package for the feature, and the aruba session filed a gap (issue 845) on the reasonable
+			// inference that nothing consumes these entries.
+			//
+			// AND NOTE WHAT normalizeItems DOES NOT DO, since that was the other half of the confusion:
+			// fieldmapping.bodyRelativePath STRIPS a leading "spec."/"status." from inCustomResource, so
+			// the normalized value lands on the ITEM, not on the CR. A response mapping makes the
+			// RESPONSE agree with the CR; it can never give the CR a path it lacks. isInResource
+			// (clienttools.go:204) reads the LIVE CR directly -- unstructured.NestedFieldNoCopy over
+			// u.Resource.Object under "spec" -- so no response mapping can reach it.
+			//
+			// NOT "the package does not import fieldmapping": restclient.go DOES, which is how
+			// normalizeItems works. The claim is about clienttools.go, where the count is 0, and the
+			// load-bearing evidence is the NestedFieldNoCopy call rather than an import census.
+			continue
 		}
 
 		var val interface{}
