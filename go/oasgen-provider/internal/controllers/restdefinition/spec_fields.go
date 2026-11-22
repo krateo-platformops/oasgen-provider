@@ -73,10 +73,47 @@ func specPropertiesOf(live *apiextensionsv1.CustomResourceDefinition, version st
 			return nil
 		}
 		out := make(map[string]bool, len(spec.Properties))
-		for name := range spec.Properties {
+		for name, prop := range spec.Properties {
+			// ONLY A SCALAR CAN FILL A PATH PARAMETER, so only a scalar counts as "resolves from the
+			// spec". The runtime renders a spec value into a parameter through scalarParamValue, which
+			// accepts string, bool, int64, float64 and nil and SKIPS anything else:
+			//
+			//	default:
+			//		return "", false   // object or array: not a parameter value
+			//
+			// Counting an object- or array-typed property here would suppress a CORRECT flag, because
+			// the runtime would never use it and the GET really would not validate. That is the one
+			// direction this predicate must not get wrong: a missed flag leaves 0.86.0's behaviour, a
+			// spurious suppression hides a kind that genuinely cannot answer existence.
+			//
+			// FOUND BY ANSWERING A CONSUMER'S QUESTION, not by a test. azuredevops-provider-kog asked
+			// what exactly "resolves from the spec" tests before pre-registering a row against it; the
+			// honest answer was "the name, and not the type", which is how this gap surfaced. 0.87.0
+			// ships without this refinement.
+			//
+			// AN EMPTY TYPE IS NOT A SCALAR. A property with no declared type could be anything,
+			// including an object, so it does not count -- unknown stays conservative here exactly as
+			// a nil set does at the function level.
+			if !scalarSchemaType(prop.Type) {
+				continue
+			}
 			out[name] = true
 		}
 		return out
 	}
 	return nil
+}
+
+// scalarSchemaType reports whether an OpenAPI type can be rendered into a path parameter.
+//
+// THE LIST MIRRORS scalarParamValue IN THE RUNTIME, deliberately and not by coincidence: "integer"
+// and "number" are its int64/float64, "boolean" its bool. If that function ever accepts more, this
+// must follow, and the comment there should say so.
+func scalarSchemaType(t string) bool {
+	switch t {
+	case "string", "integer", "number", "boolean":
+		return true
+	default:
+		return false
+	}
 }
