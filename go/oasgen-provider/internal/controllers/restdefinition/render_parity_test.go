@@ -14,6 +14,7 @@ import (
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/render/server"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,6 +50,13 @@ func TestRenderMatchesControllerCreate(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, apiextensionsv1.AddToScheme(scheme))
+	// admissionregistration/v1 IS REQUIRED BY THE FAKE CLIENT, not by the code under test.
+	// EnsureVersionPolicy creates a MutatingAdmissionPolicy and a MutatingAdmissionPolicyBinding
+	// that deliberately SHARE A NAME. A real apiserver keys by group/resource/name, so that is
+	// fine -- but controller-runtime v0.25.2's fake client resolves the second against the stored
+	// first and reports "failed to compare objects: expected objects with types from the same
+	// schema" unless the group is registered. Measured: 17 tests failed without it.
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
 	require.NoError(t, definitionv1alpha1.SchemeBuilder.AddToScheme(scheme))
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "gh-system", Name: "repo"},

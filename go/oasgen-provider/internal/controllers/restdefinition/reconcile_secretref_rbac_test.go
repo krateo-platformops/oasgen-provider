@@ -13,6 +13,7 @@ import (
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/oas2jsonschema"
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/objects"
 	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -99,6 +100,7 @@ func newSecretRefLoop(t *testing.T, extra ...client.Object) *secretRefLoop {
 	s := runtime.NewScheme()
 	require.NoError(t, apis.AddToScheme(s))
 	require.NoError(t, apiextensionsv1.AddToScheme(s))
+	require.NoError(t, admissionregistrationv1.AddToScheme(s))
 	require.NoError(t, appsv1.AddToScheme(s))
 	require.NoError(t, rbacv1.AddToScheme(s))
 	require.NoError(t, corev1.AddToScheme(s))

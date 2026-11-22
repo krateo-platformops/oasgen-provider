@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,18 +27,24 @@ func TestDistinctGroupsCollideOnOneName(t *testing.T) {
 func policyScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	// The objects are unstructured, so the fake client only needs to know the GVKs exist.
-	for _, kind := range []string{"MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"} {
-		u := &unstructured.Unstructured{}
-		u.SetAPIVersion(policyAPIVersion)
-		u.SetKind(kind)
-		s.AddKnownTypeWithName(u.GroupVersionKind(), u)
-
-		l := &unstructured.UnstructuredList{}
-		l.SetAPIVersion(policyAPIVersion)
-		l.SetKind(kind + "List")
-		s.AddKnownTypeWithName(l.GroupVersionKind(), l)
-	}
+	// REGISTERING THE GROUP'S REAL TYPES, not unstructured placeholders, and the difference is
+	// measurable rather than stylistic.
+	//
+	// This helper used to add each GVK as an *unstructured.Unstructured with AddKnownTypeWithName, on
+	// the reasoning that "the objects are unstructured, so the fake client only needs to know the GVKs
+	// exist". That was true of controller-runtime v0.23.3 and is FALSE of v0.25.2, which arrived with
+	// provider-runtime v1.12.0: its fake client emulates server-side apply and must COMPARE a created
+	// object against the stored one. Our policy and its binding deliberately share a NAME -- fine on a
+	// real apiserver, which keys by group/resource/name -- and with only placeholder types registered
+	// the comparison resolves the binding to the policy's type and fails:
+	//
+	//	failed to update ManagedFields (...; admissionregistration.k8s.io/v1, Kind=MutatingAdmissionPolicy):
+	//	failed to compare objects: expected objects with types from the same schema
+	//
+	// Note the Kind in that message has no "Binding". Registering the group's real types is what lets
+	// the fake tell them apart; adding the two kinds as unstructured did NOT, which is measured --
+	// these tests failed with exactly the old registration in place.
+	require.NoError(t, admissionregistrationv1.AddToScheme(s))
 	return s
 }
 

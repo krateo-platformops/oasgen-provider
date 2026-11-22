@@ -14,6 +14,7 @@ import (
 	"github.com/krateo-platformops/oasgen-provider/internal/tools/render"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/stretchr/testify/require"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,6 +55,13 @@ func externalForWarningTest(t *testing.T) *external {
 	s := runtime.NewScheme()
 	require.NoError(t, apis.AddToScheme(s))
 	require.NoError(t, apiextensionsv1.AddToScheme(s))
+	// admissionregistration/v1 IS REQUIRED BY THE FAKE CLIENT, not by the code under test.
+	// EnsureVersionPolicy creates a MutatingAdmissionPolicy and a MutatingAdmissionPolicyBinding
+	// that deliberately SHARE A NAME. A real apiserver keys by group/resource/name, so that is
+	// fine -- but controller-runtime v0.25.2's fake client resolves the second against the stored
+	// first and reports "failed to compare objects: expected objects with types from the same
+	// schema" unless the group is registered. Measured: 17 tests failed without it.
+	require.NoError(t, admissionregistrationv1.AddToScheme(s))
 	return &external{
 		kube: fake.NewClientBuilder().WithScheme(s).Build(),
 		log:  logging.NewNopLogger(),
