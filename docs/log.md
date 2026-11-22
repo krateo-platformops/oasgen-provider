@@ -26,6 +26,61 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-22 — 0.87.0
+
+**TWO REPORTS THAT HAD NEVER ARRIVED, AND BOTH WERE FOUND BY CONSUMERS RUNNING 0.86.0 — not by this
+repo's tests.** That is the shape of this release: the conditions were right, the delivery was not.
+
+- **`Ready=False/CreateRefusedPersistently` now actually reaches the cluster.** It has existed since
+  0.84.0 and had never landed once. 0.86.0 bumped `unstructured-runtime` to v1.32.1, whose #124
+  applies a handler's `CreateResult.Conditions` on the **failed**-create path — but this handler went
+  on *writing* the condition onto the object it was handed and returned a result with **no
+  `Conditions` field at all**, so the runtime dutifully applied an empty list. **I shipped the half
+  that was not mine and described the whole as done.** A consumer asking "is there another
+  precondition I should set" is what caught it, and their measurement is the proof: on 0.85.2 a
+  create refused with a 400 sat **198 minutes** against a **1-hour** deadline and the reason never
+  changed; on 0.86.0 they pre-registered the row **inverted** and it stayed inverted at 194 minutes,
+  exactly as predicted.
+- **AND THE RULE I WROTE WHILE FIXING IT WAS WRONG, which is worth more than the fix.** I stated that
+  *conditions reach the cluster only through a returned result* — in a doc, in a commit, and in a
+  message to a consumer about to publish it. **False:** this controller pairs `SetConditions` with
+  `tools.UpdateStatus` at **24 non-test sites** and those arrive. The real defect was one site of 25
+  that wrote without persisting. **The true rule: a handler's condition survives unless the runtime
+  writes the same condition TYPE after the handler returns.** On the failed-create path it does
+  (`worker.go:1565` re-fetches, 1595 writes its own `Ready`), which is why the returned channel is
+  the right fix there and nowhere else. What caught it was asking why live clusters had shown
+  observe-path reasons my own rule said could never arrive.
+- **`ExistenceAnswerable` no longer flags a parameter that resolves from the spec.** 0.86.0's new
+  condition was a false positive on any kind whose get path parameter is mapped from `status.<x>`
+  while the **same name** is also a spec property: the runtime fills path parameters from the spec
+  **by name** before applying explicit mappings, and a mapping whose source is absent is *skipped*
+  rather than cleared. So the GET validates and existence is answerable. The predicate's comment said
+  such a parameter "is empty at reconcile 1" — **the missing word was "only"**. Measured by a
+  consumer across 32 kinds: 15 flagged, 14 correct, 1 wrong.
+  **The runtime was never wrong**, so nothing was ever stranded by this: the mark is reached only
+  when the call builder returned nil, which already implies the resource is not addressable. It was a
+  wrong *warning*, not wrong behaviour — consistent with that consumer's 32/32 Ready.
+  The shared fixture gains the case it was missing **and its negative twin**: Repository (`{name}` ←
+  `status.name`, `name` in the spec → answerable) and Team (`{team_slug}` ← `status.slug`, excluded
+  from the spec → still unanswerable). **Same mapping shape, opposite verdict, decided only by the
+  spec-field set**, so a predicate that ignored it fails one of the two. Both modules assert all 12
+  cases.
+- **A finalizer-stripping fix arrived that nobody asked for.** v1.32.1 also carries the runtime's
+  #123: `foregroundDeletion`, and any other owner's finalizer, were cleared on **every successful
+  delete** — true since that runtime's first commit, and affecting every generated REST resource.
+- **The stale-`resourceVersion` hazard is now pinned on both sides.** A handler's own status write
+  bumps `resourceVersion`, so the runtime's in-memory copy goes stale and its next write can lose a
+  409 — which it then requeues *quietly*, making the breakage report nothing. It does not bite this
+  controller, but only by a conjunction of three facts: every discarding `UpdateStatus` site is
+  terminal (14 of 24 discard), `Delete` never persists at all, and the one runtime path with no
+  re-fetch is exactly the path `Delete` covers. Two of those are ours and are now asserted;
+  `unstructured-runtime#125` pins the third, so the handoff is a gate rather than a comment.
+
+**NOT VERIFIED AT THE TIME OF WRITING: that this release installs.** Two consumers have
+pre-registered the deciding rows against it — one expects `CreateRefusedPersistently` to **flip**
+within 65 minutes with its `lastTransitionTime` unchanged, the other expects **14** flags with
+Repository answerable. Until those land, this carries code that CI has exercised and nothing more.
+
 ## 2026-11-21 — 0.86.0
 
 **A KIND WHOSE EXISTENCE CAN NEVER BE READ IS NOW SAID SO, AT BOTH ENDS.** Two consumers measured
