@@ -46,7 +46,7 @@ func TestTheSentinelIsAttachedOnlyWhereTheCheckCanNEVERAnswer(t *testing.T) {
 	// SETUP CONTROL: the predicate agrees. Without it, a decision arm that never reaches the branch
 	// would pass for the wrong reason, and a later predicate change could make this vacuous while it
 	// still reported green.
-	if _, _, permanent := existenceIsPermanentlyUnanswerable(unanswerable); !permanent {
+	if _, _, permanent := existenceIsPermanentlyUnanswerable(unanswerable, map[string]bool{}); !permanent {
 		t.Fatalf("setup: the predicate must call this shape permanently unanswerable, or this arm is " +
 			"not testing the branch it names")
 	}
@@ -77,7 +77,7 @@ func TestTheSentinelIsAttachedOnlyWhereTheCheckCanNEVERAnswer(t *testing.T) {
 			{Action: "findby", Method: "GET", Path: "/issues"},
 		},
 	}
-	if _, _, permanent := existenceIsPermanentlyUnanswerable(answerable); permanent {
+	if _, _, permanent := existenceIsPermanentlyUnanswerable(answerable, map[string]bool{}); permanent {
 		t.Fatalf("setup: a declared findby must make this shape answerable")
 	}
 	plain := markIfPermanentlyUnanswerable(answerable, base)

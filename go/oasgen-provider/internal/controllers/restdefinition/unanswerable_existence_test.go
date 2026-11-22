@@ -121,7 +121,7 @@ func TestUnanswerableExistence(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			param, source, flag := unanswerableExistence(tc.res)
+			param, source, flag := unanswerableExistence(tc.res, map[string]bool{})
 			if flag != tc.wantFlag {
 				t.Fatalf("unanswerable = %v, want %v (param=%q source=%q)", flag, tc.wantFlag, param, source)
 			}
@@ -148,7 +148,7 @@ func TestTheDeprecatedMappingFieldIsReadToo(t *testing.T) {
 				{InPath: "thingId", InCustomResource: "status.thingId"},
 			}},
 	}}
-	param, source, flag := unanswerableExistence(res)
+	param, source, flag := unanswerableExistence(res, map[string]bool{})
 	if !flag {
 		t.Fatalf("a status mapping on the DEPRECATED field was not seen -- every definition written "+
 			"before the rename would go unwarned (param=%q source=%q)", param, source)

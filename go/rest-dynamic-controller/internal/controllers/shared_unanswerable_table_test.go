@@ -51,9 +51,10 @@ func TestTheRuntimePredicateMatchesTheSharedTable(t *testing.T) {
 					InCustomResource string `json:"inCustomResource"`
 				} `json:"deprecatedMappings"`
 			} `json:"verbs"`
-			Unanswerable bool   `json:"unanswerable"`
-			Param        string `json:"param"`
-			Source       string `json:"source"`
+			SpecFields   []string `json:"specFields"`
+			Unanswerable bool     `json:"unanswerable"`
+			Param        string   `json:"param"`
+			Source       string   `json:"source"`
 		} `json:"cases"`
 	}
 	require.NoError(t, json.Unmarshal(b, &doc), "the shared table does not parse")
@@ -92,7 +93,7 @@ func TestTheRuntimePredicateMatchesTheSharedTable(t *testing.T) {
 				res.VerbsDescription = append(res.VerbsDescription, vd)
 			}
 
-			param, source, got := existenceIsPermanentlyUnanswerable(res)
+			param, source, got := existenceIsPermanentlyUnanswerable(res, specFieldSet(c.SpecFields))
 			require.Equal(t, c.Unanswerable, got,
 				"this module's RUNTIME predicate disagrees with the shared table (param=%q "+
 					"source=%q). If oasgen-provider's generation-time predicate agrees with the table, "+
@@ -106,4 +107,18 @@ func TestTheRuntimePredicateMatchesTheSharedTable(t *testing.T) {
 			require.Equal(t, c.Source, source, "the parameter's source differs from the table")
 		})
 	}
+}
+
+// specFieldSet turns the fixture's list into the predicate's set.
+//
+// AN EMPTY LIST BECOMES AN EMPTY SET, NOT NIL, and the distinction is the whole point of the column:
+// nil means "unknown" and keeps the conservative verdict, while empty means "this kind really has no
+// spec properties". Every fixture case states its list explicitly so none of them depends on which
+// one a reader happens to produce.
+func specFieldSet(names []string) map[string]bool {
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
 }

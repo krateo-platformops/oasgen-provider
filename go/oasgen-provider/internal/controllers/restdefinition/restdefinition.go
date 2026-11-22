@@ -433,16 +433,22 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 
 	// AND WARN IF THIS RESOURCE'S EXISTENCE CAN NEVER BE READ.
 	//
-	// A get path parameter sourced only from status is empty at reconcile 1, so the GET does not
-	// validate, rest-dynamic-controller's existence check falls through to findby, and if none is
-	// declared it returns an error on every pass forever -- because the only thing that would fill
-	// that status field is the create response that was lost. Measured: 4 of 6 CRs in one consumer's
-	// chart stranded on a CLEAN install. See unstructured-runtime issue 119.
+	// A get path parameter that can ONLY be sourced from status is empty at reconcile 1, so the GET
+	// does not validate, rest-dynamic-controller's existence check falls through to findby, and if
+	// none is declared it returns an error on every pass forever -- because the only thing that would
+	// fill that status field is the create response that was lost. Measured: 4 of 6 CRs in one
+	// consumer's chart stranded on a CLEAN install. See unstructured-runtime issue 119.
+	//
+	// "CAN ONLY BE" IS LOAD-BEARING AND WAS MISSING UNTIL A CONSUMER MEASURED IT. If the same
+	// parameter NAME is also a spec property, the runtime's builder fills it from the spec by name
+	// before applying the status mapping, and a mapping whose source is absent is skipped rather than
+	// clearing the value -- so the GET validates and existence is answerable. specPropertyNames reads
+	// those names from the generated CRD; nil means "unknown" and keeps the old conservative verdict.
 	//
 	// THE RESOURCE IS STILL GENERATED. Refusing would take six live kinds out of service on one
 	// consumer's chart at upgrade, which is a regression delivered as a fix. Evaluated here rather
 	// than once at generation time so the condition CLEARS when the document is fixed.
-	cr.SetConditions(existenceConditionFor(cr))
+	cr.SetConditions(existenceConditionFor(cr, specPropertyNames(ctx, e.kube, cr)))
 	span.SetAttributes(
 		attribute.String("k8s.object.name", cr.Name),
 		attribute.String("k8s.object.namespace", cr.Namespace),

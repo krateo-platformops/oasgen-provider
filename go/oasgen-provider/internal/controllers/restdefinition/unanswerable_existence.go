@@ -65,7 +65,26 @@ const statusSourcePrefix = "status."
 //
 // SO A FALSE NEGATIVE IS POSSIBLE AND A FALSE POSITIVE IS NOT, which is the right way round for a
 // warning that a consumer reads on 25 healthy objects.
-func unanswerableExistence(res definitionv1alpha1.Resource) (param, source string, unanswerable bool) {
+// specFields is the set of top-level spec property names of the GENERATED kind. A get path parameter
+// whose NAME appears there resolves from the spec even when its status source is empty, so it must NOT
+// be flagged. A NIL set means "unknown", which stays conservative and flags as before; an EMPTY set
+// means "none".
+//
+// WHY THIS PARAMETER EXISTS AT ALL, because the first version of this predicate did not have it and
+// was wrong for it. The comment it replaced said a get path parameter sourced from status "is empty at
+// reconcile 1, so the GET never validates". That is false whenever the same parameter name also
+// resolves from the spec: rest-dynamic-controller's builder fills path parameters from spec BY NAME
+// (processFields) BEFORE applying explicit mappings, and a mapping whose source is absent hits
+// `continue` rather than clearing the value. So the parameter keeps its spec value, the dry-run GET
+// succeeds, and existence is answerable.
+//
+// FOUND BY A CONSUMER ON 0.86.0, not by this repo's tests: github-provider-kog measured the condition
+// on 32 kinds and found 15 flagged, of which 14 were correct and one -- Repository, {name} mapped from
+// status.name with `name` also a spec property -- was a false positive. Their issue 386 had already
+// measured the spec fallback working in production. The fixture now carries that case AND its negative
+// twin (Team, where team_slug is excluded from the spec), same mapping shape and opposite verdict, so
+// a predicate that ignores specFields fails one of the two.
+func unanswerableExistence(res definitionv1alpha1.Resource, specFields map[string]bool) (param, source string, unanswerable bool) {
 	var get *definitionv1alpha1.VerbsDescription
 	for i := range res.VerbsDescription {
 		switch strings.ToLower(res.VerbsDescription[i].Action) {
@@ -82,6 +101,11 @@ func unanswerableExistence(res definitionv1alpha1.Resource) (param, source strin
 
 	for _, m := range pathParamPattern.FindAllStringSubmatch(get.Path, -1) {
 		name := m[1]
+		if specFields[name] {
+			// It resolves from the spec by name, so the GET validates at reconcile 1 whatever the
+			// status mapping says. Not a finding.
+			continue
+		}
 		if src, ok := statusMappedSource(get, name); ok {
 			return name, src, true
 		}
@@ -164,8 +188,8 @@ const ReasonExistenceAnswerable rtv1.ConditionReason = "ExistenceAnswerable"
 // one level out -- decide() -> search_cmd -> create_cmd -> create_attempts. Their generalisation,
 // which this follows: ASSERT ON THE VALUE THE IO CONSUMES, NOT ON THE FUNCTION THAT BUILDS IT,
 // because between the function and the call there is always another place to get it wrong.
-func existenceConditionFor(cr *definitionv1alpha1.RestDefinition) rtv1.Condition {
-	if param, source, unanswerable := unanswerableExistence(cr.Spec.Resource); unanswerable {
+func existenceConditionFor(cr *definitionv1alpha1.RestDefinition, specFields map[string]bool) rtv1.Condition {
+	if param, source, unanswerable := unanswerableExistence(cr.Spec.Resource, specFields); unanswerable {
 		return existenceUnanswerableCondition(cr.Spec.Resource.Kind, param, source)
 	}
 	return existenceAnswerableCondition()
