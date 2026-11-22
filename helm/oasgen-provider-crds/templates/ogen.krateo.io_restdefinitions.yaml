@@ -2293,10 +2293,12 @@ spec:
                     so a create can be triggered when the delegated observe reports
                     the resource absent
                   rule: '!(has(self.createApiRef) && has(self.observeApiRef) && !has(self.observeApiRef.notFoundExpr))'
-                - message: createApiRef requires a get or findby verb so the controller
-                    can verify the create converged (level-based convergence)
+                - message: createApiRef requires a get or findby verb, or an observeApiRef
+                    with notFoundExpr, so the controller can verify the create converged
+                    (level-based convergence)
                   rule: '!has(self.createApiRef) || self.verbsDescription.exists(v,
-                    v.action == ''get'' || v.action == ''findby'')'
+                    v.action == ''get'' || v.action == ''findby'') || (has(self.observeApiRef)
+                    && has(self.observeApiRef.notFoundExpr))'
                 - message: compareScope 'identifiersAndStatus' requires at least one
                     identifier or additionalStatusField to compare against
                   rule: '!has(self.compareScope) || self.compareScope != ''identifiersAndStatus''
