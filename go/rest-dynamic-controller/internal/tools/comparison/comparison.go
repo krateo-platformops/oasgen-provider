@@ -106,6 +106,9 @@ type Comparer struct {
 	// before the call (#663). The vendor therefore cannot hold them, so comparing them is never
 	// meaningful.
 	strippedPaths map[string]struct{}
+	// requiredPaths are spec paths whose ABSENCE from the observed object is drift (issue 886).
+	// Opt-in, because the absent-key default is right for most kinds -- see WithRequiredPaths.
+	requiredPaths map[string]struct{}
 	// mapListKeys holds, for the same kind of path, the key names an array's OBJECT elements are
 	// identified by -- from `x-kubernetes-list-type: map` plus `x-kubernetes-list-map-keys` (#650).
 	//
@@ -194,6 +197,64 @@ func (c *Comparer) isStrippedPath(path []string) bool {
 		return false
 	}
 	_, found := c.strippedPaths[joined]
+	return found
+}
+
+// WithRequiredPaths declares spec paths whose ABSENCE from the observed object is drift (issue 886).
+//
+// WHY AN OPT-IN AND NOT A DEFAULT. The absent-key rule below skips a key the observed object does not
+// have, and that default is right for most kinds: a vendor legitimately may not echo a field the
+// request sent -- a write-only value, a server default, a pointer like configurationRef. Treating
+// absence as drift for those would update on EVERY resync, forever. So the kind declares which paths
+// it means.
+//
+// MEASURED, which is why the opt-in exists at all: a consumer's KeycloakClientRegistrationPolicy had
+// spec.config {allow-default-scopes:[true], allowed-client-scopes:[mcp]} while Keycloak held only
+// {allow-default-scopes:[true]}. The CR read "up to date" and Ready=True, no update was ever sent,
+// and the policy that should have restricted agents to one scope was not in force. Their positive
+// control is what made it undeniable: changing an existing VALUE in Keycloak produced one update that
+// restored BOTH keys -- the update path could add the missing key all along; only detection never
+// asked for it.
+//
+// AND THE SIZE IS WHY IT STAYS OPT-IN. github-provider-kog measured their 32 kinds against what the
+// controller actually compares: ZERO compared paths are never-returned, 169 are compared-and-optional
+// (an upper bound, not a count -- static cannot tell omitted from null), and every create-only field
+// sits outside the compared set. "Absence is always drift" would have had to be correct for all 169.
+//
+// NOT FOR STATE THE VENDOR RETURNS ELSEWHERE. If the value exists in the response under a different
+// path, declaring it here makes the resource drift FOREVER, because the vendor will never have it
+// where this looks. That belongs in a responseTransform, an inResponse fieldMapping, or outside the
+// compared set via compareScope -- all three of which real charts already use for exactly this.
+func (c *Comparer) WithRequiredPaths(paths []string) *Comparer {
+	if len(paths) == 0 {
+		return c
+	}
+	c.requiredPaths = make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		c.requiredPaths[p] = struct{}{}
+	}
+	if len(c.requiredPaths) == 0 {
+		c.requiredPaths = nil
+	}
+	return c
+}
+
+// isRequiredPath reports whether this path was declared as must-be-present.
+//
+// It matches by the same rule as isStrippedPath -- normalisePath drops numeric indices, so a
+// declaration is index-insensitive and `config.allowed-client-scopes` is a literal key.
+func (c *Comparer) isRequiredPath(path []string) bool {
+	if len(c.requiredPaths) == 0 || len(path) == 0 {
+		return false
+	}
+	joined, ok := normalisePath(path)
+	if !ok {
+		return false
+	}
+	_, found := c.requiredPaths[joined]
 	return found
 }
 
@@ -386,10 +447,32 @@ func (c *Comparer) CompareExisting(mg map[string]interface{}, rm map[string]inte
 
 		rmValue, ok := rm[key]
 		if !ok {
-			// Key does not exist in rm, ignore and continue
-			// TODO: to be understood if this is the desired behavior
-			// Examples:
-			// Key [configurationRef] not found in rm, ignoring and continuing (this is desired, but maybe can be whitelisted)
+			// THE ABSENT-KEY RULE, and its one opt-in exception (issue 886).
+			//
+			// Skipping is the default because a vendor legitimately may not echo a key the request
+			// sent -- the `configurationRef` pointer this comment used to name is one, a write-only
+			// field or a server default is another. Treating that as drift would update on every
+			// resync forever.
+			//
+			// This branch carried "TODO: to be understood if this is the desired behavior" for a long
+			// time, and later comments in this file came to lean on it as settled. It was an
+			// unexamined default, and a consumer measured what it costs: a policy CR reading
+			// Ready=True while the key that restricts it was simply absent from the vendor object, so
+			// no update was ever sent. See WithRequiredPaths for the measurement and its control.
+			//
+			// A path the kind DECLARED as must-be-present is the exception: its absence is a real
+			// difference, and reporting it is what lets the update that adds it ever be sent.
+			if c.isRequiredPath(currentPath) {
+				return ComparisonResult{
+					IsEqual: false,
+					Reason: &Reason{
+						Reason:      "declared as required-present, but absent from the observed object",
+						FirstValue:  value,
+						SecondValue: nil,
+						Path:        currentPath,
+					},
+				}, nil
+			}
 			continue
 		}
 
