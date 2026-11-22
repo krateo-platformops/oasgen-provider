@@ -1816,12 +1816,43 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (err error) 
 	}
 
 	configurationGVR := getConfigurationGVR(cr, hasSecuritySchemes)
+	if !meta.ShouldDelete(cr) {
+		// LOGGED BECAUSE THERE IS NOWHERE ELSE TO SAY IT. This runs in Delete, so no object survives to
+		// carry a condition and an event would be orphaned -- the same ceiling the ownership warnings
+		// above hit. An operator who set the annotation learns it was honoured from this line.
+		e.log.Info("krateo.io/deletion-policy is not 'delete', so the generated CRD is left in place; "+
+			"this RestDefinition's own objects are still removed",
+			"crd", gvr.GroupResource().String(),
+			"deletionPolicy", cr.GetAnnotations()[meta.AnnotationKeyDeletionPolicy],
+			"managementPolicy", cr.GetAnnotations()[meta.AnnotationKeyManagementPolicy])
+	}
+
 	opts := deploy.UndeployOptions{
 		ConfigurationGVR: configurationGVR,
 		// GVK lets Undeploy LIST live instances before dropping the CRD (#125). Without it the count
 		// cannot be taken, and Undeploy refuses rather than assuming zero.
-		GVK:            listGVK,
-		SkipCRD:        notOwner,
+		GVK: listGVK,
+		// SKIPPED FOR TWO REASONS NOW, AND ORPHAN IS THE SECOND.
+		//
+		// krateo.io/deletion-policy: orphan was ACCEPTED AND SILENTLY INERT on a RestDefinition. The
+		// delete gate above consults meta.IsActionAllowed, whose own doc says it deliberately ignores
+		// deletion-policy -- so an operator who set orphan expecting the generated CRD to survive got it
+		// dropped, and nothing said otherwise. Accepted-and-inert is the worst of the three states: a
+		// rejected annotation would at least have told them.
+		//
+		// meta.ShouldDelete IS THE LIBRARY'S OWN ANSWER, and it already existed at this pin -- it was
+		// simply never called here. With deletion-policy: orphan under the default management policy it
+		// returns false, which is exactly the gate wanted. Using it rather than reading the annotation
+		// directly keeps this consistent with every other consumer of provider-runtime, INCLUDING the
+		// case where management-policy: observe-delete overrides orphan -- that precedence is the
+		// library's semantics and not a choice made here.
+		//
+		// THE CRD UNINSTALL ONLY, not the whole delete. This RestDefinition's own objects -- Deployment,
+		// RBAC, Configuration -- are still removed, because orphan is about the resource an operator
+		// wants to survive, and the machinery that generated it is not that resource. notOwner already
+		// had exactly this shape, so orphan is a second reason to set the same flag rather than a
+		// parallel mechanism.
+		SkipCRD:        notOwner || !meta.ShouldDelete(cr),
 		SkipDeploy:     skipDeploy,
 		RBACFolderPath: RDCrbacConfigFolder,
 		KubeClient:     e.kube,
