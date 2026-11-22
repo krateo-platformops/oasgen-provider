@@ -26,6 +26,58 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-22 — 0.90.0
+
+**A LIVE BREAK, AND AN ANNOTATION THAT LIED.** Both were reported by consumers; neither was found by a
+test here.
+
+- **Every request left RDC with no `Accept` header at all.** `net/http` sends none by default and nothing
+  in the request path ever set one — the only two `Accept` sites in the repo were in `authn.go` and
+  `snowplow.go`, neither of which is the API path. **Zendesk answers 415 to a missing `Accept` before it
+  checks auth**, so on cluster 057 every `correlation.observe` failed with `unexpected status: 415` once
+  zendesk-kog 0.3.x stopped going through its plugin and RDC began calling Zendesk directly.
+- **This was the other half of a pair whose own comment predicted it.** #288 fixed `Content-Type`, and
+  `bodyMediaType`'s comment has said since then:
+
+  > Fixing one of a matched pair is what makes the asymmetry dangerous, regardless of which one you fix
+  > first.
+
+  **`Accept` was the unfixed half, with the reason written directly above it for four releases.**
+- **`Accept` states what the CLIENT can parse, not what the server produces.** The fix as first proposed
+  would have copied the declared 2xx media type across unconditionally — which would have sent
+  `Accept: application/xml` for any document declaring XML. Measured against the vendor, anonymously:
+
+  | sent | answer |
+  |---|---|
+  | no `Accept` at all | **415** — the break |
+  | `application/json` | 401 — auth reached; what RDC now sends |
+  | `application/xml` | **415** — what the unconditional rule would have sent |
+  | `application/vnd.x+json` | 401 — vendor JSON works |
+
+  **So the unconditional rule would have created the same break on another API.** RDC parses JSON into
+  unstructured objects and can consume nothing else, so the rule is: the declared 2xx type when RDC can
+  parse it (`*/*`, or anything containing `json`, which keeps `application/vnd.github+json` and
+  `application/json-patch+json`), else `application/json`. Lowest 2xx wins so map order cannot decide it;
+  a non-numeric key such as `default` is skipped rather than fatal.
+- **Two request sites, not one.** `Call` and `CallForPagination` each build their own `&http.Request{}`
+  literal — exactly two in the file, with every other caller delegating. The header is set **outside the
+  has-a-body branch**, because a bodyless GET was the only failing shape. A verb's `headers` still win,
+  because `opts.Headers` is applied afterwards.
+- **`CorrelationObserve` still has no `headers` field**, so for a correlation walk this derived value is
+  the only way an `Accept` can be set at all. Adding one needs a CRD field and is deliberately not here;
+  zendesk-kog confirmed 057 does not need it.
+- **`krateo.io/deletion-policy: orphan` on a RestDefinition is honoured: the generated CRD now survives.**
+  It was accepted and silently inert, because the delete gate consults `meta.IsActionAllowed`, which
+  deliberately ignores deletion-policy. **`meta.ShouldDelete` is the library's own answer and already
+  existed at this pin — it simply had zero call sites here.** Using it keeps the precedence consistent with
+  every other consumer, including `management-policy: observe-delete` overriding `orphan`.
+
+  > `Note (2026-11-22)` — the CRD uninstall only. The RestDefinition's own Deployment, RBAC and
+  > Configuration are still removed: orphan is about the resource an operator wants to survive, and the
+  > machinery that generated it is not that resource. #125's live-instance guard already refused to drop a
+  > CRD with CRs, so the destructive outcome was never reachable; what was broken is an annotation that
+  > said nothing when ignored.
+
 ## 2026-11-22 — 0.89.0
 
 **ONE COMMIT, and it unblocks a kind that could not be expressed at all.**
