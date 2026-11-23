@@ -160,3 +160,85 @@ func reasonPath(r ComparisonResult) string {
 	}
 	return r.Reason.FieldPath()
 }
+
+// TestDeclaredEmptyValueIsSatisfiedByAbsence covers the half of issue 886 that the first cut got
+// wrong: a declared EMPTY value and an absent observed key are the same state, so listing the path
+// must not report drift.
+//
+// MEASURED per key on Keycloak 26.6.3 by keycloak-provider-kog, after I asked whether any of the eight
+// registration-policy config keys can legitimately be empty. Five can: an empty list is accepted with
+// 204 and the GET afterwards does not carry the key at all. Three reject it with 400 "is required".
+//
+// AND THE REMEDIES I HAD PROPOSED WERE BOTH WRONG, which is why this is a code condition and not a
+// paragraph of guidance. "Refuse the empty value at admission" would have made a restriction
+// impossible to UNDO, because omitting a key from that vendor's component PUT keeps the previous
+// value, so a declared empty list is the only way to clear one. "Do not list the path" fails because
+// the same key needs both behaviours: non-empty declared plus absent is drift, empty declared plus
+// absent is agreement.
+func TestDeclaredEmptyValueIsSatisfiedByAbsence(t *testing.T) {
+	const path = "config.allowed-client-scopes"
+
+	// absentVendor holds the sibling key only, so every arm below differs from its CR by exactly the
+	// declared path and nothing else.
+	absentVendor := func() map[string]any {
+		return map[string]any{"config": map[string]any{"allow-default-scopes": []any{"true"}}}
+	}
+	crWith := func(v any) map[string]any {
+		return map[string]any{"config": map[string]any{
+			"allow-default-scopes":  []any{"true"},
+			"allowed-client-scopes": v,
+		}}
+	}
+	compare := func(t *testing.T, cr, vendor map[string]any) ComparisonResult {
+		t.Helper()
+		res, err := NewComparer(nil).WithRequiredPaths([]string{path}).CompareExisting(cr, vendor)
+		require.NoError(t, err)
+		return res
+	}
+
+	t.Run("declared empty list, absent from the vendor: AGREEMENT", func(t *testing.T) {
+		res := compare(t, crWith([]any{}), absentVendor())
+		assert.True(t, res.IsEqual,
+			"a vendor that normalises an empty collection away is behaving correctly, and reporting "+
+				"that as drift would update on every resync forever -- the failure the absent-key "+
+				"default exists to prevent, arriving through the opt-in")
+	})
+
+	// SUBJECT CONTROL: the same declaration, non-empty. Without this arm the one above could pass
+	// because the condition had disabled the feature outright rather than narrowed it.
+	t.Run("declared NON-empty, absent from the vendor: still drift", func(t *testing.T) {
+		res := compare(t, crWith([]any{"mcp"}), absentVendor())
+		require.False(t, res.IsEqual, "narrowing the exception must not switch it off")
+		require.NotNil(t, res.Reason)
+		assert.Equal(t, path, res.Reason.FieldPath())
+	})
+
+	t.Run("declared empty, vendor NON-empty: drift, by ordinary comparison", func(t *testing.T) {
+		vendor := map[string]any{"config": map[string]any{
+			"allow-default-scopes":  []any{"true"},
+			"allowed-client-scopes": []any{"mcp"},
+		}}
+		res := compare(t, crWith([]any{}), vendor)
+		assert.False(t, res.IsEqual,
+			"clearing a restriction the vendor still holds is a real difference; the key is PRESENT, "+
+				"so this never reaches the absent-key branch at all")
+	})
+
+	t.Run("empty string and empty map are empty too", func(t *testing.T) {
+		for name, v := range map[string]any{"empty string": "", "empty map": map[string]any{}} {
+			res := compare(t, crWith(v), absentVendor())
+			assert.True(t, res.IsEqual, "%s declared, key absent: same state", name)
+		}
+	})
+
+	// ZERO AND FALSE ARE NOT EMPTY. A vendor silently dropping these is exactly what issue 886 exists
+	// to catch, so they must keep reporting drift. This is the arm that a reflect-based or
+	// truthiness-based emptiness test would fail.
+	t.Run("false and zero are NOT empty: absence is still drift", func(t *testing.T) {
+		for name, v := range map[string]any{"false": false, "zero": int64(0), "zero float": 0.0} {
+			res := compare(t, crWith(v), absentVendor())
+			assert.False(t, res.IsEqual,
+				"%s is a meaningful declared value; a vendor dropping it is the silent-drop bug", name)
+		}
+	})
+}

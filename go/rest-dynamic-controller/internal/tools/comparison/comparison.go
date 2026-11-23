@@ -225,6 +225,13 @@ func (c *Comparer) isStrippedPath(path []string) bool {
 // path, declaring it here makes the resource drift FOREVER, because the vendor will never have it
 // where this looks. That belongs in a responseTransform, an inResponse fieldMapping, or outside the
 // compared set via compareScope -- all three of which real charts already use for exactly this.
+//
+// AND A DECLARED EMPTY VALUE IS SATISFIED BY ABSENCE, so listing a path does NOT mean "this key must
+// always be in the response". It means "a non-empty declaration must be in the response". See
+// declaredValueIsEmpty: the vendor that motivated this issue drops empty collections, and an empty
+// list there is meaningful -- the only way to clear a restriction. That is why a listed path whose
+// value can legitimately be empty is still sound, and why neither refusing the empty value at
+// admission nor leaving the path unlisted was the right fix.
 func (c *Comparer) WithRequiredPaths(paths []string) *Comparer {
 	if len(paths) == 0 {
 		return c
@@ -256,6 +263,39 @@ func (c *Comparer) isRequiredPath(path []string) bool {
 	}
 	_, found := c.requiredPaths[joined]
 	return found
+}
+
+// declaredValueIsEmpty reports whether a DECLARED value is an empty collection or string, for which an
+// absent observed key is the same state rather than a missing one.
+//
+// MEASURED per key on Keycloak 26.6.3: five of the eight registration-policy config keys accept an
+// empty list (204) and the GET afterwards does not carry the key at all; the other three reject it
+// with 400 "is required". A vendor that normalises an empty collection away is behaving correctly, so
+// a declared empty list against an absent key is AGREEMENT, and reporting it as drift would update on
+// every resync forever -- the very failure the absent-key default exists to prevent.
+//
+// AND AN EMPTY VALUE IS NOT A NO-OP, which is what rules out refusing it at admission instead:
+// omitting a key from that vendor's component PUT keeps the previous value, so a declared empty list
+// is the ONLY way to clear a restriction. A minItems:1 on the asset would have made a restriction
+// impossible to undo.
+//
+// ZERO AND FALSE ARE NOT EMPTY. A vendor that silently drops `false` or `0` is doing precisely what
+// issue 886 exists to catch, so only nil, the empty string and empty collections count here. The types
+// are the unstructured ones on purpose: this walks decoded JSON, where a list is []any and an object
+// is map[string]any, and anything else is a scalar that cannot be empty.
+func declaredValueIsEmpty(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return v == ""
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		return len(v) == 0
+	default:
+		return false
+	}
 }
 
 // comparableKeyCount returns how many of mg's keys at this path the request could actually have
@@ -462,7 +502,15 @@ func (c *Comparer) CompareExisting(mg map[string]interface{}, rm map[string]inte
 			//
 			// A path the kind DECLARED as must-be-present is the exception: its absence is a real
 			// difference, and reporting it is what lets the update that adds it ever be sent.
-			if c.isRequiredPath(currentPath) {
+			// A DECLARED EMPTY VALUE IS SATISFIED BY ABSENCE, which keeps this exception from
+			// recreating the forever-drift it was built to avoid. See declaredValueIsEmpty: the
+			// vendor that motivated issue 886 drops empty collections from its representation, and
+			// an empty list there is a MEANINGFUL declaration -- the only way to clear a
+			// restriction, since omitting the key keeps the old value. Declaring `[]` and listing
+			// the path must therefore mean "agreed", while `[x]` against an absent key is the
+			// drift this reports. An empty declaration against a NON-empty observed value is not
+			// handled here at all: the key is present, so it is ordinary comparison below.
+			if c.isRequiredPath(currentPath) && !declaredValueIsEmpty(value) {
 				return ComparisonResult{
 					IsEqual: false,
 					Reason: &Reason{
