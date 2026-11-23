@@ -277,6 +277,37 @@
 # event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
+  - version: "0.91.0"
+    charts:
+      - oasgen-provider
+      - oasgen-provider-crds
+      - controller-render-service
+    use: "0.91.1"
+    reason: >-
+      PUBLISHED ITS TWO IMAGES AND NONE OF ITS THREE CHARTS, so a consumer checking images alone reads
+      it as released. Measured on GHCR with an absent-version control: images oasgen-provider and
+      rest-dynamic-controller carry 0.91.0; charts oasgen-provider, oasgen-provider-crds and
+      controller-render-service have zero versions carrying it. Its GitHub Release exists and its
+      release-notes run succeeded, so nothing about the tag looks wrong from outside.
+
+      The cause was not in this repo. .github/workflows/release-oci.yaml here is byte-identical between
+      0.90.0 and 0.91.0 and succeeded on the first; the shared reusable it calls, pinned to @main, added
+      index_channel with required: true in its 2.0.0 tag, so the call never started -- startup_failure
+      with ZERO jobs. A caller's inputs are matched against the callee only at dispatch time, so a parse
+      check, a lint and the whole suite all pass, and a run with no jobs reads as "nothing happened"
+      rather than as an error. It was azuredevops-provider-kog's artifact gate that found it, not the
+      workflow conclusion.
+
+      LISTED EVEN THOUGH THESE CHART VERSIONS DO NOT EXIST. The header above describes this list as
+      published versions that must not be pinned, and these were never published -- but a pin on 0.91.0
+      would otherwise fail on a missing chart rather than being refused with a reason, and installer
+      pins the app and CRD versions in lockstep, so the image half resolving is exactly the trap. All
+      three charts are named per the rule above: retracting fewer would leave the rest pinnable at the
+      same version with the line gate confirming they are "in step".
+
+      Filed as #909: all ten of this repo's shared-reusable calls are pinned to @main, which is ten
+      independent chances for this to recur. github-provider-kog pins a SHA with the tag as a trailing
+      comment, which is why 2.0.0's new required input never reached them.
   - version: "0.85.1"
     charts:
       - oasgen-provider
