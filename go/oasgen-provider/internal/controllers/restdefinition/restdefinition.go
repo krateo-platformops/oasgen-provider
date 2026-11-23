@@ -462,10 +462,12 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		// successful Observe sets Ready.
 		//
 		// Set BEFORE the two error returns below, though at the pinned version that no longer changes what
-		// they report: v1.8.2's markNotObserved answers a resource carrying a deletion timestamp with
-		// Deleting rather than NotObserved, whatever the condition on the object says. On v1.8.0 and v1.8.1
-		// it checked only the condition, so setting it first was the one thing standing between a failed
-		// uninstall and a Ready that read "we could not tell" about an object whose fate is not in doubt.
+		// they report: from v1.8.2 markNotObserved answers a resource carrying a deletion timestamp with
+		// Deleting rather than NotObserved, whatever the condition on the object says, and v1.21.1 still
+		// does -- its owners state it as "Ready becomes NotObserved, unless it is Deleting or you wrap the
+		// error with ReadyAssessed". On v1.8.0 and v1.8.1 it checked only the condition, so setting it
+		// first was the one thing standing between a failed uninstall and a Ready that read "we could not
+		// tell" about an object whose fate is not in doubt.
 		//
 		// Kept, not because the runtime needs it, but because Observe should state what it knows: that this
 		// RestDefinition is being deleted is the provider's own answer, not something a caller should have
