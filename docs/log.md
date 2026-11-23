@@ -26,6 +26,60 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-23 — 0.91.0
+
+**TWO CONSUMER-BLOCKING FEATURES, AND THREE DEFECTS THAT WERE ONLY VISIBLE FROM OUTSIDE.** Every item
+below was reported, measured or corrected by a consumer session rather than found here.
+
+- **A delegated observe can now type its status fields.** `observeApiRef.statusSchema` (#889). An
+  `observeApiRef` kind has no source for its status schema — `getBaseSchemaForStatus` derives it from a
+  get, a findby, or a dispatch correlation item, and a RESTAction's output is described in no OAS
+  document — so **every `additionalStatusFields` entry was emitted as `type: string`**. A boolean
+  arrived as `"true"`. KOG 0.15.0 was blocked on this.
+
+  > `Note (2026-11-23)` — the declared schema is tried **first**, ahead of get and findby, and that is
+  > the one judgement in the change. #887's rule made `observeApiRef` + `notFoundExpr` an *alternative*
+  > to get/findby rather than a replacement, so a kind may declare both — and when it does, the observe
+  > is delegated and the get response describes a read that never happens.
+
+- **A spec key absent from the vendor object can now be declared as drift.** `requirePresentFields`
+  (#886), an **opt-in whitelist per path**. The comparison skips a key the observed object does not
+  carry, so a resource whose setting the vendor silently dropped reported `External resource is up to
+  date` and `Ready=True` with no update ever sent. Measured by keycloak-provider-kog with a positive
+  control; their registration policy reported Ready while the vendor did not hold the declared scope.
+
+  > `Note (2026-11-23)` — it **fails closed**: registration was refused 403 rather than silently
+  > permitted, so the live consequence is a feature that does not work rather than a restriction that
+  > lifted. And it is opt-in because three fleets measured absences that are **correct**: Keycloak never
+  > echoes `KeycloakUser.groups` on GET, GitHub omits `branchprotection` objects when unset, and
+  > `repocontent` has eight intended request-only inputs. Making absence drift by default would make
+  > those resources re-PUT forever.
+
+- **A JSON parse error now names what the server actually sent** (#894). `Content-Type` was set on every
+  request and `Accept` since 0.90.0, while the response's `Content-Type` was read in exactly one
+  non-test place — a mock server logging a *request* header. So a WAF block page or an expired-credential
+  login page surfaced as `invalid character '<'`. Diagnostic only: a mislabelled-but-valid body still
+  parses, because rejecting on the header would break working resources to improve a message.
+
+- **The create-pending remedy now warns what removal does.** unstructured-runtime v1.32.2 (#901).
+  `errCreateIncomplete` told an operator to remove `krateo.io/external-create-pending` and said nothing
+  about the consequence: **removal fires the builder's OnDelete trigger and enqueues a create
+  immediately** — 1.1 s, measured by azuredevops-provider-kog — which is why the runtime's own code
+  *closes* that marker rather than deleting it.
+
+  > `Known issue (2026-11-23, issue 901)` — the strand itself is **not** fixed. One `connection reset`
+  > on a create POST still leaves a findby-addressed resource at `CreateOutcomeUnknown`, and
+  > `kubectl delete` still waits with it. That is deliberate: the existence check cannot tell "reset
+  > before the vendor committed" from "reset after", and releasing the finalizer could orphan a live
+  > resource. Present since before #373. azuredevops-provider-kog's chart documents it for chart
+  > 0.12.0+.
+
+- **Two comments that misled a reader are now accurate** (#896, #899). `"handled elsewhere"` with no
+  file reference reads as "handled nowhere" — a consumer filed #845 on that inference. And
+  `CreateRefusedPersistently`'s literal is now recorded as a **cross-repo contract**: core-provider's
+  rollup keys an arm on that exact string, and they do not build against us, so a rename would compile
+  here, pass every test here, and silently drop their arm.
+
 ## 2026-11-22 — 0.90.0
 
 **A LIVE BREAK, AND AN ANNOTATION THAT LIED.** Both were reported by consumers; neither was found by a
