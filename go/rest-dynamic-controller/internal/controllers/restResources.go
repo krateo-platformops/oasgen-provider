@@ -934,7 +934,18 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 				// is recoverable without operator action on the CR: observe still runs every poll, and
 				// a different difference, or an edited spec (generation), produces a new signature and
 				// a fresh attempt.
-				detail := fmt.Sprintf("%s; the update has been issued %d times without resolving it, so it will not be issued again for this difference. "+
+				// COUNTS CHECKS, NOT UPDATES, because that is what `repeats` is. recordDriftRepeat
+				// increments on every observe reporting the same signature -- including the one that
+				// latches, and every one after it, when no update is being issued at all. So "the update
+				// has been issued N times" overstated it by one at the moment of latching and then kept
+				// climbing while the number of updates stayed fixed: github-provider-kog measured 4
+				// update PUTs against a message that said 5, and 7 a little later.
+				//
+				// The event a few lines below has always phrased this same number correctly, which is
+				// why only one string changes here. Updates-issued is a DIFFERENT quantity that nothing
+				// tracks, so this does not try to report it -- after latching it is a constant and would
+				// need its own bookkeeping to state honestly.
+				detail := fmt.Sprintf("%s; the same difference has been reported on %d consecutive checks and the update did not resolve it, so it will not be issued again for this difference. "+
 					"The usual cause is a request/response shape divergence in the API description, fixable with responseTransform on the observe verb",
 					res.Reason.Reason, repeats)
 				if serr := unstructuredtools.SetConditions(mg, customcondition.DriftNotConverging(field, detail)); serr != nil {
