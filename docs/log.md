@@ -26,7 +26,31 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
-## 2026-11-23 — 0.91.0
+## 2026-11-23 — 0.91.1
+
+> `Correction (2026-11-23)` — **this section was written as 0.91.0 and that tag published incompletely.**
+> Measured on GHCR, with an absent-version control:
+>
+> | artifact | 0.91.0 |
+> |---|---|
+> | image `oasgen-provider` | **present** |
+> | image `rest-dynamic-controller` | **present** |
+> | chart `charts/oasgen-provider` | **ABSENT** |
+> | chart `charts/oasgen-provider-crds` | **ABSENT** |
+> | chart `charts/controller-render-service` | **ABSENT** |
+>
+> **Its GitHub Release exists and its release-notes run succeeded**, so 0.91.0 advertises a version whose
+> charts were never built. **Do not install or pin 0.91.0.** The contents below shipped as **0.91.1**,
+> which carries the same six commits plus the fix for the cause.
+>
+> **The cause was not in this repo.** `release-oci.yaml` here is byte-identical between 0.90.0 and
+> 0.91.0 and succeeded on the first. The shared reusable it calls — pinned to `@main` — added
+> `index_channel` with `required: true`, so the call never started: `startup_failure` with **zero jobs**.
+> Nothing local could have caught it, because a caller's inputs are matched against the callee only at
+> dispatch time, so a parse check, a lint and the whole suite all pass. **A run with no jobs reads as
+> "nothing happened" rather than as an error**, and it was a consumer's artifact gate — not the workflow
+> conclusion — that found it.
+
 
 **TWO CONSUMER-BLOCKING FEATURES, AND THREE DEFECTS THAT WERE ONLY VISIBLE FROM OUTSIDE.** Every item
 below was reported, measured or corrected by a consumer session rather than found here.
