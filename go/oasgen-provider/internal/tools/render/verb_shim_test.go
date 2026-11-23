@@ -103,8 +103,16 @@ func everyResourceFieldSet() *definitionv1alpha1.RestDefinition {
 					Method: "GET",
 					Path:   "/parents/{id}",
 				}},
-				ObserveApiRef: &definitionv1alpha1.ApiRef{Namespace: "krateo-system", Name: "observe-widget"},
-				CreateApiRef:  &definitionv1alpha1.ApiRef{Namespace: "krateo-system", Name: "observe-widget"},
+				ObserveApiRef: &definitionv1alpha1.ApiRef{
+					Namespace: "krateo-system",
+					Name:      "observe-widget",
+					// StatusSchema is set here because this fixture's contract is "every resource field set",
+					// and ResourceConfig.ObserveStatusSchema is plumbed from it (issue 889). Leaving it out made
+					// this test fail for the right reason: a new ResourceConfig field was reachable but nothing
+					// proved the shim carried it.
+					StatusSchema: map[string]definitionv1alpha1.StatusFieldType{"found": "boolean"},
+				},
+				CreateApiRef: &definitionv1alpha1.ApiRef{Namespace: "krateo-system", Name: "observe-widget"},
 			},
 		},
 	}

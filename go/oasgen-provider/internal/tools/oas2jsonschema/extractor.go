@@ -3,6 +3,7 @@ package oas2jsonschema
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -262,6 +263,22 @@ func (g *OASSchemaGenerator) requestBodySchemaFor(actions ...string) (*Schema, e
 // getBaseSchemaForStatus returns the base schema for the status, which is the response body of the 'get' or 'findby' action.
 // TODO: what about no get/findby action but only update? (maybe this could be configured in the GeneratorConfig)
 func (g *OASSchemaGenerator) getBaseSchemaForStatus() (*Schema, error) {
+	// A DECLARED DELEGATED-OBSERVE SCHEMA WINS, and it is tried FIRST (issue 889).
+	//
+	// WHY FIRST, where correlationItemSchema is deliberately last. A kind may declare observeApiRef AND
+	// a get or findby verb -- #887's own rule made observeApiRef+notFoundExpr an ALTERNATIVE to them,
+	// not a replacement, and the only exclusion in the set is dispatch. So when both exist the question
+	// is which response describes the status, and when observeApiRef is set the observe is DELEGATED:
+	// the get/findby response describes a read that never happens. Typing status from it would type the
+	// status of a request nobody sends.
+	//
+	// correlationItemSchema is last for the mirror reason given at its own call below: a dispatch verb
+	// may legally coexist with a get or findby and is the less authoritative source of the two. This one
+	// is the more authoritative, so it goes at the other end.
+	if schema := g.declaredObserveStatusSchema(); schema != nil {
+		return schema, nil
+	}
+
 	// Try each observe action in turn and only fail if NONE yields a schema. Returning the first action's
 	// error aborted before findby was ever consulted, so a resource declaring findby but no get -- the
 	// normal shape for a read-only resource -- lost its status schema entirely to
@@ -415,4 +432,40 @@ func extractRawResponseSchemaForAction(docs *DocumentSet, verbs []Verb, targetAc
 		return nil, "", fmt.Errorf("%w: action '%s'", ErrSuccessResponseHasNoBody, targetAction)
 	}
 	return nil, "", fmt.Errorf("no suitable response schema found for action '%s'", targetAction)
+}
+
+// declaredObserveStatusSchema builds the status base schema from observeApiRef.statusSchema (issue 889).
+//
+// Returns nil when nothing is declared, which is NOT an error and NOT an empty schema: the caller falls
+// through to the get/findby/correlation sources, which is exactly the behaviour before this field
+// existed. That is what keeps the field purely additive -- no existing RestDefinition's generated CRD
+// changes shape.
+//
+// NO ERROR RETURN, deliberately. The only thing that could fail is an unknown type name, and the CRD's
+// own enum on StatusFieldType refuses those at admission -- so a value reaching here is one of the four
+// scalars by construction. Returning an error would add a path no input can take, and an unreachable
+// error branch is worse than none: it reads as a handled case.
+//
+// The property ORDER is sorted rather than map order, because Schema.Properties is a slice to preserve
+// order and a generated CRD that reorders between identical inputs is an unattributable diff for a
+// consumer who fingerprints theirs.
+func (g *OASSchemaGenerator) declaredObserveStatusSchema() *Schema {
+	declared := g.resourceConfig.ObserveStatusSchema
+	if len(declared) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(declared))
+	for name := range declared {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	schema := &Schema{Type: []string{"object"}, Properties: make([]Property, 0, len(names))}
+	for _, name := range names {
+		schema.Properties = append(schema.Properties, Property{
+			Name:   name,
+			Schema: &Schema{Type: []string{declared[name]}},
+		})
+	}
+	return schema
 }
