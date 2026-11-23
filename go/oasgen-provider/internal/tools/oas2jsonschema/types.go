@@ -58,6 +58,13 @@ type ResourceConfig struct {
 	// *ApiRef. So nothing reaches the identifier matching, and a findby declared under delegation exists
 	// to satisfy the needs-an-observe-verb rule and to shape the generated CRD (#444).
 	ObserveDelegated bool
+	// ObserveStatusSchema types the fields a DELEGATED observe returns (issue 889), from
+	// observeApiRef.statusSchema. Plumbed in render/helper.go beside ObserveDelegated.
+	//
+	// Nil means "not declared", which is not the same as "no fields": it falls through to the three
+	// schema sources getBaseSchemaForStatus already tries, which is today's behaviour. Only a resource
+	// that declares the map is affected.
+	ObserveStatusSchema map[string]string
 
 	// CreateDelegated is true when the resource sets createApiRef, i.e. creation is delegated to a
 	// Snowplow RESTAction rather than performed by a create verb.

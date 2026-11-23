@@ -1338,7 +1338,37 @@ type ApiRef struct {
 	// Absent => the resource is assumed up-to-date.
 	// +optional
 	UpToDateExpr *JQProgram `json:"upToDateExpr,omitempty"`
+	// StatusSchema types the fields a DELEGATED observe returns, so additionalStatusFields do not all
+	// default to string (issue 889).
+	//
+	// WHY THE GENERATOR HAS NOTHING ELSE TO GO ON. The status schema is derived from an observe
+	// response: the get verb's, the findby verb's, or a dispatch resource's correlation item. A resource
+	// whose observation is delegated to a RESTAction has none of those -- the RESTAction's output is not
+	// described in any OAS document this generator can read -- so every entry in additionalStatusFields
+	// is emitted as `type: string`. A boolean comes back as "true", an integer as "42", and a consumer
+	// comparing them has to know which fields were lied about.
+	//
+	// A MAP OF LEAF NAME TO TYPE, matching additionalStatusFields' own flat shape rather than admitting a
+	// nested JSON Schema. The delegated observe's output is a flat object by construction: it is what a
+	// RESTAction's notFoundExpr and the status mapping read, both of which address leaves. A nested
+	// schema would be a second schema language in this CRD for a case nobody has.
+	//
+	// PURELY ADDITIVE. An observeApiRef without statusSchema falls through to the three existing sources,
+	// which is exactly today's behaviour -- so no existing RestDefinition's generated CRD changes shape,
+	// which matters for a consumer who fingerprints theirs and treats an unattributable diff as a spoiled
+	// instrument.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	StatusSchema map[string]StatusFieldType `json:"statusSchema,omitempty"`
 }
+
+// StatusFieldType is the JSON Schema type of one delegated-observe status field.
+//
+// THE FOUR SCALARS, and no object or array. These are the types a status leaf can carry through the
+// status mapping, and they are the same set spec_fields.go's scalarSchemaType accepts for the existence
+// predicate -- deliberately the same vocabulary rather than a second one.
+// +kubebuilder:validation:Enum=string;integer;number;boolean
+type StatusFieldType string
 
 // RestDefinitionSpec is the specification of a RestDefinition.
 type RestDefinitionSpec struct {

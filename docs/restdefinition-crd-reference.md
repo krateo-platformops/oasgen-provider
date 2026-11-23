@@ -3112,6 +3112,31 @@ existing, so the controller creates it — this is what lets observeApiRef compo
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b>statusSchema</b></td>
+        <td>map[string]enum</td>
+        <td>
+          StatusSchema types the fields a DELEGATED observe returns, so additionalStatusFields do not all
+default to string (issue 889).
+
+WHY THE GENERATOR HAS NOTHING ELSE TO GO ON. The status schema is derived from an observe
+response: the get verb's, the findby verb's, or a dispatch resource's correlation item. A resource
+whose observation is delegated to a RESTAction has none of those -- the RESTAction's output is not
+described in any OAS document this generator can read -- so every entry in additionalStatusFields
+is emitted as `type: string`. A boolean comes back as "true", an integer as "42", and a consumer
+comparing them has to know which fields were lied about.
+
+A MAP OF LEAF NAME TO TYPE, matching additionalStatusFields' own flat shape rather than admitting a
+nested JSON Schema. The delegated observe's output is a flat object by construction: it is what a
+RESTAction's notFoundExpr and the status mapping read, both of which address leaves. A nested
+schema would be a second schema language in this CRD for a case nobody has.
+
+PURELY ADDITIVE. An observeApiRef without statusSchema falls through to the three existing sources,
+which is exactly today's behaviour -- so no existing RestDefinition's generated CRD changes shape,
+which matters for a consumer who fingerprints theirs and treats an unattributable diff as a spoiled
+instrument.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b><a href="#restdefinitionspecresourcecreateapirefuptodateexpr">upToDateExpr</a></b></td>
         <td>object</td>
         <td>
@@ -3269,6 +3294,31 @@ existing, so the controller creates it — this is what lets observeApiRef compo
 (which otherwise it cannot, because a delegated observe reports existence unconditionally).<br/>
           <br/>
             <i>Validations</i>:<li>has(self.inline) != has(self.ref): exactly one of inline or ref must be set</li><li>!has(self.entrypoint) || has(self.ref): entrypoint is only valid together with ref</li>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>statusSchema</b></td>
+        <td>map[string]enum</td>
+        <td>
+          StatusSchema types the fields a DELEGATED observe returns, so additionalStatusFields do not all
+default to string (issue 889).
+
+WHY THE GENERATOR HAS NOTHING ELSE TO GO ON. The status schema is derived from an observe
+response: the get verb's, the findby verb's, or a dispatch resource's correlation item. A resource
+whose observation is delegated to a RESTAction has none of those -- the RESTAction's output is not
+described in any OAS document this generator can read -- so every entry in additionalStatusFields
+is emitted as `type: string`. A boolean comes back as "true", an integer as "42", and a consumer
+comparing them has to know which fields were lied about.
+
+A MAP OF LEAF NAME TO TYPE, matching additionalStatusFields' own flat shape rather than admitting a
+nested JSON Schema. The delegated observe's output is a flat object by construction: it is what a
+RESTAction's notFoundExpr and the status mapping read, both of which address leaves. A nested
+schema would be a second schema language in this CRD for a case nobody has.
+
+PURELY ADDITIVE. An observeApiRef without statusSchema falls through to the three existing sources,
+which is exactly today's behaviour -- so no existing RestDefinition's generated CRD changes shape,
+which matters for a consumer who fingerprints theirs and treats an unattributable diff as a spoiled
+instrument.<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -3793,6 +3843,31 @@ existing, so the controller creates it — this is what lets observeApiRef compo
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b>statusSchema</b></td>
+        <td>map[string]enum</td>
+        <td>
+          StatusSchema types the fields a DELEGATED observe returns, so additionalStatusFields do not all
+default to string (issue 889).
+
+WHY THE GENERATOR HAS NOTHING ELSE TO GO ON. The status schema is derived from an observe
+response: the get verb's, the findby verb's, or a dispatch resource's correlation item. A resource
+whose observation is delegated to a RESTAction has none of those -- the RESTAction's output is not
+described in any OAS document this generator can read -- so every entry in additionalStatusFields
+is emitted as `type: string`. A boolean comes back as "true", an integer as "42", and a consumer
+comparing them has to know which fields were lied about.
+
+A MAP OF LEAF NAME TO TYPE, matching additionalStatusFields' own flat shape rather than admitting a
+nested JSON Schema. The delegated observe's output is a flat object by construction: it is what a
+RESTAction's notFoundExpr and the status mapping read, both of which address leaves. A nested
+schema would be a second schema language in this CRD for a case nobody has.
+
+PURELY ADDITIVE. An observeApiRef without statusSchema falls through to the three existing sources,
+which is exactly today's behaviour -- so no existing RestDefinition's generated CRD changes shape,
+which matters for a consumer who fingerprints theirs and treats an unattributable diff as a spoiled
+instrument.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b><a href="#restdefinitionspecresourceobserveapirefuptodateexpr">upToDateExpr</a></b></td>
         <td>object</td>
         <td>
@@ -3949,6 +4024,31 @@ existing, so the controller creates it — this is what lets observeApiRef compo
 (which otherwise it cannot, because a delegated observe reports existence unconditionally).<br/>
           <br/>
             <i>Validations</i>:<li>has(self.inline) != has(self.ref): exactly one of inline or ref must be set</li><li>!has(self.entrypoint) || has(self.ref): entrypoint is only valid together with ref</li>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>statusSchema</b></td>
+        <td>map[string]enum</td>
+        <td>
+          StatusSchema types the fields a DELEGATED observe returns, so additionalStatusFields do not all
+default to string (issue 889).
+
+WHY THE GENERATOR HAS NOTHING ELSE TO GO ON. The status schema is derived from an observe
+response: the get verb's, the findby verb's, or a dispatch resource's correlation item. A resource
+whose observation is delegated to a RESTAction has none of those -- the RESTAction's output is not
+described in any OAS document this generator can read -- so every entry in additionalStatusFields
+is emitted as `type: string`. A boolean comes back as "true", an integer as "42", and a consumer
+comparing them has to know which fields were lied about.
+
+A MAP OF LEAF NAME TO TYPE, matching additionalStatusFields' own flat shape rather than admitting a
+nested JSON Schema. The delegated observe's output is a flat object by construction: it is what a
+RESTAction's notFoundExpr and the status mapping read, both of which address leaves. A nested
+schema would be a second schema language in this CRD for a case nobody has.
+
+PURELY ADDITIVE. An observeApiRef without statusSchema falls through to the three existing sources,
+which is exactly today's behaviour -- so no existing RestDefinition's generated CRD changes shape,
+which matters for a consumer who fingerprints theirs and treats an unattributable diff as a spoiled
+instrument.<br/>
         </td>
         <td>false</td>
       </tr><tr>

@@ -153,7 +153,10 @@ func toDomainResourceConfig(cr *definitionv1alpha1.RestDefinition, verbs []oas2j
 		IncludedSpecFields:     cr.Spec.Resource.IncludedSpecFields,
 		DependentLookups:       toDomainDependentLookups(cr.Spec.Resource.DependentLookups),
 		ObserveDelegated:       cr.Spec.Resource.ObserveApiRef != nil,
-		CreateDelegated:        cr.Spec.Resource.CreateApiRef != nil,
+		// BESIDE ObserveDelegated, and from the same nil check, because the two answer adjacent questions
+		// about the same field: whether observation is delegated, and what the delegate returns.
+		ObserveStatusSchema: observeStatusSchema(cr.Spec.Resource.ObserveApiRef),
+		CreateDelegated:     cr.Spec.Resource.CreateApiRef != nil,
 	}, nil
 }
 
@@ -413,6 +416,26 @@ func toDomainDependentLookups(lookups []definitionv1alpha1.DependentLookup) []oa
 			}
 		}
 		out = append(out, dl)
+	}
+	return out
+}
+
+// observeStatusSchema flattens observeApiRef.statusSchema into the generator's own map (issue 889).
+//
+// A CONVERSION RATHER THAN A SHARED TYPE, deliberately: oas2jsonschema must not import the API package
+// -- it is a schema library, and a dependency on the CRD types would make it unusable for anything else
+// and would invert the layering this package already keeps. StatusFieldType is a string underneath, so
+// the conversion is total and cannot fail.
+//
+// Returns nil for a nil ApiRef or an absent map, which getBaseSchemaForStatus reads as "not declared"
+// and falls through on.
+func observeStatusSchema(ref *definitionv1alpha1.ApiRef) map[string]string {
+	if ref == nil || len(ref.StatusSchema) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(ref.StatusSchema))
+	for name, t := range ref.StatusSchema {
+		out[name] = string(t)
 	}
 	return out
 }
