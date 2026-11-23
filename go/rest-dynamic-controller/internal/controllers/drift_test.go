@@ -199,3 +199,50 @@ func TestDriftSignatureIsStableWhenSiblingsDrift(t *testing.T) {
 		assert.Contains(t, sig, "nodePools[0].dataCenter", "and the field path is the deterministic one")
 	}
 }
+
+// TestDriftRepeatsKeepsCountingAfterTheLatch pins the property that made the DriftNotConverging
+// message wrong: the counter does NOT stop at maxDriftRepeats, because recordDriftRepeat runs on
+// every observe that reports the same signature -- including the latching one and every one after,
+// when no update is being issued at all.
+//
+// SO repeats IS NOT A COUNT OF UPDATES, and a message printing it as one is wrong twice over: by one
+// at the moment of latching, and then by a growing amount forever. Measured by github-provider-kog
+// on a live GitHub branch protection: 4 update PUTs against a message that said 5, and 7 shortly
+// after.
+//
+// The arithmetic, which is the whole bug:
+//
+//	observes 1..4   each reports the difference AND issues an update   -> repeats reaches 4
+//	observe  5      reports it, repeats hits maxDriftRepeats, LATCHES  -> no update issued
+//	observes 6..n   still report it, repeats keeps climbing            -> still no update
+//
+// so at the latch: repeats == 5, updates issued == 4.
+func TestDriftRepeatsKeepsCountingAfterTheLatch(t *testing.T) {
+	mg := driftMG(1, nil)
+	h, _ := driftHandler(t, mg)
+	sig := "gen=1;field=reviews.bypass_pull_request_allowances"
+
+	for want := 1; want <= maxDriftRepeats; want++ {
+		got, err := h.recordDriftRepeat(context.Background(), mg, sig)
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	}
+
+	// PAST THE LATCH. Nothing tested this before, and it is the half that makes "the update has been
+	// issued N times" diverge without bound from the truth.
+	for want := maxDriftRepeats + 1; want <= maxDriftRepeats+3; want++ {
+		got, err := h.recordDriftRepeat(context.Background(), mg, sig)
+		require.NoError(t, err)
+		assert.Equal(t, want, got,
+			"the counter must keep counting observes after the latch; if it saturated at %d instead, "+
+				"then printing it as updates-issued would have been merely off by one rather than "+
+				"unboundedly wrong, and the fix to the message would be a different fix",
+			maxDriftRepeats)
+	}
+}
+
+// NOT ASSERTED ABOVE, deliberately: that updates-issued at the latch is maxDriftRepeats-1. Nothing in
+// this package counts updates, so any assertion here would have compared two constants and passed by
+// construction -- a check that cannot fail still reports success, which is worse than its absence. The
+// relationship is what the message must respect, and it is stated in the comment rather than dressed
+// up as a test. github-provider-kog measured the real counts from the outside: 4 PUTs, message said 5.
