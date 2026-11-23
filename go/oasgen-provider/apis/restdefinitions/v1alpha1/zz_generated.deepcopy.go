@@ -669,6 +669,11 @@ func (in *Resource) DeepCopyInto(out *Resource) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.RequirePresentFields != nil {
+		in, out := &in.RequirePresentFields, &out.RequirePresentFields
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.ObserveApiRef != nil {
 		in, out := &in.ObserveApiRef, &out.ObserveApiRef
 		*out = new(ApiRef)
