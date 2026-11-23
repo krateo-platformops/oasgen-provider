@@ -1247,6 +1247,37 @@ type Resource struct {
 	// +kubebuilder:validation:XValidation:rule="size(self) >= size(oldSelf) && oldSelf.all(i, v, self[i] == v)",message="IncludedSpecFields is append-only: you may add new entries at the end, but existing entries cannot be removed, renamed, reordered or changed once the CRD has been generated"
 	// +optional
 	IncludedSpecFields []string `json:"includedSpecFields,omitempty"`
+	// RequirePresentFields are spec paths whose ABSENCE from the observed object is drift (issue 886).
+	//
+	// THE DEFAULT IS THAT AN ABSENT KEY IS NOT DRIFT, and that default is right for almost every field: a
+	// vendor that omits a key it does not populate, or one that returns a partial representation, would
+	// otherwise be reported as drifting forever and the resource would update on every reconcile. So the
+	// comparison skips a key the observed object does not carry.
+	//
+	// WHICH IS WRONG FOR A FIELD THE VENDOR IS SUPPOSED TO ECHO. If a resource declares a setting and the
+	// vendor silently drops it, the observed object simply lacks the key -- and the controller reports
+	// Synced with the setting never applied. An OPT-IN whitelist is the only shape that fixes that without
+	// changing the default for everyone: listing a path says "absence here IS drift", and listing none
+	// leaves every existing resource comparing exactly as before.
+	//
+	// NOT FOR STATE RETURNED SOMEWHERE ELSE. A field the vendor reports under a different key, or nested
+	// differently from the spec, is not absent -- it is elsewhere, and this field cannot find it. Use
+	// responseTransform to reshape the response, inResponse on the verb to point at where the value
+	// actually lives, or compareScope to narrow what is compared at all. Listing such a path here makes the
+	// resource drift permanently, which is the same failure this field exists to prevent, arriving from the
+	// other direction.
+	//
+	// Dot-notation selects nested fields, as in excludedSpecFields.
+	//
+	// NO APPEND-ONLY RULE, deliberately, unlike includedSpecFields. Narrowing an allowlist removes fields
+	// that live CRs may be setting; removing an entry HERE only makes the comparison less strict, which
+	// cannot invalidate a CR that already validates. The MaxItems/MaxLength bounds are still required: they
+	// keep the list bounded for any future CEL rule, because a comprehension over an unbounded list costs
+	// as effectively infinite and gets the whole CRD rejected.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=253
+	// +optional
+	RequirePresentFields []string `json:"requirePresentFields,omitempty"`
 	// ObserveApiRef, when set, delegates the OBSERVE of this resource to a Snowplow RESTAction instead of the
 	// get/findby verbs: the rest-dynamic-controller invokes the referenced RESTAction (via snowplow /call,
 	// under its own identity) each reconcile — passing the resource's name/namespace/uid and its identifier

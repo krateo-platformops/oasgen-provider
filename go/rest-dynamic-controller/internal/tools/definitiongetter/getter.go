@@ -499,6 +499,15 @@ type Resource struct {
 	Identifiers []string `json:"identifiers"`
 	// AdditionalStatusFields: the list of additional status fields to use
 	AdditionalStatusFields []string `json:"additionalStatusFields"`
+	// RequirePresentFields are spec paths whose ABSENCE from the observed object is drift (issue 886).
+	//
+	// Opt-in per kind. The absent-key default is right for most of them -- a vendor legitimately may
+	// not echo a field the request sent -- so this names the paths where absence is a real difference.
+	//
+	// NOT for state the vendor returns under a DIFFERENT path: declaring that here never converges,
+	// because the vendor will never have it where the comparison looks. Use a responseTransform, an
+	// inResponse fieldMapping, or compareScope for that.
+	RequirePresentFields []string `json:"requirePresentFields,omitempty"`
 	// CompareScope selects which fields the drift comparison considers: "" / "fullSpec" compares every spec
 	// field against the observed response; "identifiersAndStatus" compares ONLY identifiers +
 	// additionalStatusFields. Mirrors the oasgen CRD field.

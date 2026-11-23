@@ -870,8 +870,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			break
 		}
 
+		// WithRequiredPaths is what makes a DECLARED-but-absent spec path count as drift (issue 886).
+		//
+		// Wired HERE, at the one place the drift comparer is built, so it cannot diverge from the
+		// stripped-paths configuration beside it. A declaration that reached the Comparer but not this
+		// call would be dead configuration: the CRD would accept it and nothing would read it.
 		res, err := isCRUpdated(mg, b, clientInfo.Resource.CompareScope, scopeFields,
-			listSemantics.Comparer().WithStrippedPaths(strippedPaths))
+			listSemantics.Comparer().
+				WithStrippedPaths(strippedPaths).
+				WithRequiredPaths(clientInfo.Resource.RequirePresentFields))
 		if err != nil {
 			log.Error(err, "Checking if CR is updated")
 			return controller.ExternalObservation{}, err
