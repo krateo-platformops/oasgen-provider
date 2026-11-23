@@ -452,6 +452,28 @@ actually lives, or compareScope to narrow what is compared at all. Listing such 
 resource drift permanently, which is the same failure this field exists to prevent, arriving from the
 other direction.
 
+A DECLARED EMPTY VALUE IS SATISFIED BY ABSENCE, so listing a path does not mean "this key must
+always be in the response" -- it means "a NON-EMPTY declaration must be". A vendor that drops an
+empty collection from its representation is behaving correctly, and reporting that as drift would
+update on every resync forever, which is the failure the absent-key default exists to prevent.
+
+SO AN EMPTY VALUE MUST NOT BE REFUSED AT ADMISSION EITHER, which is the shape to avoid in a kind's
+own schema: where omitting a key leaves the vendor's previous value in place, a declared empty
+collection is the ONLY way to clear a setting, and a minItems:1 would make a restriction
+impossible to undo. Measured on one vendor: five of eight config keys on a registration policy
+accept an empty list and then do not carry the key at all.
+
+AN EMPTY VALUE IS nil, "", an empty list or an empty object -- NOT false and NOT 0. A vendor that
+silently drops a false or a zero is doing exactly what this field exists to catch.
+
+THREE SHAPES ARE STILL REPORTED AS DRIFT and this field cannot currently fix them: a vendor that
+returns the whole enclosing object empty, a vendor that returns an explicit null, and a
+declaration that is only RECURSIVELY empty -- {"a": [], "b": []} is a two-key object, so it is not
+empty by the rule above. Whether the last should count is deliberately unsettled: two fields of
+one real resource give the same shape opposite meanings, where an all-empty object means "nobody
+is permitted" on one and is indistinguishable from absence on the other. Empty-equals-absent is a
+per-vendor, per-field property.
+
 Dot-notation selects nested fields, as in excludedSpecFields.
 
 NO APPEND-ONLY RULE, deliberately, unlike includedSpecFields. Narrowing an allowlist removes fields

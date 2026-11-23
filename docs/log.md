@@ -79,6 +79,31 @@ below was reported, measured or corrected by a consumer session rather than foun
   > `repocontent` has eight intended request-only inputs. Making absence drift by default would make
   > those resources re-PUT forever.
 
+  > `Note (2026-11-23)` — **a declared EMPTY value is satisfied by absence**, so listing a path does not
+  > mean "this key must always be in the response" but "a *non-empty* declaration must be" (#911). The
+  > first cut reported permanent drift on the very key this was filed for. keycloak-provider-kog measured
+  > per key on Keycloak 26.6.3: five of the eight registration-policy config keys accept an empty list and
+  > the GET afterwards does not carry the key at all. **Both remedies proposed first were wrong** —
+  > refusing the empty value at admission would have made a restriction impossible to *undo*, because
+  > omitting a key from that vendor's PUT keeps the previous value, and not listing the path fails because
+  > the same key needs both behaviours. `false` and `0` are deliberately not empty: a vendor dropping
+  > those is what this feature exists to catch.
+  >
+  > **Three sites remain where the same shape is still called drift**, enumerated in #912 rather than left
+  > as the one that was found: a vendor `{}` at the path hits the empty-remote guard, a vendor `null` hits
+  > `values differ (one is nil)`, and a *recursively* empty declaration such as
+  > `{users: [], teams: [], apps: []}` is a three-key map, so it is not empty by this rule at all.
+  > **Whether recursive emptiness should count is unsettled on purpose:** github-provider-kog measured two
+  > siblings of one GitHub resource where the same syntactic shape means opposite things — for
+  > `bypass_pull_request_allowances` all-empty and absent are the same state, while for `restrictions`
+  > `null` means no restriction and three empty lists mean *nobody may push*. **So empty-equals-absent is
+  > a per-vendor, per-field property and no global rule is right for all of them.**
+  >
+  > **All of the above is in the CRD's own description text**, so `kubectl explain` is authoritative on
+  > this field rather than describing the pre-#911 rule. That was nearly not the case: the regen needs
+  > the load gate and the box sat between 15 and 47 against a gate of 8 all evening, so this section was
+  > first written to warn that the description lagged. It dropped to 4.9 minutes before the tag.
+
 - **A JSON parse error now names what the server actually sent** (#894). `Content-Type` was set on every
   request and `Accept` since 0.90.0, while the response's `Content-Type` was read in exactly one
   non-test place — a mock server logging a *request* header. So a WAF block page or an expired-credential
