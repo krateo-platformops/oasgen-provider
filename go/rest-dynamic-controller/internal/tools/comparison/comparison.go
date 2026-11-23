@@ -217,9 +217,15 @@ func (c *Comparer) isStrippedPath(path []string) bool {
 // asked for it.
 //
 // AND THE SIZE IS WHY IT STAYS OPT-IN. github-provider-kog measured their 32 kinds against what the
-// controller actually compares: ZERO compared paths are never-returned, 169 are compared-and-optional
+// controller actually compares: ZERO compared paths are never-returned, 167 are compared-and-optional
 // (an upper bound, not a count -- static cannot tell omitted from null), and every create-only field
-// sits outside the compared set. "Absence is always drift" would have had to be correct for all 169.
+// sits outside the compared set. "Absence is always drift" would have had to be correct for all 167.
+//
+// 167 OF 253, corrected by the session that measured it from the 169 of 255 first reported: their
+// filter matched top-level keys while `updatable` projects LEAF paths, and two paths are never
+// compared at all (org/repowebhook `config.secret`, both optional). Their REQUIRED 25/44 and
+// TRANSFORMED 41/42 are unchanged. No conclusion here moves -- the number is quoted because the
+// ARGUMENT is its size, so it should be the right size.
 //
 // NOT FOR STATE THE VENDOR RETURNS ELSEWHERE. If the value exists in the response under a different
 // path, declaring it here makes the resource drift FOREVER, because the vendor will never have it
