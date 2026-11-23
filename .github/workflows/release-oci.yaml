@@ -65,7 +65,7 @@ jobs:
 
   release-oci:
     needs: [guard-prerelease-chart]
-    uses: krateo-platformops/.github/.github/workflows/release-oci.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/release-oci.yaml@705b79c738b9ccb78b5070abfe344d3b18850e44  # krateo-platformops/.github main @ 0.91.1; see #909
     permissions:
       contents: read
       packages: write
@@ -85,6 +85,9 @@ jobs:
       # but none" -- which is why this caller passes no secrets and still worked before the input
       # existed.
       #
-      # THE REUSABLE IS PINNED TO @main, so its contract can change under a release that changed
-      # nothing. This file is byte-identical between 0.90.0 and 0.91.0 and succeeded on the first.
+      # THE REUSABLE WAS PINNED TO @main WHEN THIS COMMENT WAS WRITTEN, which is how its contract
+      # changed under a release that changed nothing: this file is byte-identical between 0.90.0 and
+      # 0.91.0 and succeeded on the first. It is pinned to a SHA now (#909), so that cannot recur
+      # here -- at the cost that a fix in the reusable no longer arrives on its own, and the pin has
+      # to be moved deliberately.
       index_channel: none

@@ -30,4 +30,4 @@ permissions:
 
 jobs:
   preflight:
-    uses: krateo-platformops/.github/.github/workflows/preflight-refs.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/preflight-refs.yaml@705b79c738b9ccb78b5070abfe344d3b18850e44  # krateo-platformops/.github main @ 0.91.1; see #909
