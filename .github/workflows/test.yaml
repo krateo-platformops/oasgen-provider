@@ -35,7 +35,7 @@ jobs:
   # merely carries a copy of it as an envtest fixture. The shared guard diffs the whole tree, so it
   # covers that fixture and the shipped CRD chart as well as crds/ itself (#84).
   oasgen-provider:
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@705b79c738b9ccb78b5070abfe344d3b18850e44  # krateo-platformops/.github main @ 0.91.1; see #909
     with:
       module: go/oasgen-provider
       crd_drift: true
@@ -50,7 +50,7 @@ jobs:
     secrets: inherit
 
   rest-dynamic-controller:
-    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@705b79c738b9ccb78b5070abfe344d3b18850e44  # krateo-platformops/.github main @ 0.91.1; see #909
     with:
       module: go/rest-dynamic-controller
       fmt_check: true

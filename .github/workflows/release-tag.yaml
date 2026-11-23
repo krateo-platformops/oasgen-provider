@@ -98,7 +98,7 @@ jobs:
     # satisfied, which is exactly right here: on the tag path guard-prerelease-tag does not run and must
     # not block.
     needs: [test, guard-prerelease-tag]
-    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@main
+    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@705b79c738b9ccb78b5070abfe344d3b18850e44  # krateo-platformops/.github main @ 0.91.1; see #909
     permissions:
       contents: read
       packages: write
