@@ -23,8 +23,23 @@ const ReasonExistenceUnanswerable rtv1.ConditionReason = "ExistenceUnanswerable"
 // visible in `describe`, greppable by reason, and the same channel the management-policy fault uses,
 // so one kind of "this is misconfigured" has one shape.
 //
-// NOT rtv1.TypeSynced either, for the reason documented at TypeManagementPolicyValid: this module
-// pins provider-runtime v1.8.2, whose reconciler writes Synced after Observe in the same pass.
+// NOT rtv1.TypeSynced either, and that survives the v1.21.1 bump -- the reason used to be documented
+// at TypeManagementPolicyValid, which that bump deleted, so it is restated here.
+//
+// A PROVIDER'S OWN Synced=False DOES NOT SURVIVE A PASS. Every path that reaches writeStatus sets
+// Synced itself first -- ReconcileSuccess, ReconcileError, ReconcilePaused or ReconcileDeferred --
+// SetConditions replaces by type, and nothing reads a provider's value back. Confirmed by the
+// provider-runtime owners against v1.21.1, after I had nearly concluded the opposite.
+//
+// AND policySynced IS NOT AN EXCEPTION THAT LETS ONE THROUGH. It runs inside writeStatus, after the
+// path set its outcome, and replaces a Success or Error of the RUNTIME'S OWN with
+// ManagementPolicyInvalid or DeletionPolicyInvalid. It preserves nothing of the provider's.
+//
+// The supported way to put a fault on Synced is to return an error from Observe, which yields
+// Synced=False/ReconcileError -- but that ends the pass before Create, Update and Delete, with
+// backoff. For an unanswerable existence that is exactly wrong: the resource needs the pass to
+// continue. provider-runtime's Create godoc names the alternative this uses: "a condition of a type
+// of its own".
 const TypeExistenceAnswerable rtv1.ConditionType = "ExistenceAnswerable"
 
 // pathParamPattern matches an OAS path template parameter: {id}, {issue_number}, {pushId}.
