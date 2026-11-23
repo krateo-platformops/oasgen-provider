@@ -72,3 +72,19 @@ jobs:
     with:
       chart_version: ${{ github.event.inputs.chart_version || '' }}
       app_version: ${{ github.event.inputs.app_version || '' }}
+      # REQUIRED BY THE SHARED REUSABLE, and its absence is a STARTUP FAILURE rather than a job
+      # failure: the 0.91.0 tag's release-oci run has 0 jobs and conclusion startup_failure, so no
+      # chart was packaged, nothing was pushed, and nothing in this repo's own CI could have caught it
+      # -- the caller is syntactically valid and its inputs are only checked against the callee at
+      # dispatch time.
+      #
+      # `none` means these charts are NOT added to a krateo-blueprints index channel, which is what
+      # they have always been: a provider's own charts, published to oci://ghcr.io/krateo-platformops/
+      # charts and consumed by the installer, not blueprints or pages. core-provider's caller passes
+      # the same value, and the reusable's own secret is documented as "required for any index_channel
+      # but none" -- which is why this caller passes no secrets and still worked before the input
+      # existed.
+      #
+      # THE REUSABLE IS PINNED TO @main, so its contract can change under a release that changed
+      # nothing. This file is byte-identical between 0.90.0 and 0.91.0 and succeeded on the first.
+      index_channel: none
