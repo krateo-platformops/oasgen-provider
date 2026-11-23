@@ -109,3 +109,26 @@ func (h *handler) clearDriftRepeats(ctx context.Context, mg *unstructured.Unstru
 		annotationDriftRepeats:   nil,
 	})
 }
+
+// driftNotConvergingDetail is the condition message for a latched difference.
+//
+// EXTRACTED SO IT CAN BE TESTED. Built inline until now, which is why nothing asserted it and why it
+// spent its whole life saying "the update has been issued N times" about a number that counts
+// OBSERVES -- a defect a consumer found by counting actual requests, not by reading code.
+//
+// `checks` is the consecutive-report count. It is NOT the number of updates issued: the latching
+// observe issues none, and the counter keeps climbing afterwards while that number stays fixed.
+func driftNotConvergingDetail(reason string, checks int) string {
+	return fmt.Sprintf("%s; the same difference has been reported on %d consecutive checks and the "+
+		"update did not resolve it, so it will not be issued again for this difference. The usual "+
+		"cause is a request/response shape divergence in the API description, fixable with "+
+		"responseTransform on the observe verb", reason, checks)
+}
+
+// driftNotConvergingEvent is the event message for the same latch, and takes the SAME `checks` value
+// as driftNotConvergingDetail. The two must never describe that number differently: the defect above
+// was exactly a disagreement between these two strings about what the one number meant.
+func driftNotConvergingEvent(name, field string, checks int) string {
+	return fmt.Sprintf("not updating %s again: field %s has differed for %d consecutive checks and "+
+		"the update does not resolve it", name, field, checks)
+}
