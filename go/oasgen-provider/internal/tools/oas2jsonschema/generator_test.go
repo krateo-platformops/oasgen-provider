@@ -54,8 +54,12 @@ func TestGenerateSpecSchema(t *testing.T) {
 		if !strings.Contains(schemaStr, `"size"`) {
 			t.Error("Schema should contain 'size' property from request body")
 		}
-		if !strings.Contains(schemaStr, `"type": "integer"`) {
-			t.Error("Schema should have converted 'number' to 'integer'")
+		// A DECLARED number STAYS number (#921). This arm asserted the opposite until the
+		// conversion was removed: crdgen and the apiserver both accept type: number on the
+		// plumbing version this module ships, and a vendor's fractional bound could not be
+		// declared while it was rewritten to integer.
+		if !strings.Contains(schemaStr, `"type": "number"`) {
+			t.Error("a declared 'number' must reach the schema as 'number', not 'integer'")
 		}
 	})
 
@@ -734,8 +738,9 @@ func TestGenerateStatusSchema(t *testing.T) {
 		if !strings.Contains(schemaStr, `"id"`) || !strings.Contains(schemaStr, `"version"`) || !strings.Contains(schemaStr, `"last_updated"`) {
 			t.Error("Status schema should contain all specified fields")
 		}
-		if !strings.Contains(schemaStr, `"type": "integer"`) {
-			t.Error("Status schema should have converted 'number' to 'integer'")
+		// A DECLARED number STAYS number in a status schema too (#921).
+		if !strings.Contains(schemaStr, `"type": "number"`) {
+			t.Error("a declared 'number' must reach the status schema as 'number', not 'integer'")
 		}
 	})
 
@@ -975,8 +980,10 @@ func TestPrepareSchemaForCRD(t *testing.T) {
 			}
 			if p.Name == "prop2" {
 				prop2Found = true
-				if p.Schema.Type[0] != "integer" {
-					t.Errorf("Expected prop2 to be of type 'integer', but got '%s'", p.Schema.Type[0])
+				// prop2 is declared `number` in the allOf branch that wins, so it stays number (#921).
+				// What this arm pins is the MERGE, not a type rewrite.
+				if p.Schema.Type[0] != "number" {
+					t.Errorf("Expected prop2 to be of type 'number', but got '%s'", p.Schema.Type[0])
 				}
 			}
 		}
@@ -1003,8 +1010,10 @@ func TestPrepareSchemaForCRD(t *testing.T) {
 			t.Fatalf("Expected no error, but got: %v", err)
 		}
 
-		if schema.Items.Properties[0].Schema.Type[0] != "integer" {
-			t.Errorf("Expected nestedProp to be of type 'integer', but got '%s'", schema.Items.Properties[0].Schema.Type[0])
+		// Recursion into arrays is what this arm pins; nestedProp is declared `number` and stays
+		// number (#921).
+		if schema.Items.Properties[0].Schema.Type[0] != "number" {
+			t.Errorf("Expected nestedProp to be of type 'number', but got '%s'", schema.Items.Properties[0].Schema.Type[0])
 		}
 	})
 
