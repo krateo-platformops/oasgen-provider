@@ -54,6 +54,26 @@ consumer's own user-facing documentation, the other into a condition nobody had 
   > measured; a note follows when it is.
   >
   > **Three fleets, three footprints:** 2 of 32 documents, 1 of 25, and one Keycloak user-profile pair.
+  >
+  > `Note (2026-11-24)` — **a downgrade is safe for existing objects and unsafe for RE-CREATING them.**
+  > Measured on kind v1.36.4 after rolling the CRD back to `integer` over seven objects that had stored
+  > `80.5`: label, finalizer and status writes are accepted; editing another field of the *same*
+  > `rules[]` item is accepted and keeps the fraction; appending a rule is accepted; delete is accepted.
+  > **Only two things are refused: creating a NEW object carrying a fraction, and changing the fraction
+  > to another fraction.** Repairing it to a whole number is accepted. So CRD validation ratcheting
+  > acts per field, even inside an array item.
+  >
+  > **What that costs in practice: such an object cannot be re-created** — a restore from backup, or a
+  > GitOps apply into a fresh cluster — **or given a different fractional value, until the value is
+  > whole.** A controller's own writes are unaffected.
+  >
+  > **Two predictions were wrong and are recorded as such.** The session that first reasoned about this
+  > expected the next write to be refused outright; I then expected ratcheting to make it *harder* to
+  > diagnose — an object accepting a status write while refusing a `rules[]` edit. **Neither happened:
+  > the `rules[]` edit is accepted.** Measured limits: one Kubernetes version, and ratcheting depends on
+  > it — an apiserver without it would refuse, which was not measured; `kubectl` JSON patches only; an
+  > insert *before* the item was not tried; and no controller ran, so whether an older
+  > rest-dynamic-controller sends `80.5` to a vendor correctly is unmeasured.
 
 - **The `DriftNotConverging` condition counted CHECKS as updates issued** (#914). It said "the update has
   been issued 5 times" when 4 had been sent, then 7 while the number of updates stayed at 4. `repeats`
