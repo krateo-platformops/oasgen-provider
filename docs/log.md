@@ -26,6 +26,60 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-24 — 0.92.0
+
+**EVERY ITEM BELOW WAS FOUND, MEASURED OR CORRECTED BY A CONSUMER SESSION.** Two were defects in what an
+operator reads rather than in what the controller does, and both had been absorbed: one into a
+consumer's own user-facing documentation, the other into a condition nobody had counted against.
+
+- **An OpenAPI `number` reaches the CRD as `number`** (#921). `convertNumberToInteger` rewrote every
+  declared `number` to `integer`, so a vendor's fractional bound could not be declared — and nothing
+  warned. **Neither gatekeeper was the constraint:** crdgen returns `type: number` with no error or
+  warning on the plumbing version this module ships, and the generated CRD is Established on GKE
+  1.36.4, stores `0.75`, refuses `0.1` below a `0.5` minimum, and refuses a string. Both measured by
+  consumers.
+
+  > `Note (2026-11-24)` — **no reason for the conversion was ever recorded.** The originating commit
+  > (`cce5252`, 2025-07-28) has a bare subject, no body, and carried `fmt.Printf` debug lines; the
+  > *"for K8s CRD compatibility"* comment was added later during a refactor; and the four tests that
+  > pinned the conversion assert it without citing a constraint. It may well have been load-bearing in
+  > July 2025 — what is measured is that it is not load-bearing now.
+  >
+  > **IT WIDENS, so stored data cannot break:** `80` is a valid JSON Schema number, and no resource can
+  > carry a fraction today because the integer refused it at admission. Verified on a consumer's
+  > cluster: an object stored as `80/1` under the integer CRD still reads `80/1` after the number CRD is
+  > applied, and accepts an update. **What a DOWNGRADE then refuses is deliberately not stated here** —
+  > the obvious answer ("the next write fails") is wrong or incomplete, because CRD validation
+  > ratcheting lets an update through when an already-invalid field is unchanged. That is being
+  > measured; a note follows when it is.
+  >
+  > **Three fleets, three footprints:** 2 of 32 documents, 1 of 25, and one Keycloak user-profile pair.
+
+- **The `DriftNotConverging` condition counted CHECKS as updates issued** (#914). It said "the update has
+  been issued 5 times" when 4 had been sent, then 7 while the number of updates stayed at 4. `repeats`
+  counts consecutive *observes* reporting the same signature — including the latching one and every one
+  after, when no update is being issued at all. **Found by a consumer counting actual requests**, not by
+  anything here.
+
+  > `Note (2026-11-24)` — **the correctly-worded event sat four lines below the wrong one** and had
+  > always phrased the same number as "consecutive checks". Both strings were built inline inside
+  > `Observe`, so nothing asserted either, and they are now functions with a test that pins the
+  > invariant that was violated: both describe the number as checks, **the two agree**, and a different
+  > value reaches both — without that last arm the others pass on a function that ignores its argument
+  > (#917).
+
+- **All ten shared-reusable workflow calls are pinned to a SHA** (#909). 0.91.0 published its two images
+  and none of its three charts because a reusable pinned to `@main` added a required input in another
+  repo: `startup_failure` with **zero jobs**, which reads as "nothing happened" rather than as an error.
+  **Ten calls were exposed, not one.** Pinned to the SHA that 0.91.1 actually ran, read from the runs'
+  own `referenced_workflows` — not to the nearest tag, which peels to a different commit this repo has
+  never executed. The cost is stated in the file: a fix in the reusable no longer arrives on its own.
+
+- **The consumer census quoted in `WithRequiredPaths` is 167 of 253, not 169 of 255** (#918). Corrected by
+  the session that measured it: their filter matched top-level keys while `updatable` projects leaf
+  paths, and two webhook `config.secret` paths are never compared. No conclusion moves — the number is
+  quoted because the argument is its *size* — but a quoted measurement should be the measurement.
+
 ## 2026-11-23 — 0.91.1
 
 > `Correction (2026-11-23)` — **this section was written as 0.91.0 and that tag published incompletely.**
