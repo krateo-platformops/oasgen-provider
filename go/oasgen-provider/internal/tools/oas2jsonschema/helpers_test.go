@@ -291,3 +291,50 @@ func TestAdditionalProperties_ObjectForm(t *testing.T) {
 		assert.Equal(t, []string{"string"}, orig.AdditionalProperties.Schema.Type, "mutating the copy must not touch the original")
 	})
 }
+
+// TestNumberSurvivesAsNumber asserts the thing the removed conversion prevented: an OpenAPI `number`
+// reaches the CRD as `number`, so a fractional bound a vendor documents can actually be declared.
+//
+// WHY THE CONVERSION WENT. Its only stated reason was a comment -- "for K8s CRD compatibility" -- and
+// the commit that introduced it (cce5252, 2025-07-28, "fix: added handling of number type in oas")
+// records none; it carried fmt.Printf debug lines, so it was written to make something work. Both
+// halves that reason could have meant are now measured false, by consumers:
+//
+//   - crdgen accepts it: GenerateWithDiagnostics on the 0.91.1 tree (plumbing v1.93.0 -- the version
+//     this module ships, not a later one) returns type: number with no error and no warning
+//   - the apiserver accepts it: the generated CRD Established on GKE 1.36.4, stored 0.75, refused 0.1
+//     below a 0.5 minimum, and refused a string
+//
+// MEASURED CONSUMER IMPACT: a GitHub ruleset's minimum_coverage and max_coverage_drop are `number`,
+// GitHub accepts and stores 80.5, and the integer CRD could not carry it -- documented as a product
+// constraint in that consumer's own chart rather than filed, which is how it survived 32 kinds.
+//
+// NOT A REGRESSION RISK FOR STORED DATA, because it WIDENS: 80 is a valid JSON Schema number, so every
+// value admissible before stays admissible, and no CR can carry a fraction today because the integer
+// refused it at admission. The comparer is unaffected: whole numbers normalise to int on both sides.
+func TestNumberSurvivesAsNumber(t *testing.T) {
+	schema := &Schema{
+		Type: []string{"object"},
+		Properties: []*SchemaProperty{
+			{Name: "minimum_coverage", Schema: &Schema{Type: []string{"number"}}},
+			{Name: "retries", Schema: &Schema{Type: []string{"integer"}}},
+			{Name: "name", Schema: &Schema{Type: []string{"string"}}},
+		},
+	}
+
+	require.NoError(t, prepareSchemaForCRD(schema, DefaultGeneratorConfig()))
+
+	got := map[string]string{}
+	for _, p := range schema.Properties {
+		got[p.Name] = p.Schema.Type[0]
+	}
+
+	assert.Equal(t, "number", got["minimum_coverage"],
+		"an OpenAPI number must reach the CRD as number; converting it to integer refuses the "+
+			"fractional values the vendor documents, accepts and stores")
+
+	// CONTROLS: the neighbours must be untouched, or this arm would pass on a function that stopped
+	// transforming anything at all.
+	assert.Equal(t, "integer", got["retries"], "control: a declared integer stays an integer")
+	assert.Equal(t, "string", got["name"], "control: a declared string is unaffected")
+}

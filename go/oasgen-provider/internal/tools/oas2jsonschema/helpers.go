@@ -37,7 +37,6 @@ func areTypesCompatible(types1, types2 []string) bool {
 
 // prepareSchemaForCRD prepares a schema for Kubernetes CRD generation by applying transformations.
 // Namely:
-// - it converts "number" types to "integer"
 // - it merges "allOf" schemas for object types.
 // It handles circular references by tracking visited schemas to prevent infinite recursion.
 func prepareSchemaForCRD(schema *Schema, config *GeneratorConfig) error {
@@ -90,11 +89,6 @@ func prepareSchemaForCRDWithVisited(
 			log.Printf("CRD preparation panic at depth %d: %v", depth, r)
 		}
 	}()
-
-	// Convert number types to integer for CRD compatibility
-	if getPrimaryType(schema.Type) == "number" {
-		convertNumberToInteger(schema)
-	}
 
 	// Process array items
 	if getPrimaryType(schema.Type) == "array" && schema.Items != nil {
@@ -192,18 +186,6 @@ func prepareSchemaForCRDWithVisited(
 	}
 
 	return nil
-}
-
-// convertNumberToInteger converts "number" types to "integer" types for K8s CRD compatibility.
-func convertNumberToInteger(schema *Schema) {
-	if schema == nil {
-		return
-	}
-	for i, t := range schema.Type {
-		if t == "number" {
-			schema.Type[i] = "integer"
-		}
-	}
 }
 
 // schemaToMap converts our domain-specific Schema object into a map[string]interface{}
