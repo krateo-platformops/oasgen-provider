@@ -315,7 +315,7 @@ func TestAdditionalProperties_ObjectForm(t *testing.T) {
 func TestNumberSurvivesAsNumber(t *testing.T) {
 	schema := &Schema{
 		Type: []string{"object"},
-		Properties: []*SchemaProperty{
+		Properties: []Property{
 			{Name: "minimum_coverage", Schema: &Schema{Type: []string{"number"}}},
 			{Name: "retries", Schema: &Schema{Type: []string{"integer"}}},
 			{Name: "name", Schema: &Schema{Type: []string{"string"}}},
