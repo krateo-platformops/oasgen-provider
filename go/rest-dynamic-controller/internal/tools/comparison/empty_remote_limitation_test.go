@@ -20,7 +20,7 @@ import (
 // WHY IT IS A SEPARATE CHANGE. Line 399 is not gated on requirePresentFields, so moving it changes the
 // default comparison path for every kind in every fleet -- unlike the declared-empty condition in the
 // absent-key branch, which only affects kinds that opted in. The last change at this layer had a
-// 169-path consumer census behind it.
+// 167-path consumer census behind it.
 //
 // MEASURED with its own control, both in this test: with a sibling key present in the remote the
 // guard cannot fire and the declared-empty condition does work, which is what isolates the guard as
