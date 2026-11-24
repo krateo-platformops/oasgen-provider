@@ -945,16 +945,13 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 				// why only one string changes here. Updates-issued is a DIFFERENT quantity that nothing
 				// tracks, so this does not try to report it -- after latching it is a constant and would
 				// need its own bookkeeping to state honestly.
-				detail := fmt.Sprintf("%s; the same difference has been reported on %d consecutive checks and the update did not resolve it, so it will not be issued again for this difference. "+
-					"The usual cause is a request/response shape divergence in the API description, fixable with responseTransform on the observe verb",
-					res.Reason.Reason, repeats)
+				detail := driftNotConvergingDetail(res.Reason.Reason, repeats)
 				if serr := unstructuredtools.SetConditions(mg, customcondition.DriftNotConverging(field, detail)); serr != nil {
 					log.Error(serr, "Setting condition")
 					return controller.ExternalObservation{}, serr
 				}
 				h.eventRecorder.Event(mg, event.Warning(reasonUpdated, "Update", fmt.Errorf(
-					"not updating %s again: field %s has differed for %d consecutive checks and the update does not resolve it",
-					mg.GetName(), field, repeats)))
+					"%s", driftNotConvergingEvent(mg.GetName(), field, repeats))))
 				log.Info("Drift is not converging; no longer issuing the update for it",
 					"kind", mg.GetKind(), "field", field, "checks", repeats)
 				// Persisted here, not left to the caller. The runtime RE-FETCHES the object as soon as

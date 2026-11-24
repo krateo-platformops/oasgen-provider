@@ -2,6 +2,7 @@ package restResources
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/krateo-platformops/rest-dynamic-controller/internal/tools/comparison"
@@ -246,3 +247,44 @@ func TestDriftRepeatsKeepsCountingAfterTheLatch(t *testing.T) {
 // construction -- a check that cannot fail still reports success, which is worse than its absence. The
 // relationship is what the message must respect, and it is stated in the comment rather than dressed
 // up as a test. github-provider-kog measured the real counts from the outside: 4 PUTs, message said 5.
+
+// TestDriftNotConvergingMessagesAgreeAboutTheirNumber is the test that would have caught the defect
+// github-provider-kog found by counting requests: the condition said "the update has been issued 5
+// times" while 4 had been sent, and the event beside it described the SAME value correctly as
+// consecutive checks.
+//
+// Both strings were built inline, so nothing asserted either one, and the two readings of one number
+// sat four lines apart for the whole life of the feature. They are functions now so this can exist.
+func TestDriftNotConvergingMessagesAgreeAboutTheirNumber(t *testing.T) {
+	const checks = 5
+	detail := driftNotConvergingDetail("spec.config differs", checks)
+	evt := driftNotConvergingEvent("w1", "spec.config", checks)
+
+	// THE INVARIANT THAT WAS VIOLATED: one number, one unit, in both strings.
+	for name, s := range map[string]string{"detail": detail, "event": evt} {
+		assert.Contains(t, s, "consecutive checks",
+			"%s must describe the number as CHECKS; it counts observes reporting the same signature, "+
+				"including the latching one and every one after, when no update is issued at all", name)
+		assert.NotContains(t, s, "issued 5 times",
+			"%s must not describe the count as updates issued: at the latch that is one fewer, and "+
+				"afterwards the gap grows without bound", name)
+		assert.Contains(t, s, "5", "%s must actually carry the number it was given", name)
+	}
+
+	// AND THE TWO MUST NOT DISAGREE. Asserting each separately would still pass if a later edit
+	// changed one of them to a different unit, which is precisely how the defect arose.
+	assert.Equal(t,
+		strings.Contains(detail, "consecutive checks"),
+		strings.Contains(evt, "consecutive checks"),
+		"the condition and the event report one number; if only one of them calls it checks, the "+
+			"other is describing a quantity nothing measures")
+
+	// A DIFFERENT VALUE MUST REACH BOTH. Without this the assertions above pass on a function that
+	// ignores its argument and hard-codes 5.
+	d9 := driftNotConvergingDetail("spec.config differs", 9)
+	e9 := driftNotConvergingEvent("w1", "spec.config", 9)
+	assert.Contains(t, d9, "9")
+	assert.Contains(t, e9, "9")
+	assert.NotContains(t, d9, "5 consecutive")
+	assert.NotContains(t, e9, "5 consecutive")
+}
