@@ -37,8 +37,12 @@ const (
 	// 78/37 -> 77/36: one rule removed, on ONE node, by unfreezing configurationFields. A removal has to
 	// move this ledger too, or the next addition is measured against a stale baseline and the +1 that
 	// restores 78 reads as no change at all.
-	wantRuleTotal = 77
-	wantRuleNodes = 36
+	// 77/36 -> 80/39 for issue 925: one `!has(self.statusSchema)` rule on each of createApiRef,
+	// updateApiRef and deleteApiRef, which are three distinct nodes, so both numbers move by three.
+	// TestGeneratedCRDIsWithinCELCostBudget still passes -- that is the test that decides whether the
+	// CRD installs, and this ledger's own message says to check it before trusting an increase.
+	wantRuleTotal = 80
+	wantRuleNodes = 39
 )
 
 // countRules walks the whole document, so it counts rules wherever they are -- including at paths
