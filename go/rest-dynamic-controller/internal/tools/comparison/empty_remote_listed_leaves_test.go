@@ -68,9 +68,37 @@ func TestEmptyRemoteRespectsListedLeaves(t *testing.T) {
 				"relaxation must never reach a null parent")
 	})
 
-	t.Run("remote parent ABSENT, leaves listed and declared empty: DRIFT", func(t *testing.T) {
+	// AN ABSENT PARENT IS NOT THIS GUARD'S BUSINESS, and CI corrected my expectation here: I asserted
+	// DRIFT and measured AGREEMENT. The parent key is absent, so the absent-key branch answers first --
+	// and `config` itself is not listed, only `config.allowed-client-scopes`, so that branch skips it by
+	// the unchanged default. Nothing in this fix touches it.
+	//
+	// MEASURED, all four listings, same CR and same absent-parent remote:
+	//
+	//	[config.allowed-client-scopes]        -> AGREE   (the leaf listing does not reach the parent)
+	//	[config]                              -> DRIFT   "declared as required-present, but absent"
+	//	[config, config.allowed-client-scopes] -> DRIFT   same
+	//	nothing listed                        -> AGREE   (absent-key default)
+	//
+	// SO LISTING THE PARENT IS THE LEVER. That matters for github-provider-kog: their vendor's absent
+	// means "no restriction" (OFF) while empty lists mean "nobody" (ON), so if they ever list those
+	// leaves and need an absent parent to drift, they list the PARENT path, not only the leaves. They do
+	// not list any today (0 of 32, measured), and their responseTransform never yields an absent parent
+	// for those objects, so neither half reaches them.
+	t.Run("remote parent ABSENT, only the LEAF listed: agreement, by the unchanged absent-key default", func(t *testing.T) {
 		res := cmp(t, []string{leaf}, empty, map[string]any{"other": "x"})
-		require.False(t, res.IsEqual, "an absent parent is not an empty one either")
+		require.True(t, res.IsEqual,
+			"the absent-key branch answers before the guard, and the parent is not listed -- this is "+
+				"today's behaviour and this fix does not change it")
+	})
+
+	t.Run("remote parent ABSENT, the PARENT listed: DRIFT, and the reason is the absent-key branch's", func(t *testing.T) {
+		res := cmp(t, []string{"config"}, empty, map[string]any{"other": "x"})
+		require.False(t, res.IsEqual, "listing the parent is the lever that makes an absent parent drift")
+		require.NotNil(t, res.Reason)
+		require.Contains(t, res.Reason.Reason, "required-present",
+			"and it must be the absent-key branch, not the empty-remote guard: the guard never sees an "+
+				"absent parent at all")
 	})
 
 	// THE UNCHANGED DEFAULT, which is what keeps issue 660 closed: a kind that lists nothing behaves
