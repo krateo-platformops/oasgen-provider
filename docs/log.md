@@ -26,6 +26,56 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-25 — 0.94.0
+
+**ONE DEFECT, FOUND BY THE INSTRUMENT 0.93.0 SHIPPED FOR IT.** This release does not carry the
+provider-runtime v1.21.1 bump either; it moves to 0.95.0. A consumer had held their 0.92.0 pin over the
+defect below, and a second was shipping documentation saying "whole percentages only" because of it.
+
+- **A fractional value is no longer truncated before comparison** (#927). `DeepCopyJSONValue` coerced
+  EVERY float in int64 range, so a CR declaring `90.5` was compared as `90` against the vendor's
+  `90.5` — drift on every reconcile that no update could resolve — and **`0.1` became `0`**, discarding
+  the declared value rather than rounding it. It recurses, so nested fields were affected too.
+
+  > `Note (2026-11-25)` — **the typed values added in 0.93.0 named this in one line.** A consumer's
+  > drift row read `FirstValue=90 (int64), SecondValue=90.5 (float64)`, identical on all 8 resyncs of a
+  > 21-minute run on released 0.93.0. The `int64` excluded truncation-as-float, stringification AND
+  > `InferType` at once, because `InferType` returns `int32` inside int32 range. **Before that log
+  > change the three rendered identically and four candidate mechanisms had to be eliminated one at a
+  > time** — and one of those eliminations was wrong: `projectSpecFields` was reported clean because it
+  > calls `DeepCopyJSONValue`, "which preserves float64". **True of apimachinery's function, false of
+  > the local package of the same name that is actually imported.**
+  >
+  > **THE UNGUARDED VERSION WAS CORRECT WHEN WRITTEN**, which is why its other call site calls the
+  > conversion intentional. The converter used to narrow every OAS `number` to `integer`, status
+  > schemas included, so a float in status would have been refused at admission. **#922 removed that
+  > narrowing in 0.93.0, retiring the coercion and simultaneously making this defect reachable** — until
+  > then a fraction could not be stored in a CR at all. A remedy outlived its precondition.
+  >
+  > **SCOPE, MEASURED ON BOTH SIDES rather than derived.** The corrupting caller runs only under
+  > `compareScope: identifiersAndStatus` or `updatable`. One consumer reproduced it with a compareScope;
+  > another, on a kind with none, drifted their vendor's value from `0.5` to `0.7` out of band and
+  > watched the controller revert it to `0.5` — **a drift that truncation would have rendered invisible,
+  > since 0.7 and 0.5 both compare as 0.** Of three fleets: one affected, one affected on 1 of 32 kinds,
+  > one measured unaffected.
+  >
+  > **ONE CASE IS NOW WORSE, stated rather than hidden:** if a vendor returns a fraction for a field its
+  > own OAS declares as `integer`, the generated status field is `integer` and the API server refuses
+  > it, surfacing as a status-update error instead of a silent rounding. A vendor contract violation
+  > becoming visible is the intended direction, but it is a change.
+
+- **A 0-byte file is removed from the tree** (#932). `go/rest-dynamic` was committed by accident in
+  #928 and is present in the 0.93.0 tag, which cannot be corrected. It is harmless — no extension,
+  referenced by nothing, and outside both images' build contexts, which were checked rather than
+  assumed.
+
+  > `Note (2026-11-25)` — **the cleanup check verified a filename that had been invented.** A shell
+  > typo created `go/rest-dynamic`; the cleanup removed, and then tested for the absence of,
+  > `"go/rest-dynamic authorized"` — a name that never existed. **Both the removal and the check took
+  > the same wrong string, so they agreed with each other and with nothing on disk**, the check printed
+  > success, and `git add -A` committed the file. `git ls-tree -r -l | awk '$4==0'` finds every 0-byte
+  > file without needing to guess a name, and confirms this was the only one.
+
 ## 2026-11-25 — 0.93.0
 
 **BOTH ITEMS CAME FROM CONSUMERS, AND ONE IS A FIX TO AN INSTRUMENT RATHER THAN TO BEHAVIOUR.** This
