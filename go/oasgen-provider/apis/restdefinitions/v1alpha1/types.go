@@ -1320,17 +1320,20 @@ type Resource struct {
 	// reports non-existence; with none, the resource is marked Available after a single unverified
 	// invocation. Dissolves proxies whose only job is to chain create calls (e.g. create instance -> attach
 	// disk -> start).
+	// +kubebuilder:validation:XValidation:rule="!has(self.statusSchema)",message="statusSchema is read only from observeApiRef; remove it here, or move it to observeApiRef if this resource has a delegated observe"
 	// +optional
 	CreateApiRef *ApiRef `json:"createApiRef,omitempty"`
 	// DeleteApiRef, when set, delegates DELETE of this resource to a Snowplow RESTAction instead of the
 	// delete verb: on deletion the controller invokes the referenced RESTAction (the teardown sequence) and
 	// holds the finalizer until it succeeds. The RESTAction MUST be idempotent and tolerate an already-gone
 	// sub-resource.
+	// +kubebuilder:validation:XValidation:rule="!has(self.statusSchema)",message="statusSchema is read only from observeApiRef; remove it here, or move it to observeApiRef if this resource has a delegated observe"
 	// +optional
 	DeleteApiRef *ApiRef `json:"deleteApiRef,omitempty"`
 	// UpdateApiRef, when set, delegates UPDATE of this resource to a Snowplow RESTAction instead of the
 	// update verb: when Observe reports drift the controller invokes the referenced RESTAction (passing the
 	// whole spec — the desired state) to re-apply it. Like create, the RESTAction MUST be idempotent.
+	// +kubebuilder:validation:XValidation:rule="!has(self.statusSchema)",message="statusSchema is read only from observeApiRef; remove it here, or move it to observeApiRef if this resource has a delegated observe"
 	// +optional
 	UpdateApiRef *ApiRef `json:"updateApiRef,omitempty"`
 }
@@ -1381,6 +1384,10 @@ type ApiRef struct {
 	// instrument.
 	// +kubebuilder:validation:MaxProperties=64
 	// +optional
+	// READ ONLY FROM observeApiRef. This field exists on all four ApiRefs because they share this one Go
+	// type, but exactly one line reads it -- render/helper.go, from spec.resource.observeApiRef -- so a
+	// statusSchema on createApiRef, updateApiRef or deleteApiRef was accepted at admission and then
+	// silently ignored. Those three now REFUSE it at admission (issue 925); this one is the one that works.
 	StatusSchema map[string]StatusFieldType `json:"statusSchema,omitempty"`
 }
 
