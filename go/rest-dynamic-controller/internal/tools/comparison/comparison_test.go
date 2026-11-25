@@ -31,7 +31,7 @@ func TestComparisonResult_String(t *testing.T) {
 					SecondValue: "b",
 				},
 			},
-			expected: "ComparisonResult: IsEqual=false, Reason=values differ, FirstValue=a, SecondValue=b",
+			expected: `ComparisonResult: IsEqual=false, Reason=values differ, FirstValue="a" (string), SecondValue="b" (string)`,
 		},
 	}
 
