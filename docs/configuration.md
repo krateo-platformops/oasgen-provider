@@ -59,7 +59,19 @@ kubectl get restdefinitions.ogen.krateo.io -A   -o jsonpath='{range .items[*]}{.
 `BUILD_VERSION=${ref_name}-${sha}`, which the Dockerfiles pass to `-X main.Build`, so a 0.96.0 image
 records `0.96.0-<sha>`. Comparing against `0.96.0` matches nothing.
 
-Compare against the provider's own `SERVICE_VERSION` instead, which equals the stamp **because this
+**Derive the expected value from the release tag, not from the running provider.** A consumer fleet does
+this and it is the stronger check:
+
+```
+WANT="$TAG-$(git ls-remote <repo> "refs/tags/$TAG^{}" | cut -f1)"
+# then require it to match, before comparing:  ^[0-9.]+-[0-9a-f]{40}$
+```
+
+That regex doubles as the non-empty assertion below. Reading the expected value out of the pod instead
+asks the component under test what to expect of it, so a provider reporting the wrong version agrees
+with itself and the check passes.
+
+Comparing against the provider's own `SERVICE_VERSION` does work, and it equals the stamp **because this
 chart does not set that variable**: `main.go` copies the link-time value into `SERVICE_VERSION` only when
 the environment leaves it empty, so a deployment that sets it wins for `SERVICE_VERSION` while
 `status.generatorBuild` keeps the link-time value. The two then disagree, and a check comparing them
