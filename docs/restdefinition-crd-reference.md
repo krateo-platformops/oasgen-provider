@@ -296,6 +296,8 @@ a get/findby verb — OR an observeApiRef whose notFoundExpr reports non-existen
 reports non-existence; with none, the resource is marked Available after a single unverified
 invocation. Dissolves proxies whose only job is to chain create calls (e.g. create instance -> attach
 disk -> start).<br/>
+          <br/>
+            <i>Validations</i>:<li>!has(self.statusSchema): statusSchema is read only from observeApiRef; remove it here, or move it to observeApiRef if this resource has a delegated observe</li>
         </td>
         <td>false</td>
       </tr><tr>
@@ -306,6 +308,8 @@ disk -> start).<br/>
 delete verb: on deletion the controller invokes the referenced RESTAction (the teardown sequence) and
 holds the finalizer until it succeeds. The RESTAction MUST be idempotent and tolerate an already-gone
 sub-resource.<br/>
+          <br/>
+            <i>Validations</i>:<li>!has(self.statusSchema): statusSchema is read only from observeApiRef; remove it here, or move it to observeApiRef if this resource has a delegated observe</li>
         </td>
         <td>false</td>
       </tr><tr>
@@ -490,6 +494,8 @@ as effectively infinite and gets the whole CRD rejected.<br/>
           UpdateApiRef, when set, delegates UPDATE of this resource to a Snowplow RESTAction instead of the
 update verb: when Observe reports drift the controller invokes the referenced RESTAction (passing the
 whole spec — the desired state) to re-apply it. Like create, the RESTAction MUST be idempotent.<br/>
+          <br/>
+            <i>Validations</i>:<li>!has(self.statusSchema): statusSchema is read only from observeApiRef; remove it here, or move it to observeApiRef if this resource has a delegated observe</li>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -3155,7 +3161,11 @@ schema would be a second schema language in this CRD for a case nobody has.
 PURELY ADDITIVE. An observeApiRef without statusSchema falls through to the three existing sources,
 which is exactly today's behaviour -- so no existing RestDefinition's generated CRD changes shape,
 which matters for a consumer who fingerprints theirs and treats an unattributable diff as a spoiled
-instrument.<br/>
+instrument.
+READ ONLY FROM observeApiRef. This field exists on all four ApiRefs because they share this one Go
+type, but exactly one line reads it -- render/helper.go, from spec.resource.observeApiRef -- so a
+statusSchema on createApiRef, updateApiRef or deleteApiRef was accepted at admission and then
+silently ignored. Those three now REFUSE it at admission (issue 925); this one is the one that works.<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -3340,7 +3350,11 @@ schema would be a second schema language in this CRD for a case nobody has.
 PURELY ADDITIVE. An observeApiRef without statusSchema falls through to the three existing sources,
 which is exactly today's behaviour -- so no existing RestDefinition's generated CRD changes shape,
 which matters for a consumer who fingerprints theirs and treats an unattributable diff as a spoiled
-instrument.<br/>
+instrument.
+READ ONLY FROM observeApiRef. This field exists on all four ApiRefs because they share this one Go
+type, but exactly one line reads it -- render/helper.go, from spec.resource.observeApiRef -- so a
+statusSchema on createApiRef, updateApiRef or deleteApiRef was accepted at admission and then
+silently ignored. Those three now REFUSE it at admission (issue 925); this one is the one that works.<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -3886,7 +3900,11 @@ schema would be a second schema language in this CRD for a case nobody has.
 PURELY ADDITIVE. An observeApiRef without statusSchema falls through to the three existing sources,
 which is exactly today's behaviour -- so no existing RestDefinition's generated CRD changes shape,
 which matters for a consumer who fingerprints theirs and treats an unattributable diff as a spoiled
-instrument.<br/>
+instrument.
+READ ONLY FROM observeApiRef. This field exists on all four ApiRefs because they share this one Go
+type, but exactly one line reads it -- render/helper.go, from spec.resource.observeApiRef -- so a
+statusSchema on createApiRef, updateApiRef or deleteApiRef was accepted at admission and then
+silently ignored. Those three now REFUSE it at admission (issue 925); this one is the one that works.<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -4070,7 +4088,11 @@ schema would be a second schema language in this CRD for a case nobody has.
 PURELY ADDITIVE. An observeApiRef without statusSchema falls through to the three existing sources,
 which is exactly today's behaviour -- so no existing RestDefinition's generated CRD changes shape,
 which matters for a consumer who fingerprints theirs and treats an unattributable diff as a spoiled
-instrument.<br/>
+instrument.
+READ ONLY FROM observeApiRef. This field exists on all four ApiRefs because they share this one Go
+type, but exactly one line reads it -- render/helper.go, from spec.resource.observeApiRef -- so a
+statusSchema on createApiRef, updateApiRef or deleteApiRef was accepted at admission and then
+silently ignored. Those three now REFUSE it at admission (issue 925); this one is the one that works.<br/>
         </td>
         <td>false</td>
       </tr><tr>
