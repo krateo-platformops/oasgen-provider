@@ -26,7 +26,72 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-25 — 0.93.0
+
+**BOTH ITEMS CAME FROM CONSUMERS, AND ONE IS A FIX TO AN INSTRUMENT RATHER THAN TO BEHAVIOUR.** This
+release deliberately does NOT carry the provider-runtime v1.21.1 bump, which moves to 0.94.0: a
+consumer had held their 0.92.0 pin over a live defect, and the diagnostic below was worth shipping
+without waiting for the bump.
+
+- **The empty-remote guard respects leaves the author declared and listed** (#912). A resource whose
+  comparable leaves are ALL declared empty and ALL listed in `requirePresentFields` no longer drifts
+  forever when the vendor returns that object as `{}`. Measured: a single-key Keycloak registration
+  policy declaring `[]` against a vendor `{}` sent **3 updates per 420 s and never settled**, and `{}`
+  is that policy's own vendor default.
+
+  > `Note (2026-11-25)` — **the rule is the consumer's, and it is better than what we proposed.** We
+  > offered a new `emptyObjectSatisfiesFields` list; keycloak-provider-kog refuted the NEED for it
+  > rather than the table: `requirePresentFields` plus #911 already say, leaf by leaf, both that absence
+  > is meaningful and that a declared empty value is satisfied by it. The guard was answering for the
+  > whole object before the leaves were asked. Their decisive reason was the third of three: a separate
+  > list would have made the verdict depend on how many keys the vendor happened to return, which is
+  > the accident the guard already caused.
+  >
+  > **IT ACTS ON A PRESENT, EMPTY OBJECT ONLY** — never null, never absent. That is
+  > github-provider-kog's constraint and it is safety-critical for their vendor: GitHub KEEPS
+  > `dismissal_restrictions` set to empty lists and turns the restriction OFF with `{}`, so "nobody may
+  > dismiss" and "no restriction" are OPPOSITE settings. keycloak had asked for an absent object to be
+  > treated like `{}` — hedging it themselves as unmeasured — and that clause was DECLINED. **Two
+  > consumers wanted opposite behaviour, and the conflict was invisible until both were asked.**
+  >
+  > The exclusion turned out to be structural rather than something added: the absent-key branch and
+  > the `value == nil || rmValue == nil` branch both return before that recursion. **So declining the
+  > clause was the no-change option.** Tests pin it regardless, because a structural guarantee rots when
+  > branches are reordered.
+  >
+  > **Unchanged for every kind that lists nothing**, which is what keeps #660 closed: github measured
+  > `requirePresentFields` 0 of 32, with `compareScope` 29 of 32 as the control.
+
+- **A reported value now carries its Go type.** The drift log printed both sides with `%v`, so
+  `int64(90)`, `float64(90)` and the string `"90"` rendered **identically** — three different defects
+  with three different fixes behind one rendering. A consumer reported
+  `FirstValue=90, SecondValue=90.5` on a field that drifted every resync; the API server was serving
+  `90.5`, so the `90` came from inside the controller, and the log could not say which of the three
+  had happened.
+
+  > `Note (2026-11-25)` — **four candidate mechanisms were eliminated one at a time because of this.**
+  > The comparer's numeric normalisation (its guard is `f == math.Trunc(f)`, so a fraction returns
+  > unchanged — and it takes a *string*, so it is not even on that path); `GetFieldsFromUnstructured`
+  > (`NestedFieldNoCopy` plus a reflection copy); `projectSpecFields` (`DeepCopyJSONValue`, which
+  > preserves `float64`); and `GenericToString`, which **does** truncate with `int(i.(float64))` but is
+  > **dead code**, present only in its own definition and its own test. A local reproduction along the
+  > real path does not reproduce. **The defect in the instrument was found by using it**, and #927
+  > stays open with its mechanism unknown.
+  >
+  > A string is now quoted, which separates three further lookalike pairs: an empty value (the old
+  > format printed nothing at all after `FirstValue=`), a difference that is only leading or trailing
+  > space, and a numeric-looking string against the number it resembles.
+
 ## 2026-11-24 — 0.92.0
+
+> `Known issue (2026-11-25, issue 927)` — **the `number` widening made a non-converging state
+> reachable.** A fractional value is accepted at admission and then never converges: one update per
+> resync until the drift latch stops it after 5 consecutive checks, with `Ready` never true. Measured on
+> released 0.92.0 by azuredevops-provider-kog — `90.5` on `spec.settings.validDuration`, with `720` as
+> a passing control, and Azure DevOps itself round-trips `90.5` correctly. **On 0.91.1 that CR was
+> refused at admission with a legible error, so this is the worse of the two failure modes**, and that
+> consumer's user has held their 0.92.0 pin because of it. The widening itself is correct and stays —
+> the vendor document says `number`. **0.93.0 ships the diagnostic for this, not a fix.**
 
 **EVERY ITEM BELOW WAS FOUND, MEASURED OR CORRECTED BY A CONSUMER SESSION.** Two were defects in what an
 operator reads rather than in what the controller does, and both had been absorbed: one into a
