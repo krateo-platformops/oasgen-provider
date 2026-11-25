@@ -41,7 +41,17 @@ spec:
           image: {{ include "krateo.image" (dict "img" .Values.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
+          {{- /*
+            GATED, because a flag OVERRIDES its own default. main.go reads OASGEN_PROVIDER_DEBUG only
+            as the default of the -debug flag, so a bare arg here won unconditionally and the env var
+            was dead: values.yaml said "false", docs/configuration.md documented that value, and every
+            manager deployed from this chart ran at debug anyway (issue 931). The default below matches
+            values.yaml, so the chart obeys its own stated default; a consumer who wants debug logs
+            sets env.OASGEN_PROVIDER_DEBUG to the string "true".
+          */}}
+          {{- if eq (toString (dig "OASGEN_PROVIDER_DEBUG" "false" .Values.env)) "true" }}
           - --debug
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}

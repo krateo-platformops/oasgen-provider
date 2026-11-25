@@ -32,9 +32,15 @@ The pod template carries a `checksum/configmap` annotation over the provider Con
 **and** all three RDC template ConfigMaps, so any config or template change rolls the
 provider.
 
-Note: the chart's Deployment passes `--debug` on the container args unconditionally, so
-under the stock chart the provider runs with debug logging regardless of
-`env.OASGEN_PROVIDER_DEBUG`.
+Note: `env.OASGEN_PROVIDER_DEBUG` gates the container arg as well as reaching the provider as an
+environment variable. The chart adds `--debug` to `args` only when that value is the string `"true"`,
+because a command-line flag overrides its own default: until issue 931 the arg was passed
+unconditionally, so the env var was dead and this table documented a default the chart overrode.
+
+**Upgrade consequence:** every manager deployed from an earlier chart ran with debug logging whatever
+this value said. From the release carrying issue 931 it runs at the value, which defaults to `"false"`.
+Set `env.OASGEN_PROVIDER_DEBUG: "true"` to keep debug logs — and note it must be the quoted string, not
+a bare `true`, which the values schema rejects.
 
 ## Provider environment variables / flags
 
