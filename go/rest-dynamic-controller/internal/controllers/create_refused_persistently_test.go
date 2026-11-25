@@ -45,105 +45,97 @@ func crWithReady(t *testing.T, status metav1.ConditionStatus, stamp time.Time) *
 	return mg
 }
 
-func TestTheDeadlineIsMeasuredFromReadysTransition(t *testing.T) {
+// crWithRefusedSince builds the input the deadline is now measured from: the annotation, not a
+// condition. crWithReady is KEPT, because the arms that used it now assert the opposite property --
+// that the Ready condition no longer decides the interval -- which is exactly what issue 929 changed.
+func crWithRefusedSince(t *testing.T, stamp time.Time) *unstructured.Unstructured {
+	t.Helper()
+	mg := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	mg.SetAnnotations(map[string]string{annotationCreateRefusedSince: stamp.UTC().Format(time.RFC3339)})
+	require.Equal(t, stamp.UTC().Format(time.RFC3339), mg.GetAnnotations()[annotationCreateRefusedSince],
+		"the setup did not store the stamp, so the age below is not the age under test")
+	return mg
+}
+
+func TestTheDeadlineIsMeasuredFromTheRefusalStamp(t *testing.T) {
 	now := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 
 	t.Run("over the deadline reports, with the measured age", func(t *testing.T) {
-		mg := crWithReady(t, metav1.ConditionFalse, now.Add(-90*time.Minute))
+		mg := crWithRefusedSince(t, now.Add(-90*time.Minute))
 		age, over := createRefusedLongerThan(mg, time.Hour, now)
 		require.True(t, over, "90 minutes not-Ready is past a 1h deadline and must report")
 		require.Equal(t, 90*time.Minute, age, "the age returned is what the message quotes, so it must be the real one")
 	})
 
 	t.Run("under the deadline stays silent", func(t *testing.T) {
-		mg := crWithReady(t, metav1.ConditionFalse, now.Add(-59*time.Minute))
+		mg := crWithRefusedSince(t, now.Add(-59*time.Minute))
 		_, over := createRefusedLongerThan(mg, time.Hour, now)
 		require.False(t, over, "59 minutes must not report, or a transient refusal is announced as persistent")
 	})
 
 	t.Run("exactly at the deadline reports", func(t *testing.T) {
-		mg := crWithReady(t, metav1.ConditionFalse, now.Add(-time.Hour))
+		mg := crWithRefusedSince(t, now.Add(-time.Hour))
 		_, over := createRefusedLongerThan(mg, time.Hour, now)
 		require.True(t, over, "the boundary is inclusive; a >= that became > would delay by a whole resync")
 	})
 
 	t.Run("a Ready resource never reports however old", func(t *testing.T) {
-		mg := crWithReady(t, metav1.ConditionTrue, now.Add(-100*time.Hour))
+		// STRONGER THAN BEFORE: the resource now carries an overdue stamp AND Ready=True, so this
+		// arm fails unless the veto is actually consulted. Previously Ready was the anchor, so a
+		// Ready=True resource had no interval at all and the arm passed for the wrong reason.
+		mg := crWithRefusedSince(t, now.Add(-100*time.Hour))
+		require.NoError(t, unstructuredtools.SetConditions(mg, metav1.Condition{
+			Type: runtimecondition.TypeReady, Status: metav1.ConditionTrue, Reason: "Available", Message: "ok",
+		}))
 		_, over := createRefusedLongerThan(mg, time.Hour, now)
 		require.False(t, over, "a Ready=True resource is working; reporting a refusal on it would be a false alarm")
 	})
 
 	t.Run("an unparsable stamp is missing data, not year 0001", func(t *testing.T) {
-		// BUILT AS A RAW MAP, not via SetConditions with a zero time: that path marshals to
-		// `lastTransitionTime: null` and PANICS the runtime's GetConditions, which does an unchecked
-		// m["lastTransitionTime"].(string). Filed separately; this arm is about our own behaviour on a
-		// stamp that reaches us unusable, which is the shape a hand-edited or older CR takes.
-		mg := &unstructured.Unstructured{Object: map[string]interface{}{
-			"status": map[string]interface{}{
-				"conditions": []interface{}{
-					map[string]interface{}{
-						"type":               runtimecondition.TypeReady,
-						"status":             string(metav1.ConditionFalse),
-						"reason":             "Creating",
-						"message":            "creating",
-						"lastTransitionTime": "not-a-timestamp",
-					},
-				},
-			},
-		}}
+		// The annotation is operator-visible, so a hand-edited or truncated value is reachable. An
+		// unreadable stamp must mean "not yet", for the reason drift-repeats reads a corrupt count as
+		// 0: this is a brake, and a corrupt brake must fail open rather than wedge the reconcile.
+		mg := &unstructured.Unstructured{Object: map[string]interface{}{}}
+		mg.SetAnnotations(map[string]string{annotationCreateRefusedSince: "not-a-timestamp"})
 		_, over := createRefusedLongerThan(mg, time.Hour, now)
 		require.False(t, over,
-			"an unusable lastTransitionTime produced a report. A stamp that cannot be read is missing "+
-				"data, and treating it as an instant would report every such resource as overdue")
+			"an unusable stamp produced a report. A value that cannot be parsed is missing data, and "+
+				"treating it as an instant would report every such resource as overdue")
 	})
 
-	t.Run("a SERIALIZED zero stamp reaches the guard and must not report", func(t *testing.T) {
-		// THE TWO SHAPES WERE NOT INTERCHANGEABLE AT unstructured-runtime v1.30.0, and the version is
-		// the part this comment used to omit. Measured at v1.30.0:
-		//
-		//	"not-a-timestamp"        time.Parse errors -> GetConditions returned NIL for the WHOLE
-		//	                         list, so the condition never reached createRefusedLongerThan
-		//	"0001-01-01T00:00:00Z"   parses cleanly AND IsZero() is true -> it DID reach the guard
-		//
-		// CORRECTED AT v1.32.0, and measured by removing the guard rather than inferred from the
-		// release note: BOTH arms now fail without it. #115 made GetConditions parse entry by entry,
-		// so a stamp that is absent, null, not a string or not RFC3339 reads as the ZERO TIME on a
-		// KEPT condition instead of discarding the whole list. The guard therefore protects two shapes
-		// here, not one, and the distinction this comment drew has dissolved.
-		//
-		// Both arms are kept: they are now two routes to the same guard, and if a later version
-		// separates them again the pair still covers both.
-		mg := &unstructured.Unstructured{Object: map[string]interface{}{
-			"status": map[string]interface{}{
-				"conditions": []interface{}{
-					map[string]interface{}{
-						"type":               runtimecondition.TypeReady,
-						"status":             string(metav1.ConditionFalse),
-						"reason":             "Creating",
-						"message":            "creating",
-						"lastTransitionTime": "0001-01-01T00:00:00Z",
-					},
-				},
-			},
-		}}
-		// SETUP CONTROL: it really did reach us, rather than being dropped like the unparsable one.
-		require.Len(t, unstructuredtools.GetConditions(mg), 1,
-			"the serialized zero was dropped before the guard, so this arm tests nothing")
-
+	t.Run("an EMPTY stamp is absent, not the zero instant", func(t *testing.T) {
+		// Replaces the serialized-zero-lastTransitionTime arm, which has no analogue now: an RFC3339
+		// annotation has no zero value that parses. The reachable equivalent is an empty string, which
+		// an operator can produce by clearing the annotation's value rather than removing the key.
+		mg := &unstructured.Unstructured{Object: map[string]interface{}{}}
+		mg.SetAnnotations(map[string]string{annotationCreateRefusedSince: ""})
 		_, over := createRefusedLongerThan(mg, time.Hour, now)
 		require.False(t, over,
-			"a zero lastTransitionTime was treated as a real instant, so every resource carrying one "+
-				"would be reported as two thousand years overdue the moment it is observed")
+			"an empty stamp was treated as a real instant, so every resource carrying one would be "+
+				"reported as two thousand years overdue the moment it is observed")
 	})
 
-	t.Run("no Ready condition at all", func(t *testing.T) {
+	t.Run("no stamp at all", func(t *testing.T) {
 		mg := &unstructured.Unstructured{Object: map[string]interface{}{}}
 		_, over := createRefusedLongerThan(mg, time.Hour, now)
-		require.False(t, over, "nothing has been observed yet, so there is nothing to report")
+		require.False(t, over, "nothing has been refused yet, so there is nothing to report")
+	})
+
+	// THE REGRESSION ARM FOR ISSUE 929 ITSELF. An old Ready=False with no stamp must NOT report: that
+	// is precisely the substitution the old anchor made, and the one a transient observe error
+	// exploited by resetting the condition's lastTransitionTime. If this ever passes a report, the
+	// fallback has come back.
+	t.Run("an ANCIENT Ready=False with no stamp does not report", func(t *testing.T) {
+		mg := crWithReady(t, metav1.ConditionFalse, now.Add(-100*time.Hour))
+		_, over := createRefusedLongerThan(mg, time.Hour, now)
+		require.False(t, over,
+			"the Ready condition's stamp was used as a fallback anchor. That is issue 929: the runtime "+
+				"rewrites that timestamp on any observe error, so an interval measured from it is not "+
+				"the interval the create has been refused for")
 	})
 
 	t.Run("a zero deadline disables the report", func(t *testing.T) {
-		mg := crWithReady(t, metav1.ConditionFalse, now.Add(-100*time.Hour))
+		mg := crWithRefusedSince(t, now.Add(-100*time.Hour))
 		_, over := createRefusedLongerThan(mg, 0, now)
 		require.False(t, over,
 			"zero must DISABLE rather than mean 'immediately': the field defaults to zero in any handler "+
@@ -163,10 +155,19 @@ func TestTheDeadlineIsMeasuredFromReadysTransition(t *testing.T) {
 // the existing stamp when the STATUS is unchanged -- so writing this condition must NOT reset the clock
 // it just read. If it did, the deadline would re-arm every cycle: the report would fire once and then
 // never again, and the age in every later message would be wrong.
+// TestSettingTheConditionDoesNotMoveItsOwnAnchor is KEPT, and is now stronger rather than moot.
+//
+// Under the old anchor this guarded a real hazard: the gated condition was itself on Ready, so writing
+// it could have moved the lastTransitionTime it had just read, re-arming the deadline every cycle. The
+// annotation cannot be moved by a condition write at all, so the property is now true by construction
+// -- which is exactly why it is worth asserting. If anyone reintroduces a condition-derived anchor,
+// this is the test that notices, and it also now asserts the condition write leaves the ANNOTATION
+// alone, which is a second thing nothing else checks.
 func TestSettingTheConditionDoesNotMoveItsOwnAnchor(t *testing.T) {
 	now := time.Now()
 	original := now.Add(-2 * time.Hour)
-	mg := crWithReady(t, metav1.ConditionFalse, original)
+	mg := crWithRefusedSince(t, original)
+	stampBefore := mg.GetAnnotations()[annotationCreateRefusedSince]
 
 	age, over := createRefusedLongerThan(mg, time.Hour, now)
 	require.True(t, over, "setup: two hours must be over a one-hour deadline")
@@ -176,7 +177,7 @@ func TestSettingTheConditionDoesNotMoveItsOwnAnchor(t *testing.T) {
 	require.Len(t, conds, 1, "the condition must REPLACE the Ready condition, not add a second one")
 	require.Equal(t, customcondition.ReasonCreateRefusedPersistently, conds[0].Reason,
 		"the reason did not change, so the report is invisible to anyone reading the reason")
-	require.WithinDuration(t, original, conds[0].LastTransitionTime.Time, time.Second,
+	require.Equal(t, stampBefore, mg.GetAnnotations()[annotationCreateRefusedSince],
 		"writing the condition MOVED the anchor it reads. The deadline would re-arm every cycle, so the "+
 			"report fires once and never again, and every later age is measured from the wrong instant")
 
@@ -225,11 +226,23 @@ func TestBothCreatePathsReportTheRefusal(t *testing.T) {
 	// version of this arm counted `h.reportPersistentCreateRefusal(mg,` -- it asserted the helper was
 	// CALLED and passed for a year while the condition reached nothing, because the helper wrote onto
 	// the object the handler was handed and the runtime discards that by design.
-	reports := strings.Count(src, "Conditions: h.persistentCreateRefusalConditions(mg,")
+	// ONE STRING NOW PROVES BOTH HALVES, which is why the recorder exists (issue 929).
+	// recordAndReportCreateRefusal stamps the first refusal AND returns the condition, so counting it
+	// asserts that every classifying path does both. Counting them separately would allow a path that
+	// reported without stamping -- measuring an interval that never started -- or stamped without
+	// reporting, which is silent forever.
+	reports := strings.Count(src, "Conditions: h.recordAndReportCreateRefusal(ctx, mg,")
 	require.Equal(t, classifications, reports,
-		"a create path classifies a refusal and does NOT return the condition in CreateResult. "+
-			"Conditions written onto `mg` are discarded: the runtime re-fetches so that it owns the "+
-			"single status write, so only a RETURNED condition reaches the cluster")
+		"a create path classifies a refusal and does NOT go through recordAndReportCreateRefusal. "+
+			"Conditions written onto `mg` are discarded -- the runtime re-fetches so that it owns the "+
+			"single status write -- and a path that skips the recorder also never stamps, so its "+
+			"deadline is measured from an interval that never started")
+
+	// AND THE BARE REPORTER MUST NOT BE CALLED FROM A CREATE PATH. It is still used BY the recorder,
+	// so its existence is fine; a create path calling it directly would report without stamping.
+	require.NotContains(t, src, "Conditions: h.persistentCreateRefusalConditions(mg,",
+		"a create path calls the reporter directly, bypassing the stamp. It would report the first "+
+			"refusal it sees and then measure every later one from an interval that never started")
 
 	// AND THE OLD SHAPE MUST NOT COME BACK. An in-handler SetConditions on this path is the defect,
 	// not a style choice, so its absence is asserted rather than left to review.
@@ -250,7 +263,7 @@ func TestTheRefusalConditionIsRETURNEDNotWritten(t *testing.T) {
 	h := &handler{createRefusalReportAfter: time.Hour}
 
 	// Over the deadline: the condition must be RETURNED.
-	mg := crWithReady(t, metav1.ConditionFalse, now.Add(-2*time.Hour))
+	mg := crWithRefusedSince(t, now.Add(-2*time.Hour))
 	got := h.persistentCreateRefusalConditions(mg, 400, "bad request")
 	require.Len(t, got, 1, "nothing was returned, so the runtime has nothing to apply and the report "+
 		"does not arrive -- which is exactly the measured 0.85.2 behaviour")
@@ -269,7 +282,7 @@ func TestTheRefusalConditionIsRETURNEDNotWritten(t *testing.T) {
 
 	// SETUP CONTROL: under the deadline it returns nothing, so the assertion above is about the
 	// deadline and not about the function always returning one condition.
-	fresh := crWithReady(t, metav1.ConditionFalse, now.Add(-1*time.Minute))
+	fresh := crWithRefusedSince(t, now.Add(-1*time.Minute))
 	require.Empty(t, h.persistentCreateRefusalConditions(fresh, 400, "bad request"),
 		"a resource under the deadline returned a condition, so this arm cannot tell the deadline is "+
 			"doing anything")
