@@ -306,6 +306,31 @@ func declaredValueIsEmpty(value any) bool {
 
 // comparableKeyCount returns how many of mg's keys at this path the request could actually have
 // carried -- that is, all of them except resolver sources.
+// everyComparableKeyListedAndEmpty reports whether EVERY key of mg that the comparison would consider
+// at this path was both declared empty and listed in requirePresentFields.
+//
+// It iterates exactly the set comparableKeyCount counts -- the same isStrippedPath exclusion -- because
+// the two are read together in the guard's condition and a set that differed between them would make the
+// guard's answer depend on which function saw which keys.
+//
+// FALSE WHEN NOTHING IS LISTED, so a kind that uses no requirePresentFields is byte-identical to before:
+// the guard's behaviour is unchanged for every such kind, which is what keeps issue 660 closed.
+func (c *Comparer) everyComparableKeyListedAndEmpty(mg map[string]interface{}, path []string) bool {
+	if len(c.requiredPaths) == 0 || len(mg) == 0 {
+		return false
+	}
+	for key, v := range mg {
+		cp := childPath(path, key)
+		if c.isStrippedPath(cp) {
+			continue
+		}
+		if !c.isRequiredPath(cp) || !declaredValueIsEmpty(v) {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Comparer) comparableKeyCount(mg map[string]interface{}, path []string) int {
 	if len(c.strippedPaths) == 0 {
 		return len(mg)
@@ -442,7 +467,30 @@ func (c *Comparer) CompareExisting(mg map[string]interface{}, rm map[string]inte
 	// ordinary API fields, the request DID carry them, no key is discounted, and it stays drift. The two
 	// cases are the same shape with opposite correct answers, discriminated by exactly one thing:
 	// whether the request ever sent the key.
-	if c.comparableKeyCount(mg, path) > 0 && len(rm) == 0 {
+	// AND NOT WHEN EVERY COMPARABLE LEAF UNDER THIS OBJECT WAS DECLARED EMPTY AND LISTED AS
+	// REQUIRED-PRESENT (issue 912). That combination is the author saying, leaf by leaf, both that
+	// absence is meaningful here and that the declared value is empty -- and issue 911 already decided
+	// that for a listed leaf, absence satisfies a declared empty value. This guard answered for the
+	// whole object before the leaves were asked, so the SAME declaration agreed when the vendor
+	// returned a sibling and drifted when it returned none.
+	//
+	// THE RULE IS THE CONSUMER'S, NOT MINE. I proposed a new `emptyObjectSatisfiesFields` list and
+	// keycloak-provider-kog refuted the need for it: the information is already in
+	// requirePresentFields, and a second list would have to be kept in step with the first by hand,
+	// could disagree with it (agreeing on {} while drifting on {sibling}), and made the verdict depend
+	// on how many keys the vendor happened to return. This rule does not.
+	//
+	// IT ACTS ON A PRESENT, EMPTY OBJECT ONLY -- never on null, never on absent. That is
+	// github-provider-kog's constraint and it is safety-critical for their vendor: GitHub KEEPS
+	// dismissal_restrictions set to empty lists and turns it OFF with {}, so "nobody may dismiss" (empty
+	// lists) and "no restriction" (absent or null) are OPPOSITE settings. Treating a null parent as
+	// satisfied by empty declared leaves would read a branch where anybody may dismiss as converged.
+	//
+	// The exclusion is STRUCTURAL rather than added here: the absent-key branch returns before this
+	// recursion, and so does the `value == nil || rmValue == nil` branch, so a remote reaching this
+	// function is a present, non-nil map. Structural guarantees rot when branches are reordered, so
+	// TestEmptyRemoteRespectsListedLeaves's null and absent arms pins it rather than trusting the layout.
+	if c.comparableKeyCount(mg, path) > 0 && len(rm) == 0 && !c.everyComparableKeyListedAndEmpty(mg, path) {
 		return ComparisonResult{
 			IsEqual: false,
 			Reason: &Reason{
