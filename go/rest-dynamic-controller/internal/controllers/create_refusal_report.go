@@ -1,12 +1,14 @@
 package restResources
 
 import (
+	"context"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	customcondition "github.com/krateo-platformops/rest-dynamic-controller/internal/controllers/condition"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 )
 
 // persistentCreateRefusalConditions RETURNS the announce-only condition when a refused create has gone
@@ -20,6 +22,30 @@ import (
 // IT NEVER CHANGES THE CREATE OUTCOME. The caller goes on to return controller.CreateNotCommitted exactly as
 // before; this only writes a condition. See customcondition.CreateRefusedPersistently for why
 // suppressing the retry here would reintroduce issue 818's undeletable CR.
+// recordAndReportCreateRefusal stamps the first refusal and returns the condition, in one call.
+//
+// ONE FUNCTION BECAUSE THE WRITE AND THE REPORT MUST NOT DIVERGE. The comment below already records
+// that the two create paths disagreed once about the same status code, and that one reporter is why
+// they cannot again. The same argument applies with more force to the stamp: a site that reported the
+// condition without recording the stamp would measure an interval that never started, and a site that
+// recorded without reporting would be silent forever. Callers get both or neither.
+//
+// A FAILED STAMP IS LOGGED, NOT RETURNED. The condition still matters -- it is the operator's only
+// signal -- and the stamp retries on the next refusal because it is written only when absent. Failing
+// the create here to protect bookkeeping would be the wrong trade.
+func (h *handler) recordAndReportCreateRefusal(ctx context.Context, mg *unstructured.Unstructured, code int, detail string, log logging.Logger) []metav1.Condition {
+	if mg.GetAnnotations()[annotationCreateRefusedSince] == "" {
+		if err := h.patchAnnotations(ctx, mg, map[string]interface{}{
+			annotationCreateRefusedSince: time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			// Deliberately not fatal: see the note above.
+			log.Debug("Could not stamp the first create refusal; the report will measure from the next one",
+				"error", err)
+		}
+	}
+	return h.persistentCreateRefusalConditions(mg, code, detail)
+}
+
 func (h *handler) persistentCreateRefusalConditions(mg *unstructured.Unstructured, code int, detail string) []metav1.Condition {
 	age, over := createRefusedLongerThan(mg, h.createRefusalReportAfter, time.Now())
 	if !over {
