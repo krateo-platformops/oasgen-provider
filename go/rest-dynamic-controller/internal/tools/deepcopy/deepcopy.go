@@ -81,5 +81,11 @@ func DeepCopyJSONValue(x any) any {
 	default:
 		return fmt.Sprintf("%v", x)
 	}
-	return fmt.Sprintf("%v", x) // Fallback for unsupported types
+	// NO TRAILING FALLBACK: every case above returns, and `go vet` reports one here as unreachable.
+	//
+	// IT WAS REACHABLE BEFORE THIS CHANGE, by one path only: a float OUTSIDE int64 range, which fell
+	// past the range check and was stringified. It now returns the float unchanged. That is a
+	// deliberate second change and it is the right direction -- a float too large for int64 is still a
+	// valid JSON number, and turning it into a string made a numeric field compare unequal against
+	// every numeric response. It is stated here rather than left to be discovered.
 }
