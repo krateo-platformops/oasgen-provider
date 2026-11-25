@@ -593,7 +593,18 @@ func TestPopulateStatusFields(t *testing.T) {
 			wantErr: false,
 			expected: map[string]interface{}{
 				"status": map[string]interface{}{
-					"count":  int64(42),
+					// FLIPPED for issue 927: this arm pinned the truncation at the STATUS site. A vendor
+					// value of 42.5 was stored as 42, losing what the vendor actually reported.
+					// Status schemas keep `number` since issue 922 removed the narrowing, so 42.5
+					// is admissible now.
+					//
+					// THE ONE CASE THIS CHANGES FOR THE WORSE, stated rather than hidden: if a
+					// vendor returns a fraction for a field its OWN OAS declares as integer, the
+					// generated status field is `integer` and the apiserver REFUSES 42.5, surfacing
+					// as a status-update error instead of a silent rounding. That is a vendor
+					// contract violation becoming visible, which is the direction I want, but it is
+					// a change.
+					"count":  42.5,
 					"active": true,
 				},
 			},

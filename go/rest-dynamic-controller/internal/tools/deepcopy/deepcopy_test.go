@@ -36,14 +36,18 @@ func TestDeepCopyJSONValue(t *testing.T) {
 			want:  true,
 		},
 		{
-			name:  "primitive float32",
+			// FLIPPED for issue 927: this arm pinned the defect. The unguarded conversion coerced
+			// EVERY float in int64 range, so a fraction was silently truncated -- 3.14 to 3, and
+			// 0.1 to 0. A whole float still becomes int64; see the float arms below.
+			name:  "primitive float32 fraction is preserved",
 			input: float32(3.14),
-			want:  int64(3),
+			want:  float64(float32(3.14)),
 		},
 		{
-			name:  "primitive float64",
+			// FLIPPED for issue 927, same reason as the float32 arm above.
+			name:  "primitive float64 fraction is preserved",
 			input: 3.14,
-			want:  int64(3),
+			want:  3.14,
 		},
 		{
 			name:  "nil",
