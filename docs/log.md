@@ -26,6 +26,54 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-25 — 0.96.0
+
+**BOTH ITEMS CHANGE SOMETHING A CONSUMER MAY ASSERT ON, and both consequences are stated here rather
+than left to be met.** The 0.95.0 section had to be amended for exactly that omission — a supersession
+moved a fault onto `Synced` and the note did not say so, which a consumer's question surfaced rather
+than the note.
+
+- **`statusSchema` is REFUSED at admission on the three write ApiRefs** (#925). It is declared on all
+  four because they share one Go type, but exactly one line reads it — `render/helper.go`, from
+  `observeApiRef` — so a `statusSchema` on `createApiRef`, `updateApiRef` or `deleteApiRef` was
+  accepted and then silently ignored. A CEL rule on each of the three now rejects it.
+
+  > `Note (2026-11-25)` — **A RESTDEFINITION THAT APPLIED YESTERDAY CAN FAIL TO APPLY TODAY**, and the
+  > remedy is to move the field to `observeApiRef`, the only ref that reads it. **Measured free at the
+  > time:** three fleets at zero non-observe uses, each with its own positive control — a real
+  > `observeApiRef` value as one fleet's control, a PLANTED `createApiRef.statusSchema` counted 1 of 1
+  > as another's — and a live cluster carrying all fleets' installed RestDefinitions at 0 of 34, with
+  > `verbsDescription` 34 of 34 as that read's control. **A consumer who added one between that census
+  > and this release would meet the refusal.**
+  >
+  > **Refusal rather than a warning, because it only gets more expensive:** once any fleet sets one,
+  > adding this becomes a breaking change rather than a free one. The CEL rule ledger moved 77/36 to
+  > 80/39.
+
+- **The persistent-refusal clock anchors on an annotation, not on `Ready`'s timestamp** (#929). One
+  transient observe error used to reset it, buying another full reporting period of silence on a
+  create being refused permanently — `handleObserve` writes `Ready=Unknown/ObserveFailed` on ANY
+  observe error, and False to Unknown to False is two transitions. Measured by a consumer on released
+  0.91.1 **and** 0.93.0: twice from unprovoked ADO 503s, once from a deliberate 400.
+
+  > `Note (2026-11-25)` — **ON UPGRADE, A RESOURCE ALREADY REFUSED FOR HOURS RESTARTS ITS PERIOD
+  > ONCE.** Absent means "not yet", with no fallback to the condition, because a fallback would
+  > reintroduce the defect for exactly the resources carrying the annotation. **That delays a true
+  > report by one period; it never suppresses one and never reports early.** An operator watching a
+  > known-bad create will see the report arrive later than the previous build would have given it.
+  >
+  > **The argument for an annotation is an observation, not symmetry.** Across one of those 503s the
+  > `drift-repeats` counter read 4 before and reached 5 at the next resync, latching on schedule, while
+  > `Ready`'s stamp reset — two mechanisms counting the same kind of thing through one interruption,
+  > with opposite outcomes. **The counter that survives is the one whose state the runtime does not
+  > write.**
+  >
+  > **The original analysis was careful and checked the right thing for the wrong scope**: it verified
+  > that a refused create stays `Ready=False` and that setting the gated condition does not change the
+  > status — both true, both about writes this component makes. It also already ruled out the two
+  > runtime stamps that look right, because both move each cycle. **A `Ready=True` veto is kept**, and
+  > the pre-existing test is what caught that the first attempt had dropped it.
+
 ## 2026-11-25 — 0.95.0
 
 **ONE DEPENDENCY BUMP, CARRYING ONE USER-VISIBLE BEHAVIOUR CHANGE.** Deliberately alone: the change
