@@ -56,6 +56,24 @@ reading "0.95.0 was a dep bump" knows where to look for a moved behaviour.
   > rather than deleted: the right reading is that the assertion did its job, by making a dependency's
   > semantic change loud instead of letting it shift under a 13-minor bump.
 
+  > `Note (2026-11-25)` — **THE SUPERSESSION MOVES THE FAULT TO A DIFFERENT CONDITION TYPE, which the
+  > item above does not say.** A consumer asked whether removing the check changes any condition beyond
+  > `ManagementPolicyValid` disappearing. It does:
+  >
+  > | | before 0.95.0 | from 0.95.0 |
+  > |---|---|---|
+  > | an unrecognised `krateo.io/management-policy` | `ManagementPolicyValid=False` / `ManagementPolicyInvalid`, with `Synced` unaffected | `Synced=False` / `ManagementPolicyInvalid` |
+  >
+  > The deleted file reported on a **dedicated** type, and its own comment said that type was
+  > deliberately not `Synced`. provider-runtime reports the same fault on `Synced` instead
+  > (`apis/common/v1/condition.go:341`, `pkg/reconciler/policyreport.go:27` and `:50`). **So anything
+  > asserting on a RestDefinition's `Synced` sees a polarity change under a condition it may never
+  > meet** — and it is only reachable by a RestDefinition that actually carries an unrecognised value.
+  >
+  > **This was known and recorded on #916 before the release and did not reach this section.** It
+  > surfaced because a consumer asked rather than because the note was written, which is the gap worth
+  > recording alongside the fact.
+
   > `Note (2026-11-25)` — **this bump missed 0.93.0 and 0.94.0 for a reason that was not real.** Its PR
   > went uncreated because a permission classifier had refused it twice and I carried that as a
   > standing constraint, quoting it as a blocker. Six PRs were created from the same session the same
