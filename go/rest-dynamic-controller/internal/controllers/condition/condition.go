@@ -447,11 +447,28 @@ const ReasonNoCreateVerbDeclared string = "NoCreateVerbDeclared"
 // Not Ready-only, and not an error either: an error return would take the runtime's error path, which
 // is what used to overwrite the reason, and would also reintroduce a rate-limited retry of something
 // no retry can change.
-func NoCreateVerbDeclaredConditions() []metav1.Condition {
-	const msg = "the runtime asked for this resource to be created, but its definition declares no " +
+// findByDeclared SELECTS THE SECOND SENTENCE, and the parameter exists because the first sentence
+// alone is read as a diagnosis. An adopt-only Kind -- findby, get and update, no create, by design --
+// is a supported shape, and issue 920 measured it reporting a message that named only what was
+// MISSING. The code cannot tell that shape apart from an author who forgot a create verb, so neither
+// message guesses: each states what will HAPPEN next for the definition it was given, and each still
+// names the remedy for the other reading.
+//
+// The reason string is NOT varied with it. core-provider's rollup classifies children by reason, so a
+// second reason here would need a matching classification there; that is what refuted renaming this
+// one to WaitingForExternalResource (920's first proposal, withdrawn).
+func NoCreateVerbDeclaredConditions(findByDeclared bool) []metav1.Condition {
+	const prefix = "the runtime asked for this resource to be created, but its definition declares no " +
 		"create action: no create verb, no dispatch verb and no createApiRef. Nothing will be " +
-		"created for it. If the vendor exposes a creation endpoint, declare it in " +
-		"spec.resource.verbsDescription; if it does not, this Kind can only observe"
+		"created for it"
+	msg := prefix + ", and it declares no findby, so nothing can adopt an existing one either. If " +
+		"the vendor exposes a creation endpoint, declare it in spec.resource.verbsDescription; if it " +
+		"does not, this Kind can only observe"
+	if findByDeclared {
+		msg = prefix + ". It declares a findby, so it becomes Ready if and when that findby matches " +
+			"an existing external resource. If instead this Kind should create its own, declare a " +
+			"create endpoint in spec.resource.verbsDescription"
+	}
 	now := metav1.Now()
 	return []metav1.Condition{
 		{

@@ -1788,10 +1788,21 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 		// createNotRequested rather than by an error.
 		log.Info("Cannot create: the definition declares no create action; nothing will be created",
 			"action", apiaction.Create, "kind", mg.GetKind(), "name", mg.GetName())
+		// The findby declaration selects the message's second sentence (#920). It is read from the
+		// definition's own verbs rather than inferred, because an adopt-only Kind and a Kind whose
+		// author forgot its create verb are indistinguishable here -- so neither is diagnosed, and
+		// each is told what will happen to IT.
+		findByDeclared := false
+		for _, verb := range clientInfo.Resource.VerbsDescription {
+			if strings.EqualFold(verb.Action, string(apiaction.FindBy)) {
+				findByDeclared = true
+				break
+			}
+		}
 		return controller.CreateResult{
 			Requested:  false,
 			Reason:     customcondition.ReasonNoCreateVerbDeclared,
-			Conditions: customcondition.NoCreateVerbDeclaredConditions(),
+			Conditions: customcondition.NoCreateVerbDeclaredConditions(findByDeclared),
 		}, nil
 	}
 
