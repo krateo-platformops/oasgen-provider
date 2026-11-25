@@ -26,6 +26,75 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-25 — 0.97.0
+
+Two changes, and **the consumer-visible one is a reduction in what gets logged**, so it is stated first
+and with its remedy.
+
+### The chart's `--debug` is gated, so `OASGEN_PROVIDER_DEBUG` is live (#931)
+
+A command-line flag overrides its own default. `main.go` reads `OASGEN_PROVIDER_DEBUG` only as the
+*default* of the `-debug` flag, so the chart's bare `- --debug` won unconditionally: **the env var was
+dead, `values.yaml` said `"false"`, `docs/configuration.md` documented that value, and every manager
+deployed from this chart ran at debug anyway.**
+
+```
+A MANAGER UPGRADED TO THIS CHART STOPS LOGGING AT DEBUG.
+remedy:  env.OASGEN_PROVIDER_DEBUG: "true"   -- the QUOTED string; a bare true is a
+         YAML boolean and the values schema rejects it
+```
+
+The gate's default matches `values.yaml`, so the chart now obeys its own stated default rather than
+contradicting it. Measured on a rendered chart against an unmodified baseline reading 1: `unset` → 0,
+`"false"` → 0, `"true"` → 1, with an impossible arg at 0.
+
+**Three instrument failures preceded that first reading**, each producing a believable zero: the chart's
+version is the `CHART_VERSION` placeholder so helm refused to render; then a `kubeVersion` floor of
+1.36.0; then `--set env.X=false` making a boolean the schema rejects — which `values.yaml` itself warns
+about, *"a boolean that got through here would fail later and further away"*.
+
+**Two consumer fleets were grepping the manager log to tell a regeneration had completed**, for
+`Applying CRD` and `Updated RestDefinition`, both `Debug`. So this change would have removed a signal
+they depend on. **The docs now say what to read instead:** `status.generatorBuild`, per RestDefinition,
+permanent, no log level involved — and they state the three things a check on it needs, because the
+first version of that note was wrong in two ways a reader would have acted on:
+
+- **the stamp is `<tag>-<sha>`, not the release tag** — both workflows build with
+  `BUILD_VERSION=${ref_name}-${sha}`, so a 0.97.0 image records `0.97.0-<sha>` and comparing against
+  `0.97.0` matches nothing
+- **derive the expected value from the tag, not from the pod.** Comparing against the provider's own
+  `SERVICE_VERSION` works, and asks the component under test what to expect of it. A consumer fleet
+  derives it from the tag's peeled commit with a `^[0-9.]+-[0-9a-f]{40}$` gate; that is the stronger
+  check and the docs now lead with it
+- **`SERVICE_VERSION` equals the stamp only because this chart leaves it unset**, and
+  `OASGEN_PROVIDER_REGENERATE_ON_UPGRADE=false` legitimately keeps the stamp at the older build
+
+### The no-create message states what happens to THIS kind (#920)
+
+An adopt-only kind — findby, get and update, no create, **by design** — reported a message naming only
+what was ABSENT. The behaviour was right: when the object appears it adopts and goes Ready. **The
+message diagnosed an authoring error for a supported shape.**
+
+The code cannot tell that apart from an author who forgot a create verb, so neither message guesses.
+`findByDeclared` is read from the definition's own verbs:
+
+```
+findby declared   "...It declares a findby, so it becomes Ready if and when that findby
+                   matches an existing external resource. If instead this Kind should
+                   create its own, declare a create endpoint in verbsDescription"
+no findby         "...and it declares no findby, so nothing can adopt an existing one
+                   either. If the vendor exposes a creation endpoint, declare it..."
+```
+
+**The reason string is NOT varied.** core-provider's rollup classifies children by reason, so a second
+reason would need a matching classification there — which is what refuted renaming it to
+`WaitingForExternalResource`, a proposal made and withdrawn on the issue.
+
+**Scope, measured rather than assumed:** the wording this appeared to be missing was already shipped at
+every tag from 0.90.0 (`"Nothing will be created for it"`, `"this Kind can only observe"`, 1 of 1 at all
+eight tags). The issue quoted only the message's first sentence. What was genuinely absent is `findby`,
+0 at all eight tags, and that is the only thing this adds.
+
 ## 2026-11-25 — 0.96.0
 
 **BOTH ITEMS CHANGE SOMETHING A CONSUMER MAY ASSERT ON, and both consequences are stated here rather
