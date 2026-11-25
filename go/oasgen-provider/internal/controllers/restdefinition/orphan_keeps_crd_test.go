@@ -53,16 +53,31 @@ func TestOrphanDecidesTheCRDUninstall(t *testing.T) {
 			wantSkipCRDOnly: true,
 		},
 		{
-			// NOT OUR PRECEDENCE, and asserted so a future reader does not "fix" it. ShouldDelete
-			// returns true for observe-delete regardless of deletion-policy; that is the library's
-			// semantics, and matching it is why this calls ShouldDelete instead of reading the
-			// annotation itself.
-			name: "management-policy: observe-delete overrides orphan, by the library's rule",
+			// FLIPPED BY THE v1.21.1 BUMP, and the library changed rather than this test being wrong.
+			// It previously said: "ShouldDelete returns true for observe-delete regardless of
+			// deletion-policy; that is the library's semantics" -- asserted so a future reader would
+			// not 'fix' it. provider-runtime then fixed it upstream. Its own doc at v1.21.1:
+			//
+			//	ShouldDelete reports whether the external resource is deleted with o: the
+			//	policy allows delete, and the deletion policy keeps nothing.
+			//	krateo.io/deletion-policy: orphan always wins (D5), and a deletion policy
+			//	that is neither delete nor orphan keeps the resource too.
+			//
+			// At v1.8.2 ShouldDelete read both annotations and let observe-delete override orphan, so
+			// an operator who asked for orphan got the resource deleted anyway. At v1.21.1 it is
+			// ManagementDecision(o).May(Delete), where May folds in the deletion policy -- note that
+			// Policy.Allows does NOT, which is why IsActionAllowed is deprecated for exactly this
+			// discrepancy.
+			//
+			// SO THE CRD NOW SURVIVES where it was previously removed, which is what the annotation
+			// asked for. This case is kept rather than deleted because it is the one that detected
+			// the change, and it is still not OUR precedence -- it is the library's, now correct.
+			name: "management-policy: orphan beats observe-delete, by the library's rule since v1.21.1",
 			annotations: map[string]string{
 				meta.AnnotationKeyDeletionPolicy:   meta.DeletionPolicyOrphan,
 				meta.AnnotationKeyManagementPolicy: meta.ManagementPolicyObserveDelete,
 			},
-			wantSkipCRDOnly: false,
+			wantSkipCRDOnly: true,
 		},
 		{
 			name: "an unrecognised deletion-policy is NOT treated as delete",

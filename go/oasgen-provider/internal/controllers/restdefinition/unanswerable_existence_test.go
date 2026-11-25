@@ -165,7 +165,7 @@ func TestTheConditionNamesTheKindTheParamAndTheWayOut(t *testing.T) {
 
 	if c.Type == rtv1.TypeSynced {
 		t.Fatalf("the condition is on TypeSynced, which provider-runtime v1.8.2 overwrites after " +
-			"Observe in the same pass -- see TypeManagementPolicyValid for the measurement")
+			"Observe in the same pass -- see TypeExistenceAnswerable for the measurement")
 	}
 	if c.Type != TypeExistenceAnswerable {
 		t.Errorf("type = %q, want %q", c.Type, TypeExistenceAnswerable)

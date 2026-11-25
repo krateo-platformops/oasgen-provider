@@ -414,22 +414,16 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 	defer span.End()
 	defer func() { oteltelemetry.RecordError(span, err) }()
 
-	// AN UNRECOGNISED MANAGEMENT POLICY IS REPORTED, not just obeyed.
+	// AN UNRECOGNISED MANAGEMENT POLICY IS NOW REPORTED BY THE RUNTIME, so this controller no longer
+	// does it. provider-runtime v1.21.0's shared management policy writes
+	// Synced=False/ManagementPolicyInvalid itself (apis/common/v1/condition.go, applied at
+	// pkg/reconciler/policyreport.go:50 and pinned by a ~120-row table), which is what the deleted
+	// management_policy_invalid.go said to wait for.
 	//
-	// meta.IsActionAllowed returns FALSE for create, update AND delete when the annotation holds a
-	// value no policy knows -- a misspelling, or a verb set an older provider-runtime cannot parse.
-	// The three call sites below then log at Debug and `return nil`, which reads as SUCCESS to every
-	// layer above, so the RestDefinition reports healthy while managing nothing. The log line they
-	// emit is word for word the line a DELIBERATE `observe` policy produces, so nothing in the
-	// object distinguishes "the operator asked me not to act" from "the operator misspelled
-	// default".
-	//
-	// Set here rather than at those three sites because Observe runs on every pass, while Create
-	// runs only when the resource is absent: a RestDefinition that already exists would otherwise
-	// never report the fault at all.
-	if bad, unrecognised := managementPolicyIsUnrecognised(cr); unrecognised {
-		cr.SetConditions(managementPolicyInvalidCondition(bad))
-	}
+	// THE LOCAL DETECTOR WAS NOT MERELY REDUNDANT BY v1.21.1, IT WAS WRONG. Its own test caught that
+	// before this bump landed: the runtime now accepts a PADDED value (" default ") and a
+	// comma-separated set ("observe,create"), both of which the local check reported as unrecognised.
+	// Keeping it would have flagged valid policies as faults.
 
 	// AND WARN IF THIS RESOURCE'S EXISTENCE CAN NEVER BE READ.
 	//
@@ -468,10 +462,12 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (obs reconc
 		// successful Observe sets Ready.
 		//
 		// Set BEFORE the two error returns below, though at the pinned version that no longer changes what
-		// they report: v1.8.2's markNotObserved answers a resource carrying a deletion timestamp with
-		// Deleting rather than NotObserved, whatever the condition on the object says. On v1.8.0 and v1.8.1
-		// it checked only the condition, so setting it first was the one thing standing between a failed
-		// uninstall and a Ready that read "we could not tell" about an object whose fate is not in doubt.
+		// they report: from v1.8.2 markNotObserved answers a resource carrying a deletion timestamp with
+		// Deleting rather than NotObserved, whatever the condition on the object says, and v1.21.1 still
+		// does -- its owners state it as "Ready becomes NotObserved, unless it is Deleting or you wrap the
+		// error with ReadyAssessed". On v1.8.0 and v1.8.1 it checked only the condition, so setting it
+		// first was the one thing standing between a failed uninstall and a Ready that read "we could not
+		// tell" about an object whose fate is not in doubt.
 		//
 		// Kept, not because the runtime needs it, but because Observe should state what it knows: that this
 		// RestDefinition is being deleted is the provider's own answer, not something a caller should have

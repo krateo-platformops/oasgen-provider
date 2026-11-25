@@ -114,8 +114,9 @@ func TestObserveSetsReadyOnEverySuccessPath(t *testing.T) {
 // What this pins is OBSERVE's own answer, which is why it survives the runtime change underneath it.
 // Read from each version's markNotObserved: on v1.8.0 and v1.8.1 the exemption keyed on the condition
 // already present, so the write below was the only thing keeping a failed uninstall from reporting
-// NotObserved; v1.8.2 keys on meta.WasDeleted as well and so answers Deleting on its own. The write is
-// therefore no longer required at the pinned version, and this test is no longer a test of the exemption.
+// NotObserved; from v1.8.2 it keys on meta.WasDeleted as well and so answers Deleting on its own, and
+// v1.21.1 still exempts Deleting (confirmed by its owners). The write is therefore not required at the
+// pinned version, and this test is no longer a test of the exemption.
 // It is a test that Observe reports a deletion as a deletion without the runtime having to infer it --
 // which is what makes the provider's answer readable on its own, and what would still be true if the pin
 // moved back.
