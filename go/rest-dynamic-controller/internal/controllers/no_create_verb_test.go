@@ -110,11 +110,23 @@ func TestTheMissingCreateActionBranchRequestsNothingAndReportsWhy(t *testing.T) 
 			"reads the nil error as a successful create, stamps external-create-succeeded, and emits "+
 			"the Normal CreatedExternalResource event for a resource that does not exist (#624, #657)")
 
-	assert.Contains(t, branch, "NoCreateVerbDeclaredConditions()",
+	// The ARGUMENT is part of the assertion, not just the call. A bare
+	// NoCreateVerbDeclaredConditions(...) would compile with any bool, including a literal false that
+	// silently tells every adopt-only Kind it declares no findby (#920). go vet cannot see this
+	// assertion at all -- it reads the file as text -- so it names the value it expects.
+	assert.Contains(t, branch, "NoCreateVerbDeclaredConditions(findByDeclared)",
 		"the branch no longer returns the conditions. The runtime keeps a handler's conditions on this "+
 			"path, so this is the only thing that puts a specific reason on the CR -- and without it "+
 			"the resource settles at Ready=False/Creating, which core-provider's rollup classifies as "+
 			"converging forever (#660)")
+
+	assert.Contains(t, branch, "apiaction.FindBy",
+		"the branch no longer reads the definition's findby verb, so findByDeclared cannot reflect the "+
+			"definition it was given. A hardcoded value makes the message wrong for one of the two "+
+			"shapes (#920)")
+	assert.NotContains(t, branch, "NoCreateVerbDeclaredConditions(false)",
+		"control: a hardcoded false would pass the Contains above if it were loosened, and would tell "+
+			"an adopt-only Kind it declares no findby")
 
 	// A BARE `return nil` WOULD BE THE OLD DEFECT. Requested defaults to false on a zero value, so the
 	// dangerous shape is not `return nil` any more -- it is returning a result that claims Requested.
@@ -152,7 +164,7 @@ func TestTheRevivedConditionCarriesBothHalves(t *testing.T) {
 	require.Contains(t, src, "ReasonCreateUnreachable",
 		"control: the sibling reason must still be here, or this file is not the one being checked")
 
-	conds := customcondition.NoCreateVerbDeclaredConditions()
+	conds := customcondition.NoCreateVerbDeclaredConditions(false)
 	require.Len(t, conds, 2,
 		"a refusal must carry BOTH halves. The runtime stamps Synced=ReconcileSuccess when a handler "+
 			"returns no TypeSynced -- correct for a WAIT, and wrong for a REFUSAL, where it would report "+
@@ -232,4 +244,62 @@ func TestCollapseSpacesActuallyCollapses(t *testing.T) {
 		assert.Contains(t, collapseSpaces(form), "Requested: true",
 			"a gofmt form of Requested:true did not normalise to the single-space needle")
 	}
+}
+
+// TestTheMessageStatesWhatHappensToTHISKind pins the #920 split. The reporter's adopt-only Kind --
+// findby, get and update, no create, by design -- read a message naming only what was MISSING, which
+// diagnoses an authoring error for a supported shape. The code cannot tell that apart from a forgotten
+// create verb, so neither message guesses: each states the consequence for the definition it was
+// given, and each still names the remedy for the other reading.
+//
+// Both arms assert what the message must NOT say, because the failure that shipped was a true sentence
+// addressed to the wrong Kind, not a false one.
+func TestTheMessageStatesWhatHappensToTHISKind(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		findByDeclared   bool
+		mustSay, mustNot []string
+	}{
+		{
+			name:           "an adopt-only Kind is told it will adopt, not that it declares no findby",
+			findByDeclared: true,
+			mustSay:        []string{"declares a findby", "becomes Ready if and when that findby matches"},
+			mustNot:        []string{"declares no findby", "can only observe"},
+		},
+		{
+			name:           "a Kind with neither create nor findby is told nothing can adopt one either",
+			findByDeclared: false,
+			mustSay:        []string{"declares no findby", "nothing can adopt an existing one either"},
+			mustNot:        []string{"becomes Ready if and when"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conds := customcondition.NoCreateVerbDeclaredConditions(tc.findByDeclared)
+			require.Len(t, conds, 2, "a refusal still carries both halves whichever message it uses")
+			for _, c := range conds {
+				assert.Equal(t, customcondition.ReasonNoCreateVerbDeclared, c.Reason,
+					"the REASON must not vary with the message: core-provider's rollup classifies on the "+
+						"exact string, which is why renaming it was withdrawn (#920)")
+				for _, w := range tc.mustSay {
+					assert.Contains(t, c.Message, w, "%s message must say %q", c.Type, w)
+				}
+				for _, w := range tc.mustNot {
+					assert.NotContains(t, c.Message, w,
+						"%s message says %q, which is addressed to the OTHER shape -- the #920 defect was a "+
+							"true sentence sent to the wrong Kind", c.Type, w)
+				}
+				// The cause survives in both: it is still the only place an operator reads it.
+				for _, w := range []string{"no create verb", "dispatch", "createApiRef"} {
+					assert.Contains(t, c.Message, w, "%s message must still name %q", c.Type, w)
+				}
+			}
+		})
+	}
+
+	// The two messages must actually DIFFER. Equal strings would pass every arm above that uses only
+	// Contains on shared text, and would mean the parameter does nothing.
+	withFindBy := customcondition.NoCreateVerbDeclaredConditions(true)[0].Message
+	without := customcondition.NoCreateVerbDeclaredConditions(false)[0].Message
+	assert.NotEqual(t, withFindBy, without,
+		"both values produce the same message, so findByDeclared is inert and #920 is not fixed")
 }
