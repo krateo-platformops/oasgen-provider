@@ -51,6 +51,29 @@ type ComparisonResult struct {
 	Reason  *Reason
 }
 
+// renderValue formats a reported value with its Go type, because the value ALONE is ambiguous in
+// exactly the case a reader is trying to diagnose.
+//
+// THIS WAS MEASURED, not imagined. Issue 927: a consumer reported a fractional field drifting on every
+// resync with `FirstValue=90, SecondValue=90.5`. The API server was serving 90.5, so the 90 came from
+// inside the controller -- but `90` is printed identically by an int64 that something TYPED as an
+// integer and a float64 that something TRUNCATED, and those are different bugs with different fixes.
+// Four candidate mechanisms were eliminated one at a time, by reading and by a local reproduction,
+// because the log could not distinguish them. The type would have named the culprit in one line.
+//
+// A STRING IS QUOTED so an empty value, a value with spaces, and a value that merely LOOKS numeric are
+// all legible: `FirstValue="90" (string)` is a different bug again, and the old format rendered it
+// identically to the number.
+func renderValue(v any) string {
+	if v == nil {
+		return "<nil>"
+	}
+	if s, ok := v.(string); ok {
+		return fmt.Sprintf("%q (string)", s)
+	}
+	return fmt.Sprintf("%v (%T)", v, v)
+}
+
 func (r ComparisonResult) String() string {
 	if r.IsEqual {
 		return "ComparisonResult: IsEqual=true"
@@ -59,9 +82,9 @@ func (r ComparisonResult) String() string {
 		return "ComparisonResult: IsEqual=false, Reason=nil"
 	}
 	if fp := r.Reason.FieldPath(); fp != "" {
-		return fmt.Sprintf("ComparisonResult: IsEqual=false, Field=%s, Reason=%s, FirstValue=%v, SecondValue=%v", fp, r.Reason.Reason, r.Reason.FirstValue, r.Reason.SecondValue)
+		return fmt.Sprintf("ComparisonResult: IsEqual=false, Field=%s, Reason=%s, FirstValue=%s, SecondValue=%s", fp, r.Reason.Reason, renderValue(r.Reason.FirstValue), renderValue(r.Reason.SecondValue))
 	}
-	return fmt.Sprintf("ComparisonResult: IsEqual=false, Reason=%s, FirstValue=%v, SecondValue=%v", r.Reason.Reason, r.Reason.FirstValue, r.Reason.SecondValue)
+	return fmt.Sprintf("ComparisonResult: IsEqual=false, Reason=%s, FirstValue=%s, SecondValue=%s", r.Reason.Reason, renderValue(r.Reason.FirstValue), renderValue(r.Reason.SecondValue))
 }
 
 // CompareExisting recursively compares fields between two maps and logs differences.
