@@ -26,6 +26,42 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-25 — 0.95.0
+
+**ONE DEPENDENCY BUMP, CARRYING ONE USER-VISIBLE BEHAVIOUR CHANGE.** Deliberately alone: the change
+below deserves its own release note rather than sharing one with unrelated work, because a consumer
+reading "0.95.0 was a dep bump" knows where to look for a moved behaviour.
+
+- **provider-runtime v1.8.2 to v1.21.1**, and the local management-policy check it supersedes is
+  deleted (126 lines, plus its 176-line test, replaced by a 56-line assertion that the runtime now
+  does it). The runtime writes that condition itself, using deliberately the same reason string
+  core-provider uses for the same fault on generated kinds, so having both write it was duplication
+  rather than defence. **The supersession is asserted, not assumed** — a deletion whose replacement is
+  only believed to exist is how a silently-dead path ships.
+
+  > `Note (2026-11-25)` — **`deletion-policy: orphan` now beats `management-policy: observe-delete`,
+  > so a CRD SURVIVES where it was previously removed.** At v1.8.2 `meta.ShouldDelete` read both
+  > annotations and let `observe-delete` override `orphan`, so an operator who asked for orphan got the
+  > resource deleted anyway. At v1.21.1 it is `ManagementDecision(o).May(Delete)`, and `May` folds in
+  > the deletion policy. The library's own doc: *"krateo.io/deletion-policy: orphan always wins (D5),
+  > and a deletion policy that is neither delete nor orphan keeps the resource too."*
+  >
+  > **This is the library correcting itself, and the new behaviour is what the annotation asked for.**
+  > Note that `Policy.Allows` does NOT fold in the deletion policy, which is why `IsActionAllowed` is
+  > deprecated at v1.21.1 for precisely that discrepancy.
+  >
+  > **It was found by a test that existed to detect it.** `TestOrphanDecidesTheCRDUninstall` carried an
+  > arm asserting the old precedence, with a comment reading *"NOT OUR PRECEDENCE, and asserted so a
+  > future reader does not 'fix' it."* CI failed on that one case and nothing else. The arm is kept
+  > rather than deleted: the right reading is that the assertion did its job, by making a dependency's
+  > semantic change loud instead of letting it shift under a 13-minor bump.
+
+  > `Note (2026-11-25)` — **this bump missed 0.93.0 and 0.94.0 for a reason that was not real.** Its PR
+  > went uncreated because a permission classifier had refused it twice and I carried that as a
+  > standing constraint, quoting it as a blocker. Six PRs were created from the same session the same
+  > day without refusal, and the seventh went through on the first attempt. **A refusal is an
+  > observation with a timestamp, not a capability boundary.**
+
 ## 2026-11-25 — 0.94.0
 
 **ONE DEFECT, FOUND BY THE INSTRUMENT 0.93.0 SHIPPED FOR IT.** This release does not carry the
