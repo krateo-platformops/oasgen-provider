@@ -62,6 +62,26 @@ func TestEveryAuthMethodKeyHasAShape(t *testing.T) {
 // Kept separate from the guard above because it fails for a DIFFERENT reason -- the guard catches a key
 // with no type, this catches a type whose Secret reference field stops being recognised (renamed, retyped,
 // or given a json tag the reflection does not read).
+//
+// An external consumer now pins its own release-safety instrument to this exact four-element set. A
+// consumer fleet whose OAS documents are all apiKey keeps a measured list of oasgen versions it considers
+// safe to pin, because the apiKey secrets grant broke for them at 0.54.0 -- the defect this test is the
+// regression for. Their instrument extracts the json tags of the SecretKeySelector-typed fields of
+// BasicAuth, BearerAuth and APIKeyAuth in types.go and asserts that set equals these same four paths.
+//
+// They chose that over hashing types.go because it was measured, not assumed: types.go grew 24479 ->
+// 26213 -> 29067 bytes across 0.54.0, 0.74.0 and 0.98.0 while the four tags never moved, so a file hash
+// would churn on edits that cannot affect the grant.
+//
+// So changing the expected set below is not a local edit. It means the derived path set moved, which
+// means their safe set is measuring the wrong quantity until they are told. Whoever changes it should say
+// so rather than leave them to find it at a pin.
+//
+// The two checks are not redundant, and that is the part a future reader will doubt. This test guards the
+// generator against its own regressions, inside this repo, at this commit. Their instrument guards an
+// outside belief about already-shipped tags. Different subjects, different owners -- so a disagreement
+// means exactly one side is wrong, which is a signal rather than a puzzle. Neither is load-bearing alone,
+// and they intend to keep pinning the tags regardless of this test existing.
 func TestAuthSecretRefPathsCoversTheApiKeyToken(t *testing.T) {
 	want := map[string]bool{
 		"spec/authentication/basic/usernameRef": false,
