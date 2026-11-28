@@ -26,6 +26,79 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-28 — 0.98.0
+
+A runtime behaviour change and a documentation fix. **The behaviour change closes a measured
+duplication**, and the doc fix exists because five wrong explanations were offered for one observation.
+
+### A refused create confirms the resource is still absent before retrying (#919, via unstructured-runtime #130)
+
+The runtime pin moves v1.32.2 → v1.34.0. `ErrCreateNotCommitted`'s guarantee was always about the
+CREATE — the vendor refused, so nothing was created — and it was read as a guarantee about the RETRY.
+**It is not: a resource can appear by a route this controller did not take between the refusal and the
+retry.**
+
+```
+MEASURED, Keycloak, with a 0-of-24 control arm on a kind WITH a create verb:
+  00:26:24.854  create -> 404 "Realm not found."    correctly "did not commit"
+  00:26:25.551  realm created -- WITH Keycloak's own default "Trusted Hosts"
+  00:26:26.545  "Successfully requested creation"    <- DUPLICATE
+  24 of 24 CRs duplicated, then unrecoverable at "findby matched 2 or more items"
+A second fleet: 410 create POSTs on one CR over 3h18m, 341 of them directly
+  following another POST with no existence check between.
+```
+
+**The confirm adopts only on a definite yes.** If the existence check errors or cannot answer, the code
+falls through to exactly the previous blind retry — deliberately, because a classified refusal must keep
+retrying directly rather than stopping where nothing can be observed. So **a kind with no readable
+existence check behaves as it did before, and that is not a regression.**
+
+**What a consumer will see:** on the adopt, the retry series *ends* rather than succeeding quietly —
+`external-create-succeeded` is stamped and the handler returns nil. A truncated series is a sharper
+signature than "no further POSTs", because a series that ran and found nothing to do looks the same from
+the request log alone.
+
+**NOT fixed here:** the transport-error strand (#901). A create that fails with a connection reset is
+*unclassified*, takes the outcome-unknown path, and still waits on an existence check that a
+findby-addressed kind cannot answer while it matches nothing. Four natural strands have been measured.
+**Different defect, same condition — it stays open.**
+
+### `excludedSpecFields`: what it actually filters (#946)
+
+CRD descriptions only; no behaviour change. The field's comment was thorough about *mutability* —
+recovery, drift via `resourceHash`, the warning when adding an entry prunes a served property — and
+said nothing about **what set the exclusion is applied to.** Measured over its own comment block before
+this change: `merge` 0 occurrences, `parameter` 0, `fieldMapping` 0.
+
+```
+the exclusion runs on the MERGED, FINISHED spec:
+  base = create body (then dispatch, then update if neither is declared)
+  + path and query parameters of EVERY verb merged in
+  THEN the exclusion runs
+so a field in neither the create body nor any verb parameter is not in the spec,
+  and excluding it removes nothing
+a REQUIRED parameter -- every path parameter is one -- is NOT removed: generation
+  warns (#410) and KEEPS the property, or the kind could not build its own URL
+```
+
+**Both directions are now stated, and the inverse is the one that was missing.** An absent warning does
+not prove the field was removed; **and a property missing from the generated spec is not evidence that
+`excludedSpecFields` removed it.** A consumer explained one missing property through five mechanisms,
+all about exclusions, while holding **zero** entries in the list — measured, with a control parse
+returning 1 on a synthetic document so the zero was real. The cause was a request-direction
+`fieldMapping` supplying that path parameter, which omits its own spec property.
+
+Three of those five explanations were theirs and two were mine, and one of mine was built on a premise
+I had supplied myself and nobody had measured. The comment now carries the diagnostic order: **check
+whether the field is in the create body or a verb parameter at all, and whether a fieldMapping supplies
+it, before suspecting an exclusion.**
+
+### Also
+
+- #947 filed, not fixed: `DispatchedButNotObserved` latches after N *observes*, so its deadline is
+  whatever the pass rate happens to be — a watch event or a pod restart already brings it forward today.
+  It is why the forthcoming `RecheckAfter` hint (#648) deliberately skips that one path.
+
 ## 2026-11-25 — 0.97.0
 
 Two changes, and **the consumer-visible one is a reduction in what gets logged**, so it is stated first
