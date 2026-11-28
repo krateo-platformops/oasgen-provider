@@ -277,6 +277,55 @@
 # event-stream census held by a third session. Neither end of this file would have found it.
 
 retracted:
+  - version: "1.0.1"
+    charts:
+      - oasgen-provider
+      - oasgen-provider-crds
+      - controller-render-service
+    use: "1.0.0"
+    reason: >-
+      A WRITE-ONLY NESTED FIELD THE UPDATE SCHEMA OMITS IS NO LONGER SENT, AND NOTHING SAYS SO. 1.0.1
+      shipped issue 960's recursive prune of the UPDATE request body against the UPDATE schema (PR 963):
+      a nested field the create schema declares and the update schema omits is not sent. That was the
+      intent. THE HARM IS WHO RELIED ON THE OLD BEHAVIOUR. A consumer may have dropped a field from the
+      update schema ON PURPOSE, to stop the drift comparison seeing it, while still relying on it being
+      SENT. That worked because `compareScope: updatable` derives what is compared from the OAS update
+      schema, while the body was assembled by `processFields` assigning whole nested values regardless of
+      that schema. So the schema governed the comparison and not the body; 1.0.1 made it govern both, and
+      the asymmetry was load-bearing and undocumented.
+      MEASURED INSTANCE, attributed and not absorbed. A consumer fleet ran the census
+      (go/rest-dynamic-controller/cmd/prune-census) across 32 kinds, using CRDs generated under 1.0.1:
+      27 kinds had an update verb and were inspected, 0 skipped; 25 reported 0 prunable paths; 2
+      reported 1 each, two webhook kinds' PATCH operations, both pruning `config.secret`. Both declare
+      `compareScope: updatable`. Their asset drops `secret` from the PATCH schema deliberately, because
+      the vendor's GET masks it as `********` and comparing it produces permanent drift. THE FLEET
+      MEASURED ON 2026-11-16 THAT A PATCH OMITTING `secret` LEAVES THE VENDOR'S WEBHOOK DELIVERIES
+      UNSIGNED. The vendor's own OpenAPI document does list `secret` in both PATCH configs.
+      WHY IT IS SILENT: the PATCH succeeds, the CR reaches Ready, and the secret is gone. No error, no
+      condition, no event. A consumer cannot discover the exposure without running the census.
+      THE REMEDY IS A PREDICTION, NOT A VERIFIED FIX. An explicit `inBody` field mapping on the update
+      verb should restore the field, because the prune deliberately runs BEFORE the mappings.
+      builder.go's own comment at tag 1.0.1 (:205-209) says the mappings "are an author's explicit
+      instruction and must still write unconditionally, so they run AFTER the prune: a schema check must
+      not override a deliberate inBody." Two semantics, CODE-DERIVED at tag 1.0.1 and not runtime-verified:
+      an absent source skips (builder.go:416-419, `pathparsing.GetTyped` returns a `found` flag and the
+      branch is `if err != nil || !found { continue }`, so no null, no empty string, no error, and an
+      optional field stays expressible); and a nested destination merges (`pathparsing.SetNestedField`,
+      the map case at nested.go ~:142-150, takes the existing child and replaces it only when
+      `containerMatches` fails, i.e. when absent or type-mismatched, so sibling keys survive).
+      nested.go is byte-identical from 0.76.0 through 1.0.1 (same sha, load-bearing lines at the same
+      numbers), so that behaviour is unchanged across the range.
+      THE MAPPING HAS NOT BEEN DEMONSTRATED ON A CLUSTER. A consumer fleet has designed the arm, a
+      delivery-signature check of 1.0.1 against 1.0.1-plus-the-mapping with 1.0.0 as the control, and it
+      has not run. Per this file's own rule, `use:` names a known-good fallback and not a verified
+      upgrade target: 1.0.0 does not contain the change, and the mapping is a remedy this entry is
+      predicting, which is the half of an entry that has been wrong twice before (see 0.85.0).
+      Note (2026-11-28): the exposed pattern is "a write-only field removed from an update schema to
+      suppress drift comparison". Any kind using it is affected, the symptom is silent, and the census is
+      the only detector. To run it, from go/rest-dynamic-controller:
+      `go run ./cmd/prune-census --oas <asset> --input <crd>`. It reads OpenAPI 3.x documents only, and
+      without `--input` it falls back to a proxy that undercounts, so pass the generated CRD. The
+      census landed on main after the 1.0.1 tag, so run it from main.
   - version: "0.91.0"
     charts:
       - oasgen-provider
