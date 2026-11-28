@@ -132,3 +132,68 @@ func driftNotConvergingEvent(name, field string, checks int) string {
 	return fmt.Sprintf("not updating %s again: field %s has differed for %d consecutive checks and "+
 		"the update does not resolve it", name, field, checks)
 }
+
+// driftProgress says where a not-yet-latched difference stands: the count, the ceiling, and whether this is
+// the same difference as the previous check or a different one.
+//
+// EXPOSURE ONLY (issue 964). It reads values the observe path already holds and decides nothing: it is not
+// consulted by the latch, by the decision to issue an update, or by what is reported as drift.
+//
+// WHY THE CEILING IS PRINTED. A count without its denominator is what a consumer fleet could not read:
+// `3` looks the same whether it is "3 of 5, climbing" or "3, and this never ends", and the ceiling is a
+// compile-time constant nobody outside the binary can see.
+//
+// WHY A RESTART IS NAMED. The count legitimately drops when the reported field path changes (issue 970:
+// the signature includes the path, so a remote object that reshapes restarts it). Seen as 3 then 1 with no
+// explanation, that reads as a counter bug. `prevSig` is the signature annotation as it stood BEFORE this
+// observe recorded its own, which is why the caller must read it first; nothing new is persisted.
+func driftProgress(prevSig, sig string, repeats int) string {
+	switch {
+	case repeats <= 1 && prevSig != "" && prevSig != sig:
+		return fmt.Sprintf("drift check %d of %d; the reported difference changed since the previous "+
+			"check, so the count restarted", repeats, maxDriftRepeats)
+	case repeats <= 1:
+		return fmt.Sprintf("drift check %d of %d; first report of this difference", repeats, maxDriftRepeats)
+	default:
+		return fmt.Sprintf("drift check %d of %d; the same difference as the previous check", repeats, maxDriftRepeats)
+	}
+}
+
+// driftLatched is the latch decision, named so a test can pin it independently of the exposure strings.
+func driftLatched(repeats int) bool { return repeats >= maxDriftRepeats }
+
+// driftNotUpToDateMessage is the condition message for a difference that is reported but not yet latched.
+func driftNotUpToDateMessage(field, reason, progress string) string {
+	if field == "" {
+		return fmt.Sprintf("%s (%s)", reason, progress)
+	}
+	return fmt.Sprintf("field %s: %s (%s)", field, reason, progress)
+}
+
+// reasonResourceNotUpToDate is the Ready reason Observe sets for a reported difference.
+const reasonResourceNotUpToDate = "ResourceNotUpToDate"
+
+// observedDriftMessage returns the message Observe left on the Ready condition when it reported a
+// difference, or "" when the condition is anything else.
+//
+// WHY THIS EXISTS: Update replaces the Ready condition with Updating, so between polls a consumer reads
+// Updating and the progress Observe wrote is gone. Carrying the message across keeps one source of truth
+// and invents no persistence -- the condition is already written and re-fetched.
+func observedDriftMessage(mg *unstructured.Unstructured) string {
+	conds, found, err := unstructured.NestedSlice(mg.Object, "status", "conditions")
+	if err != nil || !found {
+		return ""
+	}
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok || m["type"] != "Ready" {
+			continue
+		}
+		if m["reason"] != reasonResourceNotUpToDate {
+			return ""
+		}
+		msg, _ := m["message"].(string)
+		return msg
+	}
+	return ""
+}
