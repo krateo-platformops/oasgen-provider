@@ -80,9 +80,11 @@ point of that clause.
 > local `-run` prints 0 RUN and exits 0. The package-wide `./internal/tools/client/...` and
 > `./internal/controllers/...` suites were likewise not run locally.
 
-A known interaction, out of scope here: `mergePartialFields` runs after `BuildCallConfig`, so for a field
-declared in `partialFields`, a nested key this prune removed is replayed from the vendor's current value
-rather than sent from the CR. No current kind declares `partialFields` on an affected shape.
+A known interaction, recorded in issue 962 rather than established here: `mergePartialFields` runs after
+`BuildCallConfig`, so for a kind declaring `partialFields` on a containing field, a nested key this prune
+removes is replayed from the vendor's current value instead of sent from the CR. Issue 962, as filed on
+2026-11-28, records that no shipped kind has that shape and that the chain was read from the code, not
+measured; both statements date from that filing and expire with it.
 
 ### Two records corrected in place, no behaviour (#965, #966)
 
