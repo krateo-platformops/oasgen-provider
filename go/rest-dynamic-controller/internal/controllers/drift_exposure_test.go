@@ -2,6 +2,9 @@ package restResources
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,6 +72,45 @@ func TestDriftExposureDoesNotMoveTheLatch(t *testing.T) {
 	n, _, latched := observeStep(t, h, mg, "gen=1;field=other")
 	assert.Equal(t, 1, n)
 	assert.False(t, latched)
+}
+
+// TestUpdateCallsTheDriftMessageCarryForward is a STATIC call-site check, not a behavioural one, and is
+// labelled so deliberately. Update cannot be driven without a cluster here: its only existing driver is
+// the kind-based integration test, which the clusterguard refuses to run locally. Faking its HTTP and
+// swagger machinery would make scaffolding larger than the one line it covers.
+//
+// What it guards: observedDriftMessage can be entirely correct and never called, and then every other
+// check passes (build, vet, the helper's own test, mutation of the strings). This fails if Update's body
+// stops calling it, or if the call is made from anywhere other than Update.
+func TestUpdateCallsTheDriftMessageCarryForward(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "restResources.go", nil, 0)
+	require.NoError(t, err)
+
+	var inUpdate, elsewhere int
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		isUpdate := fn.Name.Name == "Update" && fn.Recv != nil
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "observedDriftMessage" {
+					if isUpdate {
+						inUpdate++
+					} else {
+						elsewhere++
+					}
+				}
+			}
+			return true
+		})
+	}
+	assert.Equal(t, 1, inUpdate,
+		"Update must call observedDriftMessage exactly once: without it Update's Updating condition "+
+			"erases the drift progress Observe wrote, and a consumer reading between polls sees none (issue 964)")
+	assert.Equal(t, 0, elsewhere, "the carry-forward belongs in Update only")
 }
 
 func TestObservedDriftMessageSurvivesIntoUpdating(t *testing.T) {
