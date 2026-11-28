@@ -374,7 +374,7 @@ func enqueueRestDefinitionForGeneratedKind(kube client.Client, log logging.Logge
 // from a running controller (the same limitation and tradeoff documented on core-provider's
 // compositionmirror.go, which this mechanism is modeled on). A watch on a Configuration Kind whose
 // CRD is later deleted is NOT harmless and does NOT idle: it is never released, and it keeps retrying at
-// ERROR level for the life of the process. See the measured cost on ensureGeneratedKindWatch below; it
+// ERROR level for the life of the process. See the measured cost on ensureGeneratedKindWatch above; it
 // applies identically here, because both registries are the same dynamicwatch.Registry.
 func (e *external) ensureConfigurationWatch(cr *definitionv1alpha1.RestDefinition) {
 	if e.ctrl == nil || e.cfgWatch == nil {
