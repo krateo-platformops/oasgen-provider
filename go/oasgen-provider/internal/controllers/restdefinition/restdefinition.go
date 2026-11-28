@@ -272,19 +272,6 @@ type external struct {
 	genCfg   GeneratorConfig
 }
 
-// ensureConfigurationWatch registers a watch on cr's generated Configuration Kind the first time it is
-// seen (cfgWatch dedupes), so a Configuration instance change (a new/changed usernameRef/passwordRef/
-// tokenRef, or an instance appearing/disappearing) enqueues cr immediately instead of waiting for the next
-// resync — the auth-secret RBAC drift check in Observe then does the actual re-sync. Best-effort: if the
-// Configuration Kind is not yet discoverable (its CRD was only just applied), the periodic resync still
-// drives the resync-based baseline, and the next Create/Update reconcile retries registration.
-//
-// There is no corresponding "unwatch": controller-runtime has no primitive to remove a registered source
-// from a running controller (the same limitation and tradeoff documented on core-provider's
-// compositionmirror.go, which this mechanism is modeled on). A watch on a Configuration Kind whose
-// CRD is later deleted is NOT harmless and does NOT idle: it is never released, and it keeps retrying at
-// ERROR level for the life of the process. See the measured cost on ensureGeneratedKindWatch below; it
-// applies identically here, because both registries are the same dynamicwatch.Registry.
 // ensureGeneratedKindWatch registers a dynamic watch on the Kind this RestDefinition generates, so an
 // instance appearing or being deleted enqueues the RestDefinition (issue 510).
 //
@@ -319,7 +306,7 @@ type external struct {
 // those CRDs were recreated. A CRD that comes back recovers; only a permanently deleted CRD leaks.
 //
 // WHERE THE FIX LIVES: the registry is plumbing's kubeutil/dynamicwatch (imported above, constructed in
-// New). It exposes NewRegistry / EnsureWatch / EnsureMetadataWatch / Watching / WatchingMetadata and
+// Setup). It exposes NewRegistry / EnsureWatch / EnsureMetadataWatch / Watching / WatchingMetadata and
 // nothing matching Remove, Stop, Unwatch or Delete, so no caller can drop a registration. Filed as
 // plumbing#240, tracked here as issue 952.
 func (e *external) ensureGeneratedKindWatch(cr *definitionv1alpha1.RestDefinition, gvr schema.GroupVersionResource) {
@@ -376,6 +363,19 @@ func enqueueRestDefinitionForGeneratedKind(kube client.Client, log logging.Logge
 	}
 }
 
+// ensureConfigurationWatch registers a watch on cr's generated Configuration Kind the first time it is
+// seen (cfgWatch dedupes), so a Configuration instance change (a new/changed usernameRef/passwordRef/
+// tokenRef, or an instance appearing/disappearing) enqueues cr immediately instead of waiting for the next
+// resync — the auth-secret RBAC drift check in Observe then does the actual re-sync. Best-effort: if the
+// Configuration Kind is not yet discoverable (its CRD was only just applied), the periodic resync still
+// drives the resync-based baseline, and the next Create/Update reconcile retries registration.
+//
+// There is no corresponding "unwatch": controller-runtime has no primitive to remove a registered source
+// from a running controller (the same limitation and tradeoff documented on core-provider's
+// compositionmirror.go, which this mechanism is modeled on). A watch on a Configuration Kind whose
+// CRD is later deleted is NOT harmless and does NOT idle: it is never released, and it keeps retrying at
+// ERROR level for the life of the process. See the measured cost on ensureGeneratedKindWatch below; it
+// applies identically here, because both registries are the same dynamicwatch.Registry.
 func (e *external) ensureConfigurationWatch(cr *definitionv1alpha1.RestDefinition) {
 	if e.ctrl == nil || e.cfgWatch == nil {
 		return // not wired for dynamic watches (e.g. under unit tests)
