@@ -64,6 +64,17 @@ default, and a test asserts every return site is in it.
 > extra GETs against a vendor are bounded by the settle interval, not by how many hints get set. The
 > enqueue is `LowPriority` with `RateLimited: false`.
 
+> `Note (2026-11-28)` **The hint speeds up the CHILD only, and that widens a window.** It asks the runtime
+> that owns the generated resource to re-observe sooner. It does nothing to the parent: the live
+> composition-dynamic-controller (`go/composition-dynamic-controller/` in the core-provider monorepo) pins
+> `unstructured-runtime v1.33.0`, which has **0** non-test `RecheckAfter` uses, so the Composition's
+> sampling interval is unchanged. A child therefore settles faster while its parent still samples on its own
+> pass — **so a short-lived child condition is now more likely to begin and end between two parent passes,
+> and be invisible there.** Anyone reading a Composition's conditions to judge a child's health should know
+> the child's settle time moved and the parent's sampling did not. Raised by a consumer fleet and verified
+> in cdc's own `go.mod`; the archived standalone `composition-dynamic-controller` repo pins `v1.4.0` and is
+> not what runs.
+
 ### A leaked dynamic watch is now visible, and the comment that said it "idles" was wrong (#953, #954, #952)
 
 `controller-runtime` cannot remove a registered source from a running controller, so a watch on a Kind
