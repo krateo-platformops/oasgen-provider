@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -175,11 +176,20 @@ func errorBodySnippet(body io.ReadCloser) string {
 	return snippet
 }
 
+// errNilRequestConfiguration is returned by every entry point that takes a *RequestConfiguration when
+// handed nil. The configuration is required, not optional: the request path reads it unconditionally.
+var errNilRequestConfiguration = errors.New("restclient: request configuration (opts) is required and must not be nil")
+
 func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration) (Response, error) {
+	// opts is REQUIRED. Every successful request dereferences it (SensitiveValues, CollectionRead, the
+	// status-code lists), so a nil here used to panic on the first success; say so at the entry point.
+	if opts == nil {
+		return Response{}, errNilRequestConfiguration
+	}
 	// Refuse a configuration that failed to assemble. See RequestConfiguration.BuildErr: a dropped path
 	// parameter still produces a syntactically valid URL, which answers 404, which the reconciler acts on
 	// by creating.
-	if opts != nil && opts.BuildErr != nil {
+	if opts.BuildErr != nil {
 		return Response{}, opts.BuildErr
 	}
 	if u.DocScheme == nil {
@@ -394,7 +404,7 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 	// If this verb declares the returned status code as meaning "not found", remap it to a not-found
 	// result (StatusError 404) so the existence logic treats the external resource as absent, even when
 	// the API signals absence with a non-standard code (e.g. 410 Gone or a 204).
-	if opts != nil && HasValidStatusCode(resp.StatusCode, opts.NotFoundCodes...) {
+	if HasValidStatusCode(resp.StatusCode, opts.NotFoundCodes...) {
 		return Response{}, &StatusError{
 			StatusCode: http.StatusNotFound,
 			Inner:      fmt.Errorf("status %d remapped to not-found by notFoundCodes", resp.StatusCode),
@@ -404,7 +414,7 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 	// If this verb tolerates the returned status code, short-circuit to a successful empty response
 	// (e.g. an API that returns 404 for an optional sub-resource that is simply empty), skipping status
 	// validation and body parsing. The caller's nil-body handling then treats the resource as up-to-date.
-	if opts != nil && HasValidStatusCode(resp.StatusCode, opts.TolerateCodes...) {
+	if HasValidStatusCode(resp.StatusCode, opts.TolerateCodes...) {
 		return Response{ResponseBody: nil, Headers: resp.Header, statusCode: resp.StatusCode}, nil
 	}
 
@@ -418,9 +428,7 @@ func (u *UnstructuredClient) Call(ctx context.Context, cli *http.Client, path st
 	}
 	// Merge any per-verb successCodes declared on the RestDefinition, so an API returning a non-standard
 	// success code the OAS does not document is accepted rather than rejected as an invalid status.
-	if opts != nil {
-		validStatusCodes = append(validStatusCodes, opts.SuccessCodes...)
-	}
+	validStatusCodes = append(validStatusCodes, opts.SuccessCodes...)
 
 	if !HasValidStatusCode(resp.StatusCode, validStatusCodes...) {
 		return Response{}, &StatusError{
@@ -500,9 +508,10 @@ func (u *UnstructuredClient) FindBy(ctx context.Context, cli *http.Client, path 
 	//
 	// Mutating the caller's struct is deliberate rather than incidental: opts describes THIS call, and the
 	// flag is a property of the call being made, not a preference the caller expressed.
-	if opts != nil {
-		opts.CollectionRead = true
+	if opts == nil {
+		return Response{}, errNilRequestConfiguration
 	}
+	opts.CollectionRead = true
 
 	// findByAction may legitimately be nil here (callers that do not have the verb to hand), in which
 	// case there is no declared itemsPath and inference applies.
@@ -809,10 +818,14 @@ func (u *UnstructuredClient) CallFindBySingle(ctx context.Context, cli *http.Cli
 // Prerequisite for refactor is to change the Response struct to wrap http.Response directly.
 // Differences with Call are mainly the paginator usage and the removal of debug transport setup (otherwise it would be set incrementally on each paginated call).
 func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Client, path string, opts *RequestConfiguration, paginator pagination.Paginator) (Response, *http.Response, error) {
+	// opts is REQUIRED; see Call.
+	if opts == nil {
+		return Response{}, nil, errNilRequestConfiguration
+	}
 	// Refuse a configuration that failed to assemble. See RequestConfiguration.BuildErr: a dropped path
 	// parameter still produces a syntactically valid URL, which answers 404, which the reconciler acts on
 	// by creating.
-	if opts != nil && opts.BuildErr != nil {
+	if opts.BuildErr != nil {
 		return Response{}, nil, opts.BuildErr
 	}
 	if u.DocScheme == nil {
@@ -1025,9 +1038,7 @@ func (u *UnstructuredClient) CallForPagination(ctx context.Context, cli *http.Cl
 		return Response{}, nil, err
 	}
 	// Merge any per-verb successCodes declared on the RestDefinition (see Call for rationale).
-	if opts != nil {
-		validStatusCodes = append(validStatusCodes, opts.SuccessCodes...)
-	}
+	validStatusCodes = append(validStatusCodes, opts.SuccessCodes...)
 
 	if !HasValidStatusCode(resp.StatusCode, validStatusCodes...) {
 		return Response{}, nil, &StatusError{
