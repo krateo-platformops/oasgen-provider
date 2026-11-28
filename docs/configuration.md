@@ -13,6 +13,9 @@ Two charts: `helm/oasgen-provider` (the provider Deployment + the RDC templates 
 renders) and `helm/oasgen-provider-crds` (the `RestDefinition` CRD only, no values
 beyond the schema stub). Both ship a `values.schema.json`; unknown keys are rejected.
 
+Before pinning or upgrading a chart version, check [`retracted-versions.yaml`](../retracted-versions.yaml)
+at the repo root, and move directly to the target rather than through intermediate releases.
+
 ## Provider chart values (top level)
 
 Standard chart scaffolding (`replicaCount`, `serviceAccount.*`, `podAnnotations`,

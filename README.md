@@ -37,6 +37,19 @@ helm install oasgen-provider oci://ghcr.io/krateo-platformops/charts/oasgen-prov
 
 Details and the local-render recipe: [docs/usage.md](docs/usage.md).
 
+### Upgrading: check `retracted-versions.yaml`
+
+[`retracted-versions.yaml`](retracted-versions.yaml) at the repo root is the authoritative list of
+retracted releases. Each entry names the `version`, the `use:` replacement, and the `reason`. A tag
+cannot be withdrawn, so a retracted release still installs; the file is the only place that says not
+to. It is a list in a file, not in prose here, so it cannot go stale in this README.
+
+**Move directly to the target version; do not step through intermediate releases.** Stepping is
+the habit that is strongest exactly when a change is risky, and it is what lands on a retracted
+release: 0.84.0 to 0.85.0 to 0.85.1 to 0.85.2 passes through two retracted versions (0.85.0 and
+0.85.1, both `use: "0.84.0"`) to reach 0.85.2, which is not retracted. Moving from 0.85.2 toward
+current has a second hole at 0.91.0 (`use: "0.91.1"`). Read the file for the current set.
+
 ## Configure
 
 See [docs/configuration.md](docs/configuration.md). Most used:
