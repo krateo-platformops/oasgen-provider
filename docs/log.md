@@ -47,6 +47,23 @@ default, and a test asserts every return site is in it.
 > `Note (2026-11-28)` A hint is not a deadline. It asks for an earlier re-read; it never shortens the time
 > a failure is allowed to take. The count-based deadline that *does* do that is issue 947, which is open.
 
+> `Note (2026-11-28)` **The setter and the honourer ship together, deliberately.** #949 bumps
+> `unstructured-runtime` from `v1.34.0` to `v1.35.0` in the same commit as the hint, because `RecheckAfter`
+> first exists in the runtime at `v1.35.0` — 0 occurrences at every tag from `v1.27.1` to `v1.34.0`. Split
+> across two releases, the hint would have been **a no-op that passed its own unit tests**, since those
+> assert the field is set rather than that an Observe is enqueued. A consumer fleet raised exactly this,
+> reading the pin at the released tags; the pin on `main` carries the bump.
+
+> `Runtime verification (2026-11-28)` Measured in `unstructured-runtime@v1.35.0` rather than inferred:
+> `clampRecheck` returns `ok=false` for a zero **or negative** hint and `scheduleRecheck` returns
+> immediately on that, so **zero means *no hint*, not *immediately*** — the floor is `MinRecheckAfter`
+> (one second) and the ceiling is the resync period, so no hint can produce a hot loop. `scheduleRecheck`
+> also **deduplicates** (`worker.go:2209-2212`): a pending recheck still in the future and due at or before
+> the new deadline returns early with no second enqueue. The bound that gives is "concurrent hints do not
+> stack", **not** "at most one recheck ever" — a recheck that fires and is hinted again enqueues again. So
+> extra GETs against a vendor are bounded by the settle interval, not by how many hints get set. The
+> enqueue is `LowPriority` with `RateLimited: false`.
+
 ### A leaked dynamic watch is now visible, and the comment that said it "idles" was wrong (#953, #954, #952)
 
 `controller-runtime` cannot remove a registered source from a running controller, so a watch on a Kind
