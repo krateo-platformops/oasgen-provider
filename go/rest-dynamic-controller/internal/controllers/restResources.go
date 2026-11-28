@@ -921,12 +921,15 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			log.Debug("External resource not up-to-date", "kind", mg.GetKind(), "field", field, "reason", res.String())
 
 			sig := driftSignature(mg, res)
+			// Read BEFORE recording: recordDriftRepeat overwrites it, and the exposure below needs to
+			// tell a restarted count from a first report.
+			prevSig := mg.GetAnnotations()[annotationDriftSignature]
 			repeats, rerr := h.recordDriftRepeat(ctx, mg, sig)
 			if rerr != nil {
 				return controller.ExternalObservation{}, rerr
 			}
 
-			if repeats >= maxDriftRepeats {
+			if driftLatched(repeats) {
 				// The same difference, this many times running, means the update issued for it is not
 				// resolving it -- so issuing it again only repeats a write that has already been shown
 				// not to work. Reported as not-Ready with the field named, and NOT as drift, because
@@ -976,11 +979,8 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			}
 
 			cond := condition.Unavailable()
-			cond.Reason = "ResourceNotUpToDate"
-			cond.Message = fmt.Sprintf("field %s: %s", field, res.Reason.Reason)
-			if field == "" {
-				cond.Message = res.Reason.Reason
-			}
+			cond.Reason = reasonResourceNotUpToDate
+			cond.Message = driftNotUpToDateMessage(field, res.Reason.Reason, driftProgress(prevSig, sig, repeats))
 			if serr := unstructuredtools.SetConditions(mg, cond); serr != nil {
 				log.Error(serr, "Setting condition")
 				return controller.ExternalObservation{}, serr
@@ -2272,7 +2272,10 @@ func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) err
 		// Updating, not Creating. A resource that has existed for days is not being created, and saying
 		// it is sends whoever reads the condition looking for a creation that already happened -- which
 		// is exactly how a permanent drift loop came to look like a slow create (#213).
-		err = unstructuredtools.SetConditions(mg, customcondition.Updating())
+		updating := customcondition.Updating()
+		// Carry the drift progress Observe wrote, which this replacement would otherwise erase (issue 964).
+		updating.Message = observedDriftMessage(mg)
+		err = unstructuredtools.SetConditions(mg, updating)
 		if err != nil {
 			log.Error(err, "Setting condition")
 			return err
