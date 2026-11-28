@@ -72,8 +72,10 @@ default, and a test asserts every return site is in it.
 > pass — **so a short-lived child condition is now more likely to begin and end between two parent passes,
 > and be invisible there.** Anyone reading a Composition's conditions to judge a child's health should know
 > the child's settle time moved and the parent's sampling did not. Raised by a consumer fleet and verified
-> in cdc's own `go.mod`; the archived standalone `composition-dynamic-controller` repo pins `v1.4.0` and is
-> not what runs.
+> in the `go.mod` of what actually runs: **`go/composition-dynamic-controller/` in
+> `github.com/krateo-platformops/core-provider`**, stated as a full path because repositories named
+> `composition-dynamic-controller` exist elsewhere, pin other versions, and are months behind without
+> saying so.
 
 ### A leaked dynamic watch is now visible, and the comment that said it "idles" was wrong (#953, #954, #952)
 
