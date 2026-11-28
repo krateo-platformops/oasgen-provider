@@ -319,9 +319,19 @@ retracted:
       fixing the first. The rdc Deployment is REFUSED BY THE APISERVER:
       "spec.template.spec.containers[0].livenessProbe: Required value: must specify a handler type".
       rdc.livenessProbe ships as `{}` (deliberately, so the emptiness is visible in a values diff)
-      and the asset rendered it unconditionally through `toYaml`, which emits `{}` -- a probe with no
-      handler. At 0.84.0 the key was ABSENT, so `toYaml nil` rendered `null` and the field did not
-      exist. 0.85.0 hid this because its asset never parsed at all.
+      and the asset renders it unconditionally through `toYaml`, which emits `{}` -- a probe with no
+      handler. THE UNCONDITIONAL LINE IS NOT THE DEFECT: it is the same line at 0.84.0, which is
+      fine, because there rdc.livenessProbe and rdc.readinessProbe are ABSENT from values.yaml, so
+      `toYaml nil` renders `null`, which Kubernetes accepts. The defect is a NEW DEFAULT (`{}`)
+      meeting an OLD, latent construct: 0.85.0 introduced the key for the first time, onto a line
+      that had been harmless for as long as the key did not exist. A consumer fleet measured the
+      chart at four tags: 0.84.0 emits the line and is fine (key absent); 0.85.0 is where the `{}`
+      default arrives; 0.85.1 fixes the indentation but keeps both the `{}` default and the
+      unconditional line; 0.85.2 is the first version wrapping BOTH probes in `{{- with }}`. Same
+      shape as 0.85.0's other defect (the mis-indented `- name: metrics`, dormant since 0.77.0): an
+      old latent construct made reachable by a new default, and what hid each was a DEFAULT, not a
+      check -- which is why no test caught either. 0.85.0 also hid this one because its asset never
+      parsed at all.
       MEASURED by two consumers independently: the published 0.85.1 chart renders
       `livenessProbe: {}` where 0.84.0 renders `None`, and `kubectl apply --dry-run=server` of a
       minimal Deployment carrying `livenessProbe: {}` is refused on a live 1.36 apiserver while the
