@@ -315,7 +315,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 
 	// If observation is delegated to a Snowplow RESTAction, resolve it and project the composed result into
 	// status. This replaces the get/findby observe entirely (no OAS call is made for this resource).
-	if obs, handled, oerr := h.observeViaRestAction(ctx, mg, clientInfo.Resource.ObserveApiRef, clientInfo.Resource.Identifiers, log); handled {
+	if obs, handled, oerr := h.observeViaRestAction(ctx, mg, clientInfo.Resource.ObserveApiRef, clientInfo.Resource.Identifiers, &clientInfo.Resource, log); handled {
 		return obs, oerr
 	}
 
@@ -395,6 +395,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			return controller.ExternalObservation{
 				ResourceExists:   true,
 				ResourceUpToDate: true,
+				RecheckAfter:     recheckAfter(pathAsyncCreatePendingGet, &clientInfo.Resource),
 			}, nil
 		} else if notfound {
 			log.Debug("External resource not found", "kind", mg.GetKind())
@@ -582,6 +583,7 @@ func (h *handler) Observe(ctx context.Context, mg *unstructured.Unstructured) (c
 			return controller.ExternalObservation{
 				ResourceExists:   true,
 				ResourceUpToDate: true,
+				RecheckAfter:     recheckAfter(pathAsyncCreatePendingFindBy, &clientInfo.Resource),
 			}, nil
 		} else if notfound {
 			// REPORT, DO NOT REFUSE (#485).
@@ -1647,6 +1649,8 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			return controller.CreateResult{
 				Reason:     "PendingReferent",
 				Conditions: []metav1.Condition{customcondition.PendingReferent(derr.Error())},
+				// Reachable only under onMissing: requeue (see pathReferentMissingDispatch).
+				RecheckAfter: recheckAfter(pathReferentMissingDispatch, &clientInfo.Resource),
 			}, nil
 		}
 
@@ -1803,6 +1807,8 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			Requested:  false,
 			Reason:     customcondition.ReasonNoCreateVerbDeclared,
 			Conditions: customcondition.NoCreateVerbDeclaredConditions(findByDeclared),
+			// Adopt-only waits for its findby to match; a kind with no findby gets zero from the same predicate.
+			RecheckAfter: recheckAfter(pathNoCreateVerbAdopt, &clientInfo.Resource),
 		}, nil
 	}
 
@@ -1837,6 +1843,8 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 				// reported as not existing.
 				Reason:     "PendingReferent",
 				Conditions: []metav1.Condition{customcondition.PendingReferent(err.Error())},
+				// Reachable only under onMissing: requeue (see pathReferentMissingFields).
+				RecheckAfter: recheckAfter(pathReferentMissingFields, &clientInfo.Resource),
 			}, nil
 		}
 		log.Error(err, "Provisioning secretRef RBAC / resolving field mapping resolvers")

@@ -285,6 +285,6 @@ func (h *handler) driveAsyncRequeue(ctx context.Context, cs *clientSet, clientIn
 
 	default: // pending — stay put and let the next reconcile poll again.
 		log.Debug("Async(requeue) operation still pending", "operationId", operationID, "status", status)
-		return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, true, nil
+		return controller.ExternalObservation{ResourceExists: true, ResourceUpToDate: true, RecheckAfter: recheckAfter(pathAsyncPollPending, &clientInfo.Resource)}, true, nil
 	}
 }
