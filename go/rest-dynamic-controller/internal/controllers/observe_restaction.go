@@ -27,7 +27,7 @@ import (
 // create/update/delete RESTActions. The referenced RESTAction is trusted platform configuration: its
 // composed .status is projected into this resource's status (except the runtime-managed conditions /
 // observedGeneration), so it must be authored to return the intended shape.
-func (h *handler) observeViaRestAction(ctx context.Context, mg *unstructured.Unstructured, ref *getter.ApiRef, identifiers []string, log logging.Logger) (controller.ExternalObservation, bool, error) {
+func (h *handler) observeViaRestAction(ctx context.Context, mg *unstructured.Unstructured, ref *getter.ApiRef, identifiers []string, res *getter.Resource, log logging.Logger) (controller.ExternalObservation, bool, error) {
 	if ref == nil {
 		return controller.ExternalObservation{}, false, nil
 	}
@@ -75,7 +75,7 @@ func (h *handler) observeViaRestAction(ctx context.Context, mg *unstructured.Uns
 		return controller.ExternalObservation{}, true, fmt.Errorf("evaluating observeApiRef.notFoundExpr: %w", ferr)
 	} else if notFound {
 		log.Debug("Observe RESTAction reports the resource absent", "restAction", ref.Namespace+"/"+ref.Name)
-		return controller.ExternalObservation{ResourceExists: false, ResourceUpToDate: false}, true, nil
+		return controller.ExternalObservation{ResourceExists: false, ResourceUpToDate: false, RecheckAfter: recheckAfter(pathRESTActionAbsent, res)}, true, nil
 	}
 
 	// Drift: default up-to-date unless a SOURCED upToDateExpr reports otherwise (composing with updateApiRef).
