@@ -52,6 +52,17 @@ type CallInfo struct {
 	// whole-document program over. controllers.TestNoBodySendingCallSiteBypassesTheHelper enumerates both
 	// sets and fails on a new call site that joins neither.
 	RequestTransform *getter.JQProgram
+	// BodyShape is the UPDATE verb's request-body schema reduced to what a recursive prune needs (issue 960).
+	// Nil for every other action and whenever the client cannot supply one, which means "do not prune".
+	// ReqParams.Body is deliberately NOT reshaped to carry this: it has a second consumer, issue 400's
+	// unmodelled-key detection, that wants the flat top-level set.
+	BodyShape *restclient.BodyShape
+}
+
+// bodyShaper is an OPTIONAL capability of a client, asserted rather than added to
+// UnstructuredClientInterface so that existing implementations of that interface keep compiling.
+type bodyShaper interface {
+	BodyShape(httpMethod string, path string) (*restclient.BodyShape, error)
 }
 
 type APIFuncDef func(ctx context.Context, cli *http.Client, path string, conf *restclient.RequestConfiguration) (restclient.Response, error)
@@ -76,10 +87,20 @@ func APICallBuilder(cli restclient.UnstructuredClientInterface, info *getter.Inf
 				}
 			}
 
+			var shape *restclient.BodyShape
+			if action == apiaction.Update && body != nil {
+				if bs, ok := cli.(bodyShaper); ok {
+					if shape, err = bs.BodyShape(descr.Method, descr.Path); err != nil {
+						return nil, nil, fmt.Errorf("retrieving requested body shape: %s", err)
+					}
+				}
+			}
+
 			callInfo := &CallInfo{
-				Path:   descr.Path,
-				Method: descr.Method,
-				Action: action,
+				BodyShape: shape,
+				Path:      descr.Path,
+				Method:    descr.Method,
+				Action:    action,
 				ReqParams: &RequestedParams{
 					Parameters: params, // Path parameters
 					Query:      query,
@@ -180,6 +201,19 @@ func BuildCallConfig(ctx context.Context, callInfo *CallInfo, mg *unstructured.U
 
 	// 4. Apply values from the main resource's status
 	skipped = append(skipped, processFields(callInfo, statusFields, reqConfiguration, mapBody)...)
+
+	// PRUNE WHAT AUTO-POPULATION COPIED (issue 960), HERE AND NOT AT THE END. processFields assigns a whole
+	// nested value under its top-level key, so a nested field the create schema has and the update schema
+	// lacks was sent on every spec edit. The mappings below are an author's explicit instruction and must
+	// still write unconditionally, so they run AFTER the prune: a schema check must not override a
+	// deliberate inBody. Update only; nil shape means no prune.
+	if callInfo.BodyShape != nil {
+		pruned := callInfo.BodyShape.Prune(mapBody)
+		clear(mapBody)
+		for k, v := range pruned {
+			mapBody[k] = v
+		}
+	}
 
 	// 5. Apply explicit field mappings LAST, so they win by write order.
 	//
