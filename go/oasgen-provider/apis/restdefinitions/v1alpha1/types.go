@@ -1237,10 +1237,9 @@ type Resource struct {
 	// THE INVERSE HOLDS TOO: an absent warning does not prove an exclusion is PRESENT either, and a property
 	// missing from the generated spec is NOT evidence that excludedSpecFields removed it. The commonest other
 	// cause is a request-direction fieldMapping supplying that parameter, which omits its own spec property;
-	// the field may also simply not be in the create body or in any verb's parameters. A consumer once
-	// explained a missing property through five mechanisms, all about exclusions, with ZERO entries in the
-	// list. Before suspecting an exclusion, check in this order: is the field in the create body or a verb
-	// parameter at all, and does a fieldMapping supply it? Only then look at this list.
+	// the field may also simply not be in the create body or in any verb's parameters. Before suspecting an
+	// exclusion, check in this order: is the field in the create body or a verb parameter at all, and does a
+	// fieldMapping supply it? Only then look at this list.
 	// +optional
 	ExcludedSpecFields []string `json:"excludedSpecFields,omitempty"`
 	// IncludedSpecFields: the ALLOWLIST counterpart of excludedSpecFields. When set, the generated spec keeps
