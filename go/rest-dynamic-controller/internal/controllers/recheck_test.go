@@ -3,16 +3,20 @@
 package restResources
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	getter "github.com/krateo-platformops/rest-dynamic-controller/internal/tools/definitiongetter"
+	"github.com/krateo-platformops/unstructured-runtime/pkg/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func defWith(actions ...string) *getter.Resource {
@@ -195,4 +199,44 @@ func TestEveryReturnSiteIsClassified(t *testing.T) {
 	hint := 4 + 8
 	assert.Equal(t, 137, obs+cre)
 	assert.Equal(t, 125, obs+cre-hint, "hint + no-hint must equal the total")
+}
+
+// BEHAVIOUR, NOT SOURCE TEXT: the value arrives in the struct the runtime reads. The narrowest reachable
+// units that return a CreateResult are called for real, and the assertion is on the returned
+// RecheckAfter. A hint path must carry the constant; the no-hint control must carry zero, so a pass
+// distinguishes "the plumbing works" from "every struct happens to carry 15s".
+//
+// No kind cluster is needed: handlerForCreateGuard builds the handler without one. The full
+// CreateWithResult / Observe paths are reached only by the integration suite, which CI runs.
+func TestTheHintArrivesInTheReturnedStruct(t *testing.T) {
+	newMG := func() *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "example.krateo.io/v1alpha1",
+			"kind":       "Thing",
+			"metadata":   map[string]interface{}{"name": "t", "namespace": "n"},
+		}}
+	}
+	log := logging.NewNopLogger()
+
+	t.Run("hint path: a create that reached the vendor", func(t *testing.T) {
+		h, _ := handlerForCreateGuard()
+		got, err := h.createReachedTheVendor(newMG(), errors.New("status write conflicted"), log)
+		require.NoError(t, err)
+		assert.True(t, got.Requested)
+		assert.Equal(t, RecheckWhenWaiting, got.RecheckAfter)
+	})
+
+	t.Run("hint path: a create that landed at a redirect", func(t *testing.T) {
+		h, _ := handlerForCreateGuard()
+		got, err := h.createLandedAtARedirect(newMG(), errors.New("redirect"), log)
+		require.NoError(t, err)
+		assert.Equal(t, RecheckWhenWaiting, got.RecheckAfter)
+	})
+
+	t.Run("control, no-hint path: authorization denied waits on a person", func(t *testing.T) {
+		h, _ := handlerForCreateGuard()
+		got := h.createAuthorizationDeniedResult(newMG(), "create", errors.New("403"), log)
+		assert.False(t, got.Requested)
+		assert.Equal(t, time.Duration(0), got.RecheckAfter)
+	})
 }
