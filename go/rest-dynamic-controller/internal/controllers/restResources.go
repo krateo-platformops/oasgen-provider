@@ -1527,7 +1527,7 @@ func (h *handler) createLandedAtARedirect(mg *unstructured.Unstructured, cerr er
 			"external resource EXISTS but its identifier cannot be read from a redirected response, so "+
 			"status is left empty and the create will not be retried. Point the RestDefinition's create "+
 			"path at the endpoint the vendor redirects to", cerr)))
-	return controller.CreateResult{Requested: true}, nil
+	return controller.CreateResult{Requested: true, RecheckAfter: recheckAfter(pathCreateRequested, nil)}, nil
 }
 
 func (h *handler) createReachedTheVendor(mg *unstructured.Unstructured, werr error, log logging.Logger) (controller.CreateResult, error) {
@@ -1537,7 +1537,7 @@ func (h *handler) createReachedTheVendor(mg *unstructured.Unstructured, werr err
 	h.eventRecorder.Event(mg, event.Warning(reasonCreated, "Create", fmt.Errorf(
 		"the external resource was created but its status could not be written (%w); the create will not "+
 			"be retried and status will be repopulated on the next reconcile", werr)))
-	return controller.CreateResult{Requested: true}, nil
+	return controller.CreateResult{Requested: true, RecheckAfter: recheckAfter(pathCreateRequested, nil)}, nil
 }
 
 func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstructured) (controller.CreateResult, error) {
@@ -1626,7 +1626,7 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			return h.createReachedTheVendor(mg, err, log)
 		}
 		h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Create", fmt.Sprintf("Invoked create RESTAction for: %s", mg.GetName())))
-		return controller.CreateResult{Requested: true}, nil
+		return controller.CreateResult{Requested: true, RecheckAfter: recheckAfter(pathCreateRequested, nil)}, nil
 	}
 
 	// A dispatch resource has no create verb -- the dispatch IS its create -- so this must come before the
@@ -1726,7 +1726,7 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 			// action a second time.
 			return h.createReachedTheVendor(mg, err, log)
 		}
-		return controller.CreateResult{Requested: true}, nil
+		return controller.CreateResult{Requested: true, RecheckAfter: recheckAfter(pathCreateRequested, nil)}, nil
 	}
 
 	apiCall, callInfo, err := builder.APICallBuilder(cli, clientInfo, apiaction.Create)
@@ -2028,7 +2028,7 @@ func (h *handler) CreateWithResult(ctx context.Context, mg *unstructured.Unstruc
 	}
 
 	h.eventRecorder.Event(mg, event.Normal(reasonCreated, "Create", fmt.Sprintf("Created external resource: %s", mg.GetName())))
-	return controller.CreateResult{Requested: true}, nil
+	return controller.CreateResult{Requested: true, RecheckAfter: recheckAfter(pathCreateRequested, nil)}, nil
 }
 
 func (h *handler) Update(ctx context.Context, mg *unstructured.Unstructured) error {

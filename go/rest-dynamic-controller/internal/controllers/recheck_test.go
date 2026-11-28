@@ -43,6 +43,7 @@ func TestTheRuleHintOnlyWhereTheOutcomeChangesWithoutAnyoneActing(t *testing.T) 
 		{"get not found while create Pending", pathAsyncCreatePendingGet, defWith("create", "get"), metav1.Duration{Duration: RecheckWhenWaiting}},
 		{"findby not found while create Pending", pathAsyncCreatePendingFindBy, defWith("create", "findby"), metav1.Duration{Duration: RecheckWhenWaiting}},
 		{"async requeue poll still pending", pathAsyncPollPending, defWith("create", "get"), metav1.Duration{Duration: RecheckWhenWaiting}},
+		{"create requested this pass (issue 648: handleCreate enqueues no observe)", pathCreateRequested, defWith("create"), metav1.Duration{Duration: RecheckWhenWaiting}},
 
 		// NO HINT: the definition can never settle. ONE predicate, both sides.
 		{"no create verb AND no findby, create side", pathNoCreateVerbAdopt, defWith("get", "update"), metav1.Duration{}},
@@ -59,7 +60,6 @@ func TestTheRuleHintOnlyWhereTheOutcomeChangesWithoutAnyoneActing(t *testing.T) 
 
 		// NO HINT: the pass acted, or nothing waits.
 		{"absence or drift reported, the runtime acts", pathActing, defWith("create", "get"), metav1.Duration{}},
-		{"create requested this pass", pathCreateRequested, defWith("create"), metav1.Duration{}},
 		{"exists and up to date", pathSettled, defWith("create", "get"), metav1.Duration{}},
 		{"being deleted", pathBeingDeleted, defWith("create"), metav1.Duration{}},
 
@@ -119,7 +119,7 @@ func TestProductionAsksTheRuleAtEveryHintSite(t *testing.T) {
 	want := map[recheckPath]int{
 		pathNoCreateVerbAdopt: 1, pathReferentMissingDispatch: 1, pathReferentMissingFields: 1,
 		pathRESTActionAbsent: 1, pathAsyncCreatePendingGet: 1, pathAsyncCreatePendingFindBy: 1,
-		pathAsyncPollPending: 1,
+		pathAsyncPollPending: 1, pathCreateRequested: 5,
 	}
 	names := map[recheckPath]string{
 		pathNoCreateVerbAdopt: "pathNoCreateVerbAdopt", pathReferentMissingDispatch: "pathReferentMissingDispatch",
@@ -149,7 +149,7 @@ func TestProductionAsksTheRuleAtEveryHintSite(t *testing.T) {
 		}
 		handSet += len(regexp.MustCompile(`RecheckAfter:`).FindAllString(s, -1))
 	}
-	assert.Equal(t, 7, handSet, "RecheckAfter is set only by recheckAfter(...) calls, one per hint site")
+	assert.Equal(t, 12, handSet, "RecheckAfter is set only by recheckAfter(...) calls, one per hint site")
 }
 
 // THE CENSUS. Every ExternalObservation and CreateResult literal in production code is classified, and
@@ -177,11 +177,10 @@ func TestEveryReturnSiteIsClassified(t *testing.T) {
 		"no hint: dispatch token not yet visible, issue 947":                              1,
 	}
 	create := map[string]int{
-		"hint: referent missing x2, no create verb with findby (gated)": 3,
-		"no hint: returns an error":                                     22,
-		"no hint: create requested this pass":                           5,
-		"no hint: authorization denied":                                 1,
-		"no hint: being deleted":                                        1,
+		"hint: referent missing x2, no create verb with findby (gated), create requested x5": 8,
+		"no hint: returns an error":     22,
+		"no hint: authorization denied": 1,
+		"no hint: being deleted":        1,
 	}
 	sum := func(m map[string]int) (n int) {
 		for _, v := range m {
@@ -193,7 +192,7 @@ func TestEveryReturnSiteIsClassified(t *testing.T) {
 	assert.Equal(t, sum(observe), obs, "an ExternalObservation return site is unclassified: decide hint or no hint and add it to this table")
 	assert.Equal(t, 32, cre, "CreateResult sites in production source")
 	assert.Equal(t, sum(create), cre, "a CreateResult return site is unclassified: decide hint or no hint and add it to this table")
-	hint := 4 + 3
+	hint := 4 + 8
 	assert.Equal(t, 137, obs+cre)
-	assert.Equal(t, 130, obs+cre-hint, "hint + no-hint must equal the total")
+	assert.Equal(t, 125, obs+cre-hint, "hint + no-hint must equal the total")
 }

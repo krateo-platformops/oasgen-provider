@@ -60,6 +60,15 @@ const (
 	// pathAsyncPollPending: a requeue-based async operation is still pending. Nothing else schedules the
 	// next poll, which is the same gap as the others in a second place.
 	pathAsyncPollPending
+	// pathCreateRequested: a create was issued this pass and returned nil. This is issue 648's own
+	// headline: handleCreate returns nil and enqueues no observe, so a healthy resource reads
+	// Ready=False/Creating until the next watch event or resync (a consumer measured 153.1s to the first
+	// GET). The vendor finishing, and the observe that reports it, need nobody to act.
+	//
+	// THE BROADEST ROW: it fires on EVERY successful create. The cost is one extra cheap Observe per
+	// created resource, against a healthy resource otherwise reporting Ready=False/Creating for up to a
+	// full resync. Ungated: a create just happened, so definitionCanSettle is true by construction.
+	pathCreateRequested
 
 	// --- NO HINT ---
 
@@ -86,10 +95,6 @@ const (
 	pathCorrelationTokenMissing
 	// pathBeingDeleted: the object is being deleted; waiting for it to settle is moot.
 	pathBeingDeleted
-	// pathCreateRequested: the create was issued this pass. The act happened here, so the rule excludes it.
-	// NOTE: the settling that follows is issue 648's own scope; this row is the one to revisit for it.
-	pathCreateRequested
-
 	// pathCount is the number of paths; the test requires a policy row for every one below it.
 	pathCount
 )
@@ -119,7 +124,7 @@ var recheckPolicy = map[recheckPath]recheckRule{
 	pathDriftNotConverging:        {name: "drift not converging"},
 	pathCorrelationTokenMissing:   {name: "correlation token missing"},
 	pathBeingDeleted:              {name: "being deleted"},
-	pathCreateRequested:           {name: "create requested this pass"},
+	pathCreateRequested:           {name: "create requested this pass (issue 648)", hint: true},
 }
 
 // recheckAfter is the single place a hint is decided. Production returns call it; nothing sets
@@ -136,7 +141,11 @@ func recheckAfter(p recheckPath, r *getter.Resource) time.Duration {
 }
 
 // definitionCanSettle reports whether anything could ever settle a kind that is waiting: it declares a way
-// to create (a create verb, a createApiRef or a dispatch verb) or a findby to adopt by. A kind with
+// to create (a create verb, a createApiRef or a dispatch verb) or a findby to adopt by.
+//
+// createApiRef and dispatch COUNT as ways to create, and must not be narrowed back to "a create verb": a
+// createApiRef kind delegates its creation to a RESTAction and a dispatch kind creates by dispatching, so
+// both can settle on their own and neither is waiting on an author. A kind with
 // neither has nothing that can ever make it exist, so it is waiting on an author, not on time.
 //
 // ONE predicate, called by both the create side and the observe side, because they must agree about one
