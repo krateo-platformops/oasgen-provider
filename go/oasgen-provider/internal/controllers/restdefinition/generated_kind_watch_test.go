@@ -4,6 +4,7 @@ package restdefinition
 
 import (
 	"context"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"testing"
 
 	"github.com/krateo-platformops/oasgen-provider/apis"
@@ -56,7 +57,7 @@ func TestAnInstanceEnqueuesTheRestDefinitionThatGeneratedItsKind(t *testing.T) {
 	rd := rdFor("pullrequest", "github.krateo.io", "PullRequest")
 	kube := mapperKube(t, rd)
 
-	reqs := enqueueRestDefinitionForGeneratedKind(kube)(context.Background(),
+	reqs := enqueueRestDefinitionForGeneratedKind(kube, logging.NewNopLogger())(context.Background(),
 		instanceOf("github.krateo.io", resourceVersion, "PullRequest", "team-a", "pr-1"))
 
 	require.Len(t, reqs, 1, "exactly the owning RestDefinition")
@@ -80,7 +81,7 @@ func TestAnInstanceOfAnUnrelatedKindEnqueuesNothing(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			reqs := enqueueRestDefinitionForGeneratedKind(kube)(context.Background(),
+			reqs := enqueueRestDefinitionForGeneratedKind(kube, logging.NewNopLogger())(context.Background(),
 				instanceOf(c.group, resourceVersion, c.kind, "team-a", "x"))
 			require.Empty(t, reqs,
 				"an unrelated event must enqueue nothing; reconciling the fleet on any instance change "+
@@ -98,7 +99,7 @@ func TestOnlyTheOwningRestDefinitionIsEnqueued(t *testing.T) {
 		rdFor("repo", "github.krateo.io", "Repository"),
 	)
 
-	reqs := enqueueRestDefinitionForGeneratedKind(kube)(context.Background(),
+	reqs := enqueueRestDefinitionForGeneratedKind(kube, logging.NewNopLogger())(context.Background(),
 		instanceOf("github.krateo.io", resourceVersion, "Issue", "team-a", "i-1"))
 
 	require.Len(t, reqs, 1)
@@ -113,7 +114,7 @@ func TestALowercaseKindStillMatchesTheServedKind(t *testing.T) {
 	rd := rdFor("pullrequest", "github.krateo.io", "pullRequest") // as the author wrote it
 	kube := mapperKube(t, rd)
 
-	reqs := enqueueRestDefinitionForGeneratedKind(kube)(context.Background(),
+	reqs := enqueueRestDefinitionForGeneratedKind(kube, logging.NewNopLogger())(context.Background(),
 		instanceOf("github.krateo.io", resourceVersion, "PullRequest", "team-a", "pr-1")) // as served
 
 	require.Len(t, reqs, 1,
@@ -124,7 +125,7 @@ func TestALowercaseKindStillMatchesTheServedKind(t *testing.T) {
 // An event for a kind no RestDefinition generates must be harmless, not a panic or a fleet-wide enqueue.
 func TestAnEventWithNoMatchingRestDefinitionIsHarmless(t *testing.T) {
 	kube := mapperKube(t)
-	reqs := enqueueRestDefinitionForGeneratedKind(kube)(context.Background(),
+	reqs := enqueueRestDefinitionForGeneratedKind(kube, logging.NewNopLogger())(context.Background(),
 		instanceOf("unknown.krateo.io", "v1", "Mystery", "team-a", "m-1"))
 	require.Empty(t, reqs)
 }

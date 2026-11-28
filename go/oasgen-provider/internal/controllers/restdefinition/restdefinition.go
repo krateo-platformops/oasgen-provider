@@ -311,7 +311,11 @@ func (e *external) ensureGeneratedKindWatch(cr *definitionv1alpha1.RestDefinitio
 	if gvk.Kind == "" {
 		return
 	}
-	if err := e.genWatch.EnsureWatch(e.ctrl, gvk, enqueueRestDefinitionForGeneratedKind(e.kube)); err != nil {
+	alreadyPresent := e.genWatch.Watching(gvk)
+	err := e.genWatch.EnsureWatch(e.ctrl, gvk, enqueueRestDefinitionForGeneratedKind(e.kube, e.log))
+	e.log.Debug("Dynamic watch EnsureWatch", "registry", "generated", "gvk", gvk.String(),
+		"alreadyPresent", alreadyPresent, "registered", err == nil, "error", err)
+	if err != nil {
 		e.log.Debug("Dynamic watch registration on generated Kind deferred", "gvk", gvk.String(), "error", err)
 	}
 }
@@ -327,13 +331,14 @@ func (e *external) ensureGeneratedKindWatch(cr *definitionv1alpha1.RestDefinitio
 // The version comes from observedVersion, not from re-deriving it: Observe and the collector both use the
 // DEPLOYED version, and a mid-flight bump would otherwise make the watch disagree with them about which
 // Kind an instance belongs to.
-func enqueueRestDefinitionForGeneratedKind(kube client.Client) handler.MapFunc {
+func enqueueRestDefinitionForGeneratedKind(kube client.Client, log logging.Logger) handler.MapFunc {
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		gvk := obj.GetObjectKind().GroupVersionKind()
 		var rds definitionv1alpha1.RestDefinitionList
 		if err := kube.List(ctx, &rds); err != nil {
+			log.Debug("Dynamic watch map function: RestDefinition list failed", "registry", "generated", "objectGVK", gvk.String(), "error", err)
 			return nil
 		}
-		gvk := obj.GetObjectKind().GroupVersionKind()
 		var reqs []reconcile.Request
 		for i := range rds.Items {
 			rd := &rds.Items[i]
@@ -346,6 +351,8 @@ func enqueueRestDefinitionForGeneratedKind(kube client.Client) handler.MapFunc {
 				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rd)})
 			}
 		}
+		log.Debug("Dynamic watch map function fired", "registry", "generated", "objectGVK", gvk.String(),
+			"matched", len(reqs), "listed", len(rds.Items))
 		return reqs
 	}
 }
@@ -355,7 +362,11 @@ func (e *external) ensureConfigurationWatch(cr *definitionv1alpha1.RestDefinitio
 		return // not wired for dynamic watches (e.g. under unit tests)
 	}
 	cfgGVK := getConfigurationGVK(cr)
-	if err := e.cfgWatch.EnsureWatch(e.ctrl, cfgGVK, enqueueRestDefinitionForConfiguration(e.kube)); err != nil {
+	alreadyPresent := e.cfgWatch.Watching(cfgGVK)
+	err := e.cfgWatch.EnsureWatch(e.ctrl, cfgGVK, enqueueRestDefinitionForConfiguration(e.kube, e.log))
+	e.log.Debug("Dynamic watch EnsureWatch", "registry", "configuration", "gvk", cfgGVK.String(),
+		"alreadyPresent", alreadyPresent, "registered", err == nil, "error", err)
+	if err != nil {
 		e.log.Debug("Dynamic watch registration on Configuration Kind deferred", "gvk", cfgGVK.String(), "error", err)
 	}
 }
@@ -367,19 +378,22 @@ func (e *external) ensureConfigurationWatch(cr *definitionv1alpha1.RestDefinitio
 // arbitrary namespace" as the intended design, so neither is the RestDefinition/Configuration relationship
 // itself assumed same-namespace here), mirroring core-provider's compositionmirror.go
 // enqueueCDForComposition, the precedent this mechanism is modeled on.
-func enqueueRestDefinitionForConfiguration(kube client.Client) handler.MapFunc {
+func enqueueRestDefinitionForConfiguration(kube client.Client, log logging.Logger) handler.MapFunc {
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		gvk := obj.GetObjectKind().GroupVersionKind()
 		var rds definitionv1alpha1.RestDefinitionList
 		if err := kube.List(ctx, &rds); err != nil {
+			log.Debug("Dynamic watch map function: RestDefinition list failed", "registry", "configuration", "objectGVK", gvk.String(), "error", err)
 			return nil
 		}
-		gvk := obj.GetObjectKind().GroupVersionKind()
 		var reqs []reconcile.Request
 		for i := range rds.Items {
 			if getConfigurationGVK(&rds.Items[i]) == gvk {
 				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&rds.Items[i])})
 			}
 		}
+		log.Debug("Dynamic watch map function fired", "registry", "configuration", "objectGVK", gvk.String(),
+			"matched", len(reqs), "listed", len(rds.Items))
 		return reqs
 	}
 }

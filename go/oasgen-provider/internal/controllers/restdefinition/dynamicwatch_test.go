@@ -2,6 +2,7 @@ package restdefinition
 
 import (
 	"context"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"testing"
 
 	definitionv1alpha1 "github.com/krateo-platformops/oasgen-provider/apis/restdefinitions/v1alpha1"
@@ -46,7 +47,7 @@ func TestEnqueueRestDefinitionForConfiguration_MatchesOwningRestDefinition(t *te
 	unrelated := newRestDefinition("ns2", "gadgets", "gadgets.example.io", "Gadget")
 	kube := fake.NewClientBuilder().WithScheme(rdScheme(t)).WithObjects(owner, unrelated).Build()
 
-	reqs := enqueueRestDefinitionForConfiguration(kube)(context.Background(), configurationEvent("widgets.example.io", "Widget"))
+	reqs := enqueueRestDefinitionForConfiguration(kube, logging.NewNopLogger())(context.Background(), configurationEvent("widgets.example.io", "Widget"))
 
 	if len(reqs) != 1 {
 		t.Fatalf("expected exactly one match, got %d: %v", len(reqs), reqs)
@@ -60,7 +61,7 @@ func TestEnqueueRestDefinitionForConfiguration_NoMatch(t *testing.T) {
 	unrelated := newRestDefinition("ns2", "gadgets", "gadgets.example.io", "Gadget")
 	kube := fake.NewClientBuilder().WithScheme(rdScheme(t)).WithObjects(unrelated).Build()
 
-	reqs := enqueueRestDefinitionForConfiguration(kube)(context.Background(), configurationEvent("widgets.example.io", "Widget"))
+	reqs := enqueueRestDefinitionForConfiguration(kube, logging.NewNopLogger())(context.Background(), configurationEvent("widgets.example.io", "Widget"))
 
 	if len(reqs) != 0 {
 		t.Fatalf("expected no matches, got %v", reqs)
