@@ -1203,6 +1203,43 @@ type Resource struct {
 	// apiserver prunes the field from stored CRs without consulting this provider, so refusing the edit would
 	// not protect anything that is not already at risk; the author is the only one who can say whether the
 	// field is still wanted.
+	//
+	// WHAT THE EXCLUSION IS APPLIED TO: the MERGED, FINISHED spec, not the raw create-verb schema. The
+	// generator starts from the request body of the verb that defines the resource (create, then dispatch,
+	// then update only when neither of those is declared, #236), then mutates it in a fixed order:
+	// addParametersToSpec merges the path and query parameters of EVERY verb into it, configurationRef is
+	// added, configurationFields are pulled out, and only THEN does the exclusion run. A path names a
+	// property of that result, wherever it came from. Three readings of these semantics have been wrong
+	// because nothing here said so, and one of them explained a missing `uuid` by two different mechanisms
+	// and retracted both.
+	//
+	// The consequence authors need. A field that is in neither the create body NOR any verb's parameters is
+	// not in the spec, so excluding it removes nothing. An OPTIONAL parameter that only get or update
+	// declares (a query parameter, say) DOES enter the spec and IS removed by an exclusion naming it. A
+	// REQUIRED parameter -- every path parameter is one -- is NOT removed: excluding it would leave a kind
+	// that cannot build its own request URL, so generation warns instead (#410) and keeps the property,
+	// unless the status schema can supply it (it is an identifier or an additionalStatusField), in which
+	// case the exclusion removes it as usual.
+	//
+	// A no-op entry WARNS rather than failing: a SchemaGenerationError with code CodeFieldNotFound, "field
+	// '<name>' set in excludedSpecFields not found in schema". includedSpecFields is the opposite on the
+	// same mistake -- an entry that matches nothing is FATAL there -- and the two are mutually exclusive at
+	// admission, so a list is one or the other.
+	//
+	// AN ABSENT WARNING DOES NOT PROVE THE FIELD WAS REMOVED. Three cases are silent: (1) a ONE-segment
+	// exclusion that a request-direction fieldMapping already supplies is suppressed on purpose (#484) --
+	// the mapping omitted the parameter from the spec, the two declarations are meant to coexist, and the
+	// exclusion is inert because the mapping did the job; (2) an empty list returns before looking at
+	// anything; (3) a required parameter that status cannot satisfy gets the #410 warning above, a
+	// DIFFERENT message from the not-found one, and is not removed. Read the warning text, not only its
+	// presence or absence.
+	//
+	// THE INVERSE HOLDS TOO: an absent warning does not prove an exclusion is PRESENT either, and a property
+	// missing from the generated spec is NOT evidence that excludedSpecFields removed it. The commonest other
+	// cause is a request-direction fieldMapping supplying that parameter, which omits its own spec property;
+	// the field may also simply not be in the create body or in any verb's parameters. Before suspecting an
+	// exclusion, check in this order: is the field in the create body or a verb parameter at all, and does a
+	// fieldMapping supply it? Only then look at this list.
 	// +optional
 	ExcludedSpecFields []string `json:"excludedSpecFields,omitempty"`
 	// IncludedSpecFields: the ALLOWLIST counterpart of excludedSpecFields. When set, the generated spec keeps
