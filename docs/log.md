@@ -26,6 +26,76 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-28 — 1.0.1
+
+One behavioural change, and it is a fix that has not yet been exercised on a live cluster by anyone.
+Two documentation-only commits ride along.
+
+### The update body is pruned recursively against the update schema (#963, issue 960)
+
+A field that the CREATE schema declares and the UPDATE schema omits was being sent on every update. The
+filter that was meant to exclude it looked only at top-level keys: `RequestedBody` builds its set with a
+flat loop over `schema.Properties`, and `processFields` then assigned the **whole** nested value under a
+top-level key whenever that key was in the set. A nested field absent from the update schema therefore
+travelled inside a parent that was present. `handleUpdate` has no drift gate (the `!ResourceUpToDate`
+check is on the observe route only), so the extra field was sent on **every** spec edit, not only when
+it had changed.
+
+The reported shape was flat keys whose *names* contain a colon, inside a `network` envelope: the create
+schema declares `provider:network_type`, `provider:physical_network` and `provider:segmentation_id`, the
+update schema deliberately does not, and the vendor runs its segmentation-id update path whenever that
+key is in the body, even unchanged. The KOG author had left those keys out on purpose so that
+`compareScope: updatable` would not treat them as drift; the top-level-only filter silently defeated
+that intent.
+
+The prune is now recursive and is applied after the two `processFields` calls and before the field
+mappings, so an explicit `inBody` mapping, which is a deliberate instruction, is never pruned by a schema
+check. It is carried as a separate tree (`restclient.BodyShape`, keyed by exact strings, never a path
+format, so a colon is just a character) rather than by reshaping `RequestedBody`, because that flat set
+has a second consumer: `updateBodyFields` feeds issue 400's unmodelled-key detection, which compares
+top-level keys against the vendor's top-level response keys. That function is unchanged. The prune
+copies and never mutates, because assembled values alias the CR object.
+
+What it handles: nested fields, colon-named flat keys, arrays of objects pruned per element, `$ref`
+resolution, `oneOf` branch union, and retention of `required` from `allOf` members at any depth. Free-form
+objects (`additionalProperties: true`, bare `type: object`) pass through whole. The depth cap is 20 and
+fails open: past it a sub-tree passes through unpruned, so a self-referential schema degrades to the old
+behaviour, not an empty body.
+
+Seven `TestPrune_*` tests fail against the old code and pass after. A **revert control** was run:
+production change removed, tests kept, 15 run, 7 fail, 8 pass; restored, 15 of 15 pass. The eight that
+passed against the old code pin non-pruning or existing behaviour, so nothing expected to fail passed.
+Two of the seven, the `required` tests, fail before the fix on their *control* assertion (an unlisted,
+non-required key must be pruned); their retention assertions pass both before and after, which is the
+point of that clause.
+
+> `Note (2026-11-28)` **#963 is CI-green and has never been exercised on a cluster.** A consumer fleet's
+> 12-of-12 suite run (PASS=194, FAIL=0) validated **1.0.0**, which does not contain it. That fleet
+> pointed out that its own suites exercise the **update** path, so a 1.0.1 pin needs its own run. It was
+> correcting a statement made to it that 1.0.1 "does not touch the create or observe path": true, and
+> the wrong surface to name, because the surface this release changes is the one those suites use most.
+>
+> **One test is still not run anywhere but CI:** `TestUpdateBodyFieldsIsUnchangedByTheBodyPrune`.
+> `internal/controllers` has a `TestMain` that provisions a kind cluster and refuses to run locally, so a
+> local `-run` prints 0 RUN and exits 0. The package-wide `./internal/tools/client/...` and
+> `./internal/controllers/...` suites were likewise not run locally.
+
+A known interaction, recorded in issue 962 rather than established here: `mergePartialFields` runs after
+`BuildCallConfig`, so for a kind declaring `partialFields` on a containing field, a nested key this prune
+removes is replayed from the vendor's current value instead of sent from the CR. Issue 962, as filed on
+2026-11-28, records that no shipped kind has that shape and that the chain was read from the code, not
+measured; both statements date from that filing and expire with it.
+
+### Two records corrected in place, no behaviour (#965, #966)
+
+#965 records, in a test's own comment, that an external consumer pins its release-safety instrument to
+that test's four expected auth-secret paths, so changing the set changes what that instrument checks.
+
+#966 corrects the causal account of the 0.85.1 retraction. It had blamed an unconditional `toYaml` line,
+but 0.84.0 emits the identical line and is fine, because the key is absent there. The defect was a new
+`{}` default meeting an old latent construct, not the line. #966 also records that 0.85.2's remedy is
+verified rather than predicted, by two consumer real-cluster runs, and labels that evidence **indirect**.
+
 ## 2026-11-28 — 1.0.0
 
 Two corrections, both found by a consumer fleet asking a better question than the one it was
