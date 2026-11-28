@@ -40,9 +40,11 @@ Details and the local-render recipe: [docs/usage.md](docs/usage.md).
 ### Upgrading: check `retracted-versions.yaml`
 
 [`retracted-versions.yaml`](retracted-versions.yaml) at the repo root is the authoritative list of
-retracted releases. Each entry names the `version`, the `use:` replacement, and the `reason`. A tag
-cannot be withdrawn, so a retracted release still installs; the file is the only place that says not
-to. It is a list in a file, not in prose here, so it cannot go stale in this README.
+retracted releases. Each entry names the `version`, the `use:` replacement, and the `reason`. The
+file's own header says a tag cannot be withdrawn, so a retracted release still installs. This
+repo's release workflows and the installer's CI both read the file, so it is enforced in more than
+one place, but it is the single source those checks agree on. The list lives in the file, not in
+prose here, so it cannot go stale in this README.
 
 **Move directly to the target version; do not step through intermediate releases.** Stepping is
 the habit that is strongest exactly when a change is risky, and it is what lands on a retracted
