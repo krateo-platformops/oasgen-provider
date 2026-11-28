@@ -303,23 +303,54 @@ retracted:
       UNSIGNED. The vendor's own OpenAPI document does list `secret` in both PATCH configs.
       WHY IT IS SILENT: the PATCH succeeds, the CR reaches Ready, and the secret is gone. No error, no
       condition, no event. A consumer cannot discover the exposure without running the census.
-      THE REMEDY IS A PREDICTION, NOT A VERIFIED FIX. An explicit `inBody` field mapping on the update
-      verb should restore the field, because the prune deliberately runs BEFORE the mappings.
-      builder.go's own comment at tag 1.0.1 (:205-209) says the mappings "are an author's explicit
-      instruction and must still write unconditionally, so they run AFTER the prune: a schema check must
-      not override a deliberate inBody." Two semantics, CODE-DERIVED at tag 1.0.1 and not runtime-verified:
-      an absent source skips (builder.go:416-419, `pathparsing.GetTyped` returns a `found` flag and the
-      branch is `if err != nil || !found { continue }`, so no null, no empty string, no error, and an
-      optional field stays expressible); and a nested destination merges (`pathparsing.SetNestedField`,
-      the map case at nested.go ~:142-150, takes the existing child and replaces it only when
-      `containerMatches` fails, i.e. when absent or type-mismatched, so sibling keys survive).
-      nested.go is byte-identical from 0.76.0 through 1.0.1 (same sha, load-bearing lines at the same
-      numbers), so that behaviour is unchanged across the range.
-      THE MAPPING HAS NOT BEEN DEMONSTRATED ON A CLUSTER. A consumer fleet has designed the arm, a
-      delivery-signature check of 1.0.1 against 1.0.1-plus-the-mapping with 1.0.0 as the control, and it
-      has not run. Per this file's own rule, `use:` names a known-good fallback and not a verified
-      upgrade target: 1.0.0 does not contain the change, and the mapping is a remedy this entry is
-      predicting, which is the half of an entry that has been wrong twice before (see 0.85.0).
+      THE REMEDY IS DEMONSTRATED ON A CLUSTER. An explicit `inBody` field mapping on the update verb
+      restores the field, because the prune deliberately runs BEFORE the mappings. builder.go's own
+      comment at tag 1.0.1 (:205-209) says the mappings "are an author's explicit instruction and must
+      still write unconditionally, so they run AFTER the prune: a schema check must not override a
+      deliberate inBody."
+      MEASURED, attributed and not absorbed. A consumer fleet's third run, 20:59-21:11Z, four arms. Each
+      ping read a distinct delivery id; the signature was checked exactly against the configured secret
+      S; `content_type` was json throughout, deliberately, because a form-encoded ping signs the form
+      body and could only have read "present, unverified". `specSecret` says whether the CR declared the
+      field.
+        arm  oasgen  chart  specSecret  ping1    ping2 (after an events edit)  vendor GET config.secret after
+        A    1.0.0   main   yes         S        S                             ********
+        B    1.0.1   main   yes         S        ABSENT                        <absent>
+        C    1.0.1   fix    yes         S        S                             ********
+        D    1.0.1   fix    no          ABSENT   ABSENT                        <absent>
+      A is the control: on 1.0.0 the signature survives the edit and the vendor still holds the secret.
+      B reproduces the defect on 1.0.1 with the current chart: signed before the edit, unsigned after,
+      and the vendor's own GET shows the secret gone. C demonstrates the remedy: 1.0.1 plus an explicit
+      `inBody` mapping for the field on the update verb is signed before and after, and the secret is
+      still present at the vendor. D is the optional-field case: the same fix chart with no secret
+      declared in the CR is unsigned throughout and absent at the vendor, which is CORRECT, because a
+      webhook with no secret has unsigned deliveries by definition. B and D both read unsigned but are
+      different: B declared the field and lost it; D never declared it. Without the `specSecret` column
+      the two arms share a reading. In every arm the PATCH reached the vendor within 10-20 s, the CR read
+      Synced=True/ReconcileSuccess, and the controller logged zero error or fail lines for it.
+      The two code-derived semantics are the MECHANISM, now corroborated at runtime. An absent source
+      skips (builder.go:416-419, `pathparsing.GetTyped` returns a `found` flag and the branch is
+      `if err != nil || !found { continue }`, so no null, no empty string, no error, and an optional
+      field stays expressible): arm D is the runtime evidence for it. A nested destination merges
+      (`pathparsing.SetNestedField`, the map case at nested.go ~:142-150, takes the existing child and
+      replaces it only when `containerMatches` fails, i.e. when absent or type-mismatched, so sibling
+      keys survive): arm C is the runtime evidence for it. nested.go is byte-identical from 0.76.0
+      through 1.0.1 (same sha, load-bearing lines at the same numbers), so that behaviour is unchanged
+      across the range.
+      CAVEATS ON THE MEASUREMENT. (1) D's Ready assertion did not read True at the snapshot: it read
+      False/Updating. A, B and C show the same transient at the same moment, the 1.0.0 control
+      included, so the mapping does not cause it. In an earlier run D's after-edit snapshot read
+      Ready=True/Available. Cite it as: Synced True, no error; Ready transient at the snapshot, True in
+      an earlier run. It is NOT a clean Ready assertion. (2) Two earlier runs are not counted. One had a
+      race in the before/after delivery-list diff that let a second ping re-read the first ping's
+      delivery; the other stopped early on a tooling bug in the harness. Both were fixed: pings are now
+      matched by `delivered_at` and already-used ids are excluded. (3) The org-level counterpart kind is
+      NOT MEASURED. It carries the same mapping and the same code path, but the test was limited to
+      repo-level writes; it is unmeasured, not implied by sameness.
+      `use:` STAYS "1.0.0" although the remedy is demonstrated: the remedy requires a change in each
+      affected consumer's chart, so an unmodified consumer on 1.0.1 is still exposed, and a demonstrated
+      remedy does not make the version safe to pin blind. Per this file's own rule, `use:` names a
+      known-good fallback and not a verified upgrade target: 1.0.0 does not contain the change.
       Note (2026-11-28): the exposed pattern is "a write-only field removed from an update schema to
       suppress drift comparison". Any kind using it is affected, the symptom is silent, and the census is
       the only detector. To run it, from go/rest-dynamic-controller:
