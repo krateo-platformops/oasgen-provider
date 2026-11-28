@@ -282,8 +282,9 @@ type external struct {
 // There is no corresponding "unwatch": controller-runtime has no primitive to remove a registered source
 // from a running controller (the same limitation and tradeoff documented on core-provider's
 // compositionmirror.go, which this mechanism is modeled on). A watch on a Configuration Kind whose
-// RestDefinition is later deleted is harmless (its informer idles) but is never released for the life of
-// the process.
+// CRD is later deleted is NOT harmless and does NOT idle: it is never released, and it keeps retrying at
+// ERROR level for the life of the process. See the measured cost on ensureGeneratedKindWatch below; it
+// applies identically here, because both registries are the same dynamicwatch.Registry.
 // ensureGeneratedKindWatch registers a dynamic watch on the Kind this RestDefinition generates, so an
 // instance appearing or being deleted enqueues the RestDefinition (issue 510).
 //
@@ -302,7 +303,25 @@ type external struct {
 //
 // Same "no unwatch" caveat as the Configuration watch: controller-runtime cannot remove a registered
 // source from a running controller, so a watch on a generated Kind whose RestDefinition is later deleted
-// idles for the life of the process.
+// is never released for the life of the process. It does NOT go quiet, though. Once the CRD is gone the
+// watch keeps retrying and logs "Failed to watch ... the server could not find the requested resource" at
+// ERROR level (logger controller-runtime/cache/UnhandledError), forever, and each leaked GVK also holds
+// one reflector goroutine and one connection.
+//
+// MEASURED on a consumer fleet's live cluster, from this manager's own log stream: 3,954 of 20,522 lines
+// were that message, 3,262 of them from one consumer's probe kinds (64 distinct GVKs), at roughly 86
+// lines/minute, still going 2.5 days after those CRDs were deleted. The manager pod had started BEFORE the
+// CRDs were created, so they were created and deleted under this one process. 64 leaked GVKs came from a
+// single session's probe definitions.
+//
+// WHAT MAKES IT A LEAK AND NOT A CONNECTIVITY SYMPTOM: the same consumer's OTHER kinds showed the
+// transient version (692 lines over about 15 minutes while their CRDs were absent) and it STOPPED when
+// those CRDs were recreated. A CRD that comes back recovers; only a permanently deleted CRD leaks.
+//
+// WHERE THE FIX LIVES: the registry is plumbing's kubeutil/dynamicwatch (imported above, constructed in
+// New). It exposes NewRegistry / EnsureWatch / EnsureMetadataWatch / Watching / WatchingMetadata and
+// nothing matching Remove, Stop, Unwatch or Delete, so no caller can drop a registration. Filed as
+// plumbing#240, tracked here as issue 952.
 func (e *external) ensureGeneratedKindWatch(cr *definitionv1alpha1.RestDefinition, gvr schema.GroupVersionResource) {
 	if e.ctrl == nil || e.genWatch == nil {
 		return // not wired for dynamic watches (e.g. under unit tests)
