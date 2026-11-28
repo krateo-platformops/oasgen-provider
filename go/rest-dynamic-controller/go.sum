@@ -112,8 +112,8 @@ github.com/krateo-platformops/libopenapi v0.21.9 h1:2qjMmrRc7oyvxoGjx8zDhYQIGTji
 github.com/krateo-platformops/libopenapi v0.21.9/go.mod h1:Gc8oQkjr2InxwumK0zOBtKN9gIlv9L2VmSVIUk2YxcU=
 github.com/krateo-platformops/plumbing v1.101.0 h1:5EmwF6BIJN9wZpdESNazJHWgMrG1lUXp2BQon0xXOyk=
 github.com/krateo-platformops/plumbing v1.101.0/go.mod h1:kQg/K9V+Uq8Eb/5cgbnsChE1c/UxgLrqr9AyDhUGX5o=
-github.com/krateo-platformops/unstructured-runtime v1.35.0 h1:ON4cfl/Ag1YBiuWT9Wwf/95ApntrH+LPAMumTAhDCsk=
-github.com/krateo-platformops/unstructured-runtime v1.35.0/go.mod h1:1VBmqhYtgeRzHNYjl60ZoHEZzAKlm38lkP9YZrZLwAM=
+github.com/krateo-platformops/unstructured-runtime v1.35.1 h1:Hy5wFwrnsAWgwOlKq5Ivr9G6qMDMrd1M/SVdPqdz0oM=
+github.com/krateo-platformops/unstructured-runtime v1.35.1/go.mod h1:1VBmqhYtgeRzHNYjl60ZoHEZzAKlm38lkP9YZrZLwAM=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/mailru/easyjson v0.9.0 h1:PrnmzHw7262yW8sTBwxi1PdJA3Iw/EKBa8psRf7d9a4=
