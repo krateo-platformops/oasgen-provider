@@ -305,7 +305,7 @@ retracted:
       condition, no event. A consumer cannot discover the exposure without running the census.
       THE REMEDY IS A PREDICTION, NOT A VERIFIED FIX. An explicit `inBody` field mapping on the update
       verb should restore the field, because the prune deliberately runs BEFORE the mappings.
-      builder.go's own comment at tag 1.0.1 (around :203-207) says the mappings "are an author's explicit
+      builder.go's own comment at tag 1.0.1 (:205-209) says the mappings "are an author's explicit
       instruction and must still write unconditionally, so they run AFTER the prune: a schema check must
       not override a deliberate inBody." Two semantics, CODE-DERIVED at tag 1.0.1 and not runtime-verified:
       an absent source skips (builder.go:416-419, `pathparsing.GetTyped` returns a `found` flag and the
