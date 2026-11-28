@@ -26,6 +26,64 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-28 — 0.99.0
+
+Three changes, all about **a controller saying what it is doing**: one so the runtime stops making a
+healthy resource look unhealthy, one so a leaked watch is visible, and one so an upgrader is told which
+versions they must not step through.
+
+### The runtime is told when an outcome settles without anyone acting (#648, via unstructured-runtime #132)
+
+The runtime pin moves `v1.34.0` → `v1.35.0`. `handleCreate` returns `nil` with **no enqueued observe**, so
+a resource whose create succeeded was not re-read until the next periodic resync — up to three minutes of
+`Ready=False` / `Creating` on a resource that was already healthy. A consumer measured **153.1 seconds to
+the first GET.**
+
+This release sets `RecheckAfter` on the paths where the outcome changes **without anyone acting** — a
+dispatch that has not yet reported, a create awaiting confirmation — and deliberately **not** on the paths
+where it does not. The rule is a table, so a new return site has to be classified rather than inherit a
+default, and a test asserts every return site is in it.
+
+> `Note (2026-11-28)` A hint is not a deadline. It asks for an earlier re-read; it never shortens the time
+> a failure is allowed to take. The count-based deadline that *does* do that is issue 947, which is open.
+
+### A leaked dynamic watch is now visible, and the comment that said it "idles" was wrong (#953, #954, #952)
+
+`controller-runtime` cannot remove a registered source from a running controller, so a watch on a Kind
+whose CRD is deleted is never released. This repo's own comment said such a watch **"idles for the life of
+the process."** It does not.
+
+Measured on a consumer's live cluster, from this manager's own stream: **3,262 ERROR lines from 64 distinct
+GVKs, at roughly 86 a minute, still going 2.5 days after those CRDs were deleted.** What makes it a leak
+rather than a connectivity symptom: the same consumer's other kinds showed the transient version — 692
+lines over ~15 minutes — and **stopped when those CRDs were recreated.**
+
+The registry is `plumbing`'s `kubeutil/dynamicwatch`, which exposes no `Remove`, `Stop`, `Unwatch` or
+`Delete`, so **no caller can drop a registration**; filed upstream as `plumbing#240`. What this release can
+do is make the registrations and their match counts legible, which #953 does.
+
+> `Note (2026-11-28)` The correction landed in #954 and moved a comment as well as fixing it: the
+> Configuration watch's doc block had been sitting above `ensureGeneratedKindWatch`, so Go attributed it to
+> the wrong function and `ensureConfigurationWatch` had no doc at all. Measured with `go doc` before and
+> after: the text moved from one function to the other, and that function's doc went from 3 lines to 22.
+
+> `Note (2026-11-28)` These diagnostics are **Debug, and off by default.** The chart's gate is closed
+> unless `env.OASGEN_PROVIDER_DEBUG` is the string `"true"` (#931). Measured on both arms with a
+> gate-present control: defaults 0, opted in 1. Enabling nothing and expecting output gets nothing.
+
+> `Note (2026-11-28)` **Both commits in this section carry the wrong scope prefix.** #953 reads
+> `feat(rdc):` and #954 reads `docs(rdc):`, and every file either one changed is under
+> `go/oasgen-provider/`. The dynamic-watch registry belongs to the provider — it watches the Kinds the
+> provider generates — not to the rest-dynamic-controller. The subjects cannot be corrected on main; this
+> note is the correction.
+
+### An upgrader is pointed at the versions they must not land on (#950)
+
+`README.md` and `docs/configuration.md` now say to read `retracted-versions.yaml` before upgrading, and to
+**move directly to the target version rather than stepping through intermediate releases** — an incremental
+upgrader crossing the `0.84.0 → 0.85.2` window lands on `0.85.0` and `0.85.1`, both retracted. There is a
+second hole at `0.91.0`.
+
 ## 2026-11-28 — 0.98.0
 
 A runtime behaviour change and a documentation fix. **The behaviour change closes a measured
