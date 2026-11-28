@@ -26,6 +26,60 @@ kind of claim it is. The distinction is load-bearing: only the first means the t
 An unlabelled blockquote is a **quotation** — of a previous section, a code comment, or a peer — not an
 annotation about the release.
 
+## 2026-11-28 — 1.0.0
+
+Two corrections, both found by a consumer fleet asking a better question than the one it was
+asked. **Neither changes behaviour for any caller that was already correct.**
+
+The version number was chosen deliberately rather than derived: `1.00.0` was proposed and rejected,
+because semver forbids a leading zero in a numeric identifier and `1.00.0` would sort as a *different*
+version from `1.0.0`. `0.100.0` was the alternative — it sorts correctly after `0.99.0` and keeps every
+existing range constraint working. `1.0.0` was taken knowing that a consumer pinning `>=0.90.0 <1.0.0`
+stops receiving updates here by design; krateo's own installer pins exact strings, so no fleet in this
+ecosystem is affected, but an external range constraint needs widening.
+
+### `opts` is required, and seven guards that said otherwise are gone (#955)
+
+`restclient.Call` and its siblings took `opts *RequestConfiguration` and guarded it for nil in seven
+places — while dereferencing it unguarded on the path **every successful request takes**
+(`u.do(cli, req, opts.SensitiveValues, opts.CollectionRead)`). Since three consumer fleets run this
+daily, `opts` is never nil in practice, which means the derefs were safe and **the guards were the
+dead half.**
+
+**The hazard was the inverse of a missing nil check.** A reader of `if opts != nil` concludes nil is
+supported, writes a caller that passes nil, and that caller panics on its first *successful* request —
+not on an error path, where it might be noticed, but on the happy one.
+
+So the contract is now explicit: `Call`, `FindBy` and `CallForPagination` reject nil with
+`errNilRequestConfiguration`; `CallFindBySingle` delegates to `Call` on its first statement and
+`WalkPaginated` passes `opts` through without dereferencing it, so all five entry points are covered.
+Seven `if opts != nil` guards removed, their bodies kept unconditional.
+
+> `Note (2026-11-28)` The issue was filed with the opposite framing — that a nil `opts` would panic at
+> the body-snippet deref — and corrected on the issue before the fix. The deciding evidence is a THIRD
+> line neither the report nor the first reading mentioned: the unguarded deref on the unconditional
+> path. A report naming two lines was settled by looking for the one it did not name.
+
+### The confirm's absent branch has a timestamp (via unstructured-runtime v1.35.1)
+
+The pin moves `v1.35.0` → `v1.35.1`. The create-refusal confirm has three outcomes and only two logged:
+the adopt and the cannot-answer. The common "refused and still absent" path was silent by design, and
+that silence cost more than expected — a consumer measuring whether a vendor's own default object
+appeared *before or after* their create had no timestamp for the confirm and had to use the POST as a
+proxy, leaving a window in which a vendor write landing between the two reads as a miss.
+
+The new line carries `createFailedAt`, the refusal's own time, so a row states **which** refusal it
+confirmed rather than relying on log adjacency. It is Debug and **per attempt**, not one-shot: a
+one-shot line would timestamp only the first retry, and the residual duplicates that motivated it are
+the later ones.
+
+> `Note (2026-11-28)` **The bump is the deliverable, not the upstream tag.** A two-repo feature whose
+> halves release independently is not done until a consumer can pin it. That is this release's own
+> lesson applied: during 0.99.0 a consumer read `go.mod` at the newest *tag*, saw the older runtime, and
+> warned that the `RecheckAfter` hint would ship inert. Their ref was wrong — the bump rode inside the
+> same commit as the hint — but the question was one nobody had asked, and the go.mod now belongs in the
+> acceptance criteria of any cross-repo change.
+
 ## 2026-11-28 — 0.99.0
 
 Three changes, all about **a controller saying what it is doing**: one so the runtime stops making a

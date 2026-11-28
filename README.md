@@ -22,9 +22,9 @@ default), which pins both charts. Standalone:
 ```sh
 # The RestDefinition CRD first, then the provider:
 helm install oasgen-provider-crds oci://ghcr.io/krateo-platformops/charts/oasgen-provider-crds \
-  --version 0.99.0
+  --version 1.0.0
 helm install oasgen-provider oci://ghcr.io/krateo-platformops/charts/oasgen-provider \
-  --version 0.99.0 --namespace krateo-system --create-namespace
+  --version 1.0.0 --namespace krateo-system --create-namespace
 ```
 
 <!-- THE PIN ABOVE IS BUMPED IN THE `docs(log): cut the X.Y.Z section` PR, which is the last one merged
